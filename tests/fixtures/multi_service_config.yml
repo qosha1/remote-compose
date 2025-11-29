@@ -1,0 +1,51 @@
+services:
+  postgres:
+    cpu: "1024"
+    memory: "2048"
+    desired_count: 1
+    type: infrastructure
+  redis:
+    cpu: "256"
+    memory: "512"
+    desired_count: 1
+    type: infrastructure
+  django:
+    cpu: "2048"
+    memory: "4096"
+    desired_count: 1
+    type: application
+    health_check_path: /api/health/
+  celery-worker:
+    cpu: "1024"
+    memory: "2048"
+    desired_count: 1
+    type: worker
+  celery-beat:
+    cpu: "256"
+    memory: "512"
+    desired_count: 1
+    type: worker
+  celery-linkedin:
+    cpu: "2048"
+    memory: "4096"
+    desired_count: 1
+    type: worker
+  landing:
+    cpu: "512"
+    memory: "1024"
+    desired_count: 1
+    type: frontend
+  app:
+    cpu: "512"
+    memory: "1024"
+    desired_count: 1
+    type: frontend
+  nginx:
+    cpu: "256"
+    memory: "512"
+    desired_count: 1
+    type: proxy
+    public: true
+    port: 80
+    health_check_path: /health
+    default_target: true

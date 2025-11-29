@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+nosetests.xml
+
+# Django
+*.sqlite3
+*.db
+.django/
+.postgres/
+db.sqlite3
+media/
+staticfiles/
+static_collected/
+
+# Secrets and credentials — NEVER commit these
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.env
+*.env.*
+!*.env.example
+.env.local
+.env.production
+.env.staging
+secrets.yml
+secrets.yaml
+credentials.json
+service-account*.json
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+*.crt
+*.cer
+
+# AWS
+.aws/
+aws-credentials*
+
+# Encryption keys
+encryption.key
+*.fernet
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Local data
+*.sqlite3-journal
+*.bak
+*.dump
+*.sql
+
+# Claude Code
+.claude/
+
+# Misc
+*.pyc
+*.pyo
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/

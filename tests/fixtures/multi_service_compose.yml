@@ -1,0 +1,122 @@
+version: '3.8'
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+
+services:
+  postgres:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: myapp
+      POSTGRES_PASSWORD: CHANGE_ME_NOT_A_REAL_SECRET
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myapp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    depends_on:
+      - postgres
+
+  django:
+    build:
+      context: .
+      dockerfile: compose/production/django/Dockerfile
+    image: myapp_django
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgres://myapp:CHANGE_ME_NOT_A_REAL_SECRET@postgres:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      DJANGO_SECRET_KEY: CHANGE_ME_NOT_A_REAL_SECRET
+    ports:
+      - "5000:5000"
+    command: /start
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: compose/production/django/Dockerfile
+    image: myapp_django
+    depends_on:
+      - django
+    environment:
+      DATABASE_URL: postgres://myapp:CHANGE_ME_NOT_A_REAL_SECRET@postgres:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+    command: celery -A config.celery_app worker -l INFO --concurrency 4
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: compose/production/django/Dockerfile
+    image: myapp_django
+    depends_on:
+      - django
+    environment:
+      DATABASE_URL: postgres://myapp:CHANGE_ME_NOT_A_REAL_SECRET@postgres:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+    command: celery -A config.celery_app beat -l INFO
+
+  celery-linkedin:
+    build:
+      context: .
+      dockerfile: compose/production/django/Dockerfile
+    image: myapp_django
+    depends_on:
+      - django
+    environment:
+      DATABASE_URL: postgres://myapp:CHANGE_ME_NOT_A_REAL_SECRET@postgres:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+    shm_size: '2gb'
+    command: celery -A config.celery_app worker -l INFO -Q linkedin --concurrency 2
+
+  landing:
+    build:
+      context: ./landing
+      dockerfile: Dockerfile
+    image: myapp_landing
+    depends_on:
+      - django
+    ports:
+      - "3000:3000"
+
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: myapp_app
+    depends_on:
+      - django
+    ports:
+      - "3001:3001"
+
+  nginx:
+    build:
+      context: ./compose/production/nginx
+      dockerfile: Dockerfile
+    image: myapp_nginx
+    depends_on:
+      - django
+      - landing
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
