@@ -181,6 +181,14 @@ class ConvertToTaskDefinitionsStep(PipelineStep):
                 infrastructure_env=context.infrastructure_env,
             )
             for td in task_defs.values():
+                # Use update_or_create to handle re-deploys after partial failures
+                # where stale task defs with same (cluster, name, revision) exist.
+                from ....models import ECSTaskDefinition
+                existing = ECSTaskDefinition.objects.filter(
+                    cluster=td.cluster, name=td.name, revision=td.revision
+                ).first()
+                if existing:
+                    td.pk = existing.pk
                 td.save()
         except Exception as e:
             return StepResult.fail(

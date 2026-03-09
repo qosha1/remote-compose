@@ -316,6 +316,11 @@ class ComposeToECSConverter(BaseService):
                 efs_config=efs_config,
             )
 
+            # Per-service mode: each task has one container, so cross-container
+            # dependencies (from compose depends_on/links) are invalid in ECS.
+            container_def.pop('dependsOn', None)
+            container_def.pop('links', None)
+
             # Move matching env vars to ECS secrets list
             if secrets_arns and 'environment' in container_def:
                 self._apply_secrets(container_def, secrets_arns)
@@ -519,7 +524,12 @@ class ComposeToECSConverter(BaseService):
         container_def['memory'] = memory
 
         if 'ports' in config:
-            container_def['portMappings'] = self._convert_ports(config['ports'], network_mode)
+            port_mappings = self._convert_ports(config['ports'], network_mode)
+            # Add name to port mappings for ECS Service Connect compatibility
+            for pm in port_mappings:
+                if 'name' not in pm:
+                    pm['name'] = container_name
+            container_def['portMappings'] = port_mappings
 
         # Use pre-parsed environment variables from preprocessing
         environment = []

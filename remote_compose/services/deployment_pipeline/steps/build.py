@@ -75,7 +75,7 @@ class BuildAndPushImagesStep(PipelineStep):
             primary_name, primary_service = group[0]
 
             # Check if we already have a shared image for this build key
-            if build_key in context.shared_images:
+            if context.shared_images.get(build_key):
                 ecr_uri = context.shared_images[build_key]
                 for svc_name, svc in group:
                     svc.image_name = ecr_uri

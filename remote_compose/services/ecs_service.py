@@ -354,8 +354,18 @@ class ECSService(BaseService):
             response = client.register_task_definition(**task_def_params)
 
             aws_task_def = response['taskDefinition']
+            new_revision = aws_task_def['revision']
+            # Check if a stale record exists with this (cluster, name, revision)
+            # from a previous failed deploy, and reclaim its pk.
+            stale = ECSTaskDefinition.objects.filter(
+                cluster=task_definition.cluster,
+                name=task_definition.name,
+                revision=new_revision,
+            ).exclude(pk=task_definition.pk).first()
+            if stale:
+                stale.delete()
             task_definition.aws_task_definition_arn = aws_task_def['taskDefinitionArn']
-            task_definition.revision = aws_task_def['revision']
+            task_definition.revision = new_revision
             task_definition.status = ECSTaskDefinition.Status.REGISTERED
             task_definition.save()
 
