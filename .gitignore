@@ -110,3 +110,6 @@ logs/
 dmypy.json
 .ruff_cache/
 .pytype/
+
+# Dolt database files (added by bd init)
+.dolt/
