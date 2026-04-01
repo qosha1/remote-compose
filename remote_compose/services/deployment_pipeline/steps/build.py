@@ -44,19 +44,53 @@ class BuildAndPushImagesStep(PipelineStep):
         dockerfile = service.build_info.dockerfile
         return f"{context}:{dockerfile}"
 
+    def _retag_and_push(self, source_uri: str, target_uri: str) -> None:
+        """Tag and push an already-built image to a different ECR repo."""
+        import subprocess
+        subprocess.run(
+            ["docker", "tag", source_uri, target_uri],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["docker", "push", target_uri],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+
+    def _assign_per_service_uris(self, context, group, primary_uri, primary_name):
+        """
+        For each service in a shared build group, ensure it has its own ECR URI.
+
+        Builds are deduplicated (one docker build), but each service gets its
+        own ECR repo so task definitions reference the correct image.
+        """
+        service_uris = {}
+        for svc_name, svc in group:
+            repo = context.ecr_repositories.get(svc_name)
+            if repo:
+                svc_uri = f"{repo['repository_uri']}:{context.image_tag}"
+            else:
+                # Fallback: if no dedicated repo, use primary
+                svc_uri = primary_uri
+
+            if svc_uri != primary_uri:
+                self._retag_and_push(primary_uri, svc_uri)
+
+            svc.image_name = svc_uri
+            svc.config['image'] = svc_uri
+            service_uris[svc_name] = svc_uri
+        return service_uris
+
     def execute(self, context: PipelineContext) -> StepResult:
         """Build and push images to ECR, deduplicating shared build contexts."""
         if context.dry_run:
             return self._dry_run(context)
 
-        ecr_service = context.services.ecr
         image_build_service = context.services.image_build
 
         build_services = context.preprocessed.get_build_services()
         compose_dir = str(context.compose_dir)
 
         built_count = 0
-        skipped_count = 0
         shared_count = 0
 
         # Group services by build context key to detect shared builds
@@ -74,21 +108,6 @@ class BuildAndPushImagesStep(PipelineStep):
             # Use the first service in the group as the "primary" builder
             primary_name, primary_service = group[0]
 
-            # Check if we already have a shared image for this build key
-            if context.shared_images.get(build_key):
-                ecr_uri = context.shared_images[build_key]
-                for svc_name, svc in group:
-                    svc.image_name = ecr_uri
-                    svc.config['image'] = ecr_uri
-                    shared_count += 1
-                    self.emit_event(
-                        'image_shared',
-                        service=svc_name,
-                        build_key=build_key,
-                        image_uri=ecr_uri
-                    )
-                continue
-
             # Get ECR repository info for the primary service
             repo = context.ecr_repositories.get(primary_name)
             if not repo:
@@ -96,38 +115,7 @@ class BuildAndPushImagesStep(PipelineStep):
                     f"No ECR repository found for service '{primary_name}'"
                 )
 
-            ecr_uri = f"{repo['repository_uri']}:{context.image_tag}"
-            repo_name = f"{context.project_name}/{primary_name}"
-
-            # Check if we need to rebuild
-            should_build = context.force_rebuild
-            if not should_build:
-                try:
-                    exists = ecr_service.image_exists(
-                        repository=repo_name,
-                        tag=context.image_tag,
-                        region=context.cluster.aws_region,
-                        credential=context.cluster.aws_credential,
-                    )
-                    should_build = not exists
-                except Exception:
-                    should_build = True
-
-            if not should_build:
-                # Image exists, apply to all services in the group
-                for svc_name, svc in group:
-                    svc.image_name = ecr_uri
-                    svc.config['image'] = ecr_uri
-                skipped_count += 1
-                context.shared_images[build_key] = ecr_uri
-                self.emit_event(
-                    'image_skipped',
-                    service=primary_name,
-                    reason="Image already exists in ECR"
-                )
-                # Count additional services as shared
-                shared_count += len(group) - 1
-                continue
+            primary_uri = f"{repo['repository_uri']}:{context.image_tag}"
 
             # Resolve build context path
             build_context = primary_service.build_info.context
@@ -147,12 +135,12 @@ class BuildAndPushImagesStep(PipelineStep):
             )
 
             try:
-                # Build and push
+                # Build and push primary image
                 build_result = image_build_service.build_and_push(
                     service_name=primary_name,
                     context=build_context,
                     dockerfile=dockerfile_path,
-                    ecr_uri=ecr_uri,
+                    ecr_uri=primary_uri,
                     build_args=primary_service.build_info.args,
                     target=primary_service.build_info.target,
                 )
@@ -165,23 +153,22 @@ class BuildAndPushImagesStep(PipelineStep):
                         f"Image build failed for '{primary_name}': {error_msg}"
                     )
 
-                # Record as shared image for this build key
-                context.shared_images[build_key] = ecr_uri
+                # Retag and push to each service's own ECR repo
+                service_uris = self._assign_per_service_uris(
+                    context, group, primary_uri, primary_name
+                )
 
-                # Update all services in the group with the built ECR URI
-                for svc_name, svc in group:
-                    svc.image_name = ecr_uri
-                    svc.config['image'] = ecr_uri
+                # Store primary URI for shared_images (backward compat)
+                context.shared_images[build_key] = primary_uri
 
-                context.built_images.append(ecr_uri)
+                context.built_images.append(primary_uri)
                 built_count += 1
-                # Count additional services sharing this build as shared
                 shared_count += len(group) - 1
 
                 self.emit_event(
                     'image_build_completed',
                     service=primary_name,
-                    image_uri=ecr_uri,
+                    image_uri=primary_uri,
                     shared_with=[name for name, _ in group[1:]]
                 )
 
@@ -191,18 +178,11 @@ class BuildAndPushImagesStep(PipelineStep):
                     error=e
                 )
 
-        # Generate summary
-        summary_parts = []
-        if built_count > 0:
-            summary_parts.append(f"built {built_count}")
-        if skipped_count > 0:
-            summary_parts.append(f"skipped {skipped_count} (cached)")
+        summary_parts = [f"built {built_count}"]
         if shared_count > 0:
             summary_parts.append(f"shared {shared_count} (deduplicated)")
 
-        return StepResult.ok(
-            f"Images: {', '.join(summary_parts) or 'none to build'}"
-        )
+        return StepResult.ok(f"Images: {', '.join(summary_parts)}")
 
     def _dry_run(self, context: PipelineContext) -> StepResult:
         """Simulate building images, accounting for shared build contexts."""
@@ -218,18 +198,23 @@ class BuildAndPushImagesStep(PipelineStep):
                 build_groups[build_key] = []
             build_groups[build_key].append((service_name, service))
 
-        # Assign placeholder URIs, reusing for shared build contexts
+        # Assign per-service placeholder URIs (each service gets its own repo)
         for build_key, group in build_groups.items():
             primary_name = group[0][0]
-            placeholder_uri = (
+            primary_uri = (
                 f"{context.account_id}.dkr.ecr.{context.cluster.aws_region}"
                 f".amazonaws.com/{context.project_name}/{primary_name}"
                 f":{context.image_tag}"
             )
-            context.shared_images[build_key] = placeholder_uri
+            context.shared_images[build_key] = primary_uri
             for svc_name, svc in group:
-                svc.image_name = placeholder_uri
-                svc.config['image'] = placeholder_uri
+                svc_uri = (
+                    f"{context.account_id}.dkr.ecr.{context.cluster.aws_region}"
+                    f".amazonaws.com/{context.project_name}/{svc_name}"
+                    f":{context.image_tag}"
+                )
+                svc.image_name = svc_uri
+                svc.config['image'] = svc_uri
 
         unique_builds = len(build_groups)
         total_services = sum(len(g) for g in build_groups.values())

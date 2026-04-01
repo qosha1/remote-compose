@@ -297,8 +297,10 @@ class ComposeToECSConverter(BaseService):
         task_definitions: Dict[str, ECSTaskDefinition] = {}
 
         for service_name, service in active_services.items():
-            # Override image from shared_images if the service has a matching build key
-            if service.build_info and shared_images:
+            # Note: per-service image URIs are already set by BuildAndPushImagesStep.
+            # Each service gets its own ECR repo even when sharing a Dockerfile.
+            # Only fall back to shared_images if service has no image_name set.
+            if service.build_info and shared_images and not service.image_name:
                 build_key = f"{os.path.normpath(service.build_info.context)}:{service.build_info.dockerfile}"
                 if build_key in shared_images:
                     service.image_name = shared_images[build_key]

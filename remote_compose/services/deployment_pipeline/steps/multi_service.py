@@ -347,6 +347,8 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
         deployment_order = context.service_order or list(
             context.task_definitions.keys()
         )
+        if context.selected_services:
+            deployment_order = [s for s in deployment_order if s in context.selected_services]
 
         created = 0
         updated = 0
@@ -532,6 +534,8 @@ class WaitForAllServicesStableStep(PipelineStep):
         deployment_order = context.service_order or list(
             context.ecs_services.keys()
         )
+        if context.selected_services:
+            deployment_order = [s for s in deployment_order if s in context.selected_services]
 
         timeout = context.timeout
         start = time.time()
