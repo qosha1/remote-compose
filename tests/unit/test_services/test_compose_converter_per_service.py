@@ -82,7 +82,9 @@ class TestConvertPerService:
         assert td.name == 'acme-api'
 
     def test_resource_overrides(self, converter, cluster):
-        """Per-service CPU/memory overrides from service_resources are applied."""
+        """Per-service CPU/memory overrides flow to BOTH task and container.
+        If the container hard limit stays below the task allocation, the
+        cgroup OOM-kills processes while task-level metrics show low usage."""
         preprocessed = make_preprocessed(
             ('heavy', {'image': 'heavy:latest'}, 'heavy:latest', None),
         )
@@ -97,6 +99,10 @@ class TestConvertPerService:
         td = result['heavy']
         assert td.cpu == '2048'
         assert td.memory == '4096'
+
+        container = td.container_definitions[0]
+        assert container['cpu'] == 2048
+        assert container['memory'] == 4096
 
     def test_default_fargate_resources(self, converter, cluster):
         """Without overrides, resources snap to valid Fargate combos (>= 256/512)."""

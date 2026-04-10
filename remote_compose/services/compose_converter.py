@@ -337,6 +337,20 @@ class ComposeToECSConverter(BaseService):
             # Per-service resource overrides
             resource_override = service_resources.get(service_name, {})
 
+            # Propagate overrides to the container definition itself, not just
+            # the task. Without this the container keeps the compose-default
+            # hard limits (cpu=256, memory=512) while the task gets the full
+            # override allocation — so the container OOM-kills long before it
+            # can use the memory the task was billed for.
+            override_cpu = resource_override.get('cpu')
+            override_memory = resource_override.get('memory')
+            if override_cpu is not None:
+                container_def['cpu'] = int(override_cpu)
+                service_cpu = int(override_cpu)
+            if override_memory is not None:
+                container_def['memory'] = int(override_memory)
+                service_memory = int(override_memory)
+
             task_family_name = sanitize_name(f"{project_name}-{service_name}")
 
             task_definition = self._build_task_definition(
@@ -347,8 +361,8 @@ class ComposeToECSConverter(BaseService):
                 total_cpu=service_cpu,
                 total_memory=service_memory,
                 compose_hash=compose_hash,
-                override_cpu=resource_override.get('cpu'),
-                override_memory=resource_override.get('memory'),
+                override_cpu=override_cpu,
+                override_memory=override_memory,
             )
 
             task_definitions[service_name] = task_definition
