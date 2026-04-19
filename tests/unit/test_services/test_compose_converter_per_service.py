@@ -82,7 +82,9 @@ class TestConvertPerService:
         assert td.name == 'acme-api'
 
     def test_resource_overrides(self, converter, cluster):
-        """Per-service CPU/memory overrides from service_resources are applied."""
+        """Per-service CPU/memory overrides flow to BOTH task and container.
+        If the container hard limit stays below the task allocation, the
+        cgroup OOM-kills processes while task-level metrics show low usage."""
         preprocessed = make_preprocessed(
             ('heavy', {'image': 'heavy:latest'}, 'heavy:latest', None),
         )
@@ -97,6 +99,10 @@ class TestConvertPerService:
         td = result['heavy']
         assert td.cpu == '2048'
         assert td.memory == '4096'
+
+        container = td.container_definitions[0]
+        assert container['cpu'] == 2048
+        assert container['memory'] == 4096
 
     def test_default_fargate_resources(self, converter, cluster):
         """Without overrides, resources snap to valid Fargate combos (>= 256/512)."""
@@ -176,21 +182,45 @@ class TestConvertPerService:
         secret_names = [s['name'] for s in container.get('secrets', [])]
         assert secret_names == ['DB_PASSWORD']
 
-    def test_shared_images(self, converter, cluster):
-        """Services with the same build context use the ECR URI from shared_images."""
+    def test_shared_images_per_service_uri(self, converter, cluster):
+        """Each service keeps its own ECR URI even when sharing a build context."""
         build = BuildInfo(context='./app', dockerfile='Dockerfile')
+        web_uri = '123456789.dkr.ecr.us-east-1.amazonaws.com/proj/web:latest'
+        worker_uri = '123456789.dkr.ecr.us-east-1.amazonaws.com/proj/worker:latest'
+        preprocessed = make_preprocessed(
+            ('web', {
+                'build': {'context': './app', 'dockerfile': 'Dockerfile'},
+                'image': web_uri,
+            }, web_uri, build),
+            ('worker', {
+                'build': {'context': './app', 'dockerfile': 'Dockerfile'},
+                'image': worker_uri,
+            }, worker_uri, BuildInfo(context='./app', dockerfile='Dockerfile')),
+        )
+
+        # shared_images stores the primary URI but should NOT override per-service URIs
+        shared_images = {
+            'app:Dockerfile': web_uri,
+        }
+
+        result = converter.convert_per_service(
+            preprocessed, cluster, 'proj', shared_images=shared_images,
+        )
+
+        assert result['web'].container_definitions[0]['image'] == web_uri
+        assert result['worker'].container_definitions[0]['image'] == worker_uri
+
+    def test_shared_images_fallback(self, converter, cluster):
+        """Services without image_name fall back to shared_images URI."""
+        build = BuildInfo(context='./app', dockerfile='Dockerfile')
+        shared_ecr_uri = '123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest'
         preprocessed = make_preprocessed(
             ('web', {
                 'build': {'context': './app', 'dockerfile': 'Dockerfile'},
                 'image': 'placeholder:latest',
-            }, 'placeholder:latest', build),
-            ('worker', {
-                'build': {'context': './app', 'dockerfile': 'Dockerfile'},
-                'image': 'placeholder:latest',
-            }, 'placeholder:latest', BuildInfo(context='./app', dockerfile='Dockerfile')),
+            }, '', build),  # empty image_name triggers fallback
         )
 
-        shared_ecr_uri = '123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest'
         shared_images = {
             'app:Dockerfile': shared_ecr_uri,
         }
@@ -199,9 +229,7 @@ class TestConvertPerService:
             preprocessed, cluster, 'proj', shared_images=shared_images,
         )
 
-        for svc_name in ('web', 'worker'):
-            container = result[svc_name].container_definitions[0]
-            assert container['image'] == shared_ecr_uri
+        assert result['web'].container_definitions[0]['image'] == shared_ecr_uri
 
     def test_efs_volumes(self, converter, cluster):
         """EFS volume configuration is attached to task definitions when provided."""

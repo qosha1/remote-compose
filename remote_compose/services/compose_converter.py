@@ -297,8 +297,10 @@ class ComposeToECSConverter(BaseService):
         task_definitions: Dict[str, ECSTaskDefinition] = {}
 
         for service_name, service in active_services.items():
-            # Override image from shared_images if the service has a matching build key
-            if service.build_info and shared_images:
+            # Note: per-service image URIs are already set by BuildAndPushImagesStep.
+            # Each service gets its own ECR repo even when sharing a Dockerfile.
+            # Only fall back to shared_images if service has no image_name set.
+            if service.build_info and shared_images and not service.image_name:
                 build_key = f"{os.path.normpath(service.build_info.context)}:{service.build_info.dockerfile}"
                 if build_key in shared_images:
                     service.image_name = shared_images[build_key]
@@ -335,6 +337,20 @@ class ComposeToECSConverter(BaseService):
             # Per-service resource overrides
             resource_override = service_resources.get(service_name, {})
 
+            # Propagate overrides to the container definition itself, not just
+            # the task. Without this the container keeps the compose-default
+            # hard limits (cpu=256, memory=512) while the task gets the full
+            # override allocation — so the container OOM-kills long before it
+            # can use the memory the task was billed for.
+            override_cpu = resource_override.get('cpu')
+            override_memory = resource_override.get('memory')
+            if override_cpu is not None:
+                container_def['cpu'] = int(override_cpu)
+                service_cpu = int(override_cpu)
+            if override_memory is not None:
+                container_def['memory'] = int(override_memory)
+                service_memory = int(override_memory)
+
             task_family_name = sanitize_name(f"{project_name}-{service_name}")
 
             task_definition = self._build_task_definition(
@@ -345,8 +361,8 @@ class ComposeToECSConverter(BaseService):
                 total_cpu=service_cpu,
                 total_memory=service_memory,
                 compose_hash=compose_hash,
-                override_cpu=resource_override.get('cpu'),
-                override_memory=resource_override.get('memory'),
+                override_cpu=override_cpu,
+                override_memory=override_memory,
             )
 
             task_definitions[service_name] = task_definition
