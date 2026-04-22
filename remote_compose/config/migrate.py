@@ -13,6 +13,30 @@ from typing import Any
 from . import v1_schema
 
 
+# Common stateful images — used to generate friendlier warnings when the
+# migrator sees a type=infrastructure service with no volumes, so users see
+# a concrete suggestion instead of a generic "add volumes:" nag.
+_STATEFUL_HINTS: dict[str, tuple[str, str]] = {
+    "postgres": ("postgres-data", "/var/lib/postgresql/data"),
+    "postgresql": ("postgres-data", "/var/lib/postgresql/data"),
+    "mysql": ("mysql-data", "/var/lib/mysql"),
+    "mariadb": ("mariadb-data", "/var/lib/mysql"),
+    "redis": ("redis-data", "/data"),
+    "mongo": ("mongo-data", "/data/db"),
+    "mongodb": ("mongo-data", "/data/db"),
+}
+
+
+def _stateful_hint(name: str) -> str:
+    lower = name.lower()
+    for key, (vol, mount) in _STATEFUL_HINTS.items():
+        if key in lower:
+            return (
+                f" (suggested: volumes: [{{name: {vol}, mount: {mount}}}])"
+            )
+    return ""
+
+
 @dataclass
 class MigrationResult:
     v2: dict[str, Any]
@@ -58,6 +82,17 @@ def migrate(v1: dict[str, Any], strict: bool = False) -> MigrationResult:
         for extra_key in set(raw.keys()) - v1_schema.V1_SERVICE_KEYS:
             unmigratable.append(f"service {name!r}: unknown field {extra_key!r}")
         services_v2[name] = svc
+
+        # v1 had no per-service volumes block; legacy imperative code mounted
+        # EFS implicitly for known stateful services. Warn explicitly so users
+        # migrating a database don't silently lose persistence on v2.
+        if raw.get("type") == "infrastructure":
+            warnings.append(
+                f"service {name!r}: type=infrastructure migrated without a "
+                f"volumes block — data will not persist across task restarts. "
+                f"Add volumes: to v2 rc.yml to mount EFS"
+                f"{_stateful_hint(name)}."
+            )
 
     secrets_v2: list[dict[str, Any]] = []
     for item in v1.get("secrets") or []:

@@ -96,7 +96,11 @@ class TestMigrate:
 
     def test_no_warnings_on_known_v1_fields(self, start_simpli_v1):
         result = migrate(start_simpli_v1)
-        assert result.warnings == []
+        # Infrastructure-volume warnings are expected and covered separately
+        # in TestInfrastructureVolumeWarning; here we only want to assert no
+        # *other* warnings leak from recognized v1 fields.
+        unexpected = [w for w in result.warnings if "data will not persist" not in w]
+        assert unexpected == []
 
     def test_no_unmigratable_on_canonical_v1(self, start_simpli_v1):
         result = migrate(start_simpli_v1)
@@ -149,3 +153,56 @@ class TestMigrateEdgeCases:
     def test_is_v1_detects_legacy_config(self):
         assert v1_schema.is_v1({"project_name": "x"}) is True
         assert v1_schema.is_v1({"version": 2}) is False
+
+
+class TestInfrastructureVolumeWarning:
+    def test_infrastructure_service_without_volumes_warns(self):
+        raw = {
+            "project_name": "x", "compose_file": "docker-compose.yml",
+            "services": {"postgres": {"cpu": 512, "memory": 1024,
+                                       "type": "infrastructure"}},
+        }
+        result = migrate(raw)
+        msgs = "\n".join(result.warnings)
+        assert "postgres" in msgs
+        assert "infrastructure" in msgs
+        assert "data will not persist" in msgs
+
+    def test_known_stateful_name_gets_mount_hint(self):
+        raw = {
+            "project_name": "x", "compose_file": "docker-compose.yml",
+            "services": {"postgres": {"cpu": 512, "memory": 1024,
+                                       "type": "infrastructure"}},
+        }
+        result = migrate(raw)
+        msgs = "\n".join(result.warnings)
+        assert "/var/lib/postgresql/data" in msgs
+
+    @pytest.mark.parametrize("name,path", [
+        ("redis", "/data"),
+        ("mysql", "/var/lib/mysql"),
+        ("mariadb", "/var/lib/mysql"),
+        ("mongo", "/data/db"),
+    ])
+    def test_multiple_stateful_hints(self, name, path):
+        raw = {
+            "project_name": "x", "compose_file": "docker-compose.yml",
+            "services": {name: {"cpu": 256, "memory": 512,
+                                 "type": "infrastructure"}},
+        }
+        result = migrate(raw)
+        assert path in "\n".join(result.warnings)
+
+    def test_non_infrastructure_service_no_warning(self):
+        raw = {
+            "project_name": "x", "compose_file": "docker-compose.yml",
+            "services": {"api": {"cpu": 512, "memory": 1024,
+                                  "type": "application"}},
+        }
+        result = migrate(raw)
+        assert not any("data will not persist" in w for w in result.warnings)
+
+    def test_start_simpli_warns_on_postgres_and_redis(self, start_simpli_v1):
+        result = migrate(start_simpli_v1)
+        # Both postgres and redis are type=infrastructure in the fixture.
+        assert sum("data will not persist" in w for w in result.warnings) == 2
