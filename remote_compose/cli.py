@@ -65,6 +65,26 @@ services:
 """
 
 
+def _flatten_v2_to_legacy(v2: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a v2 rc.yml into the v1 flat dict shape that legacy helpers
+    (backup/restore/list, exec, logs, status) expect.
+
+    Only the ECS provider is supported here — backup tooling is ECS-specific
+    and would be per-provider if/when other providers ship their own.
+    """
+    ecs = (v2.get("provider_config") or {}).get("ecs") or {}
+    legacy: Dict[str, Any] = dict(v2)  # preserve backup, secrets, services, domain
+    legacy["project_name"] = v2.get("project", v2.get("project_name", ""))
+    legacy["compose_file"] = v2.get("compose_file", "docker-compose.yml")
+    if "cluster" in ecs:
+        legacy["cluster"] = ecs["cluster"]
+    if "region" in ecs:
+        legacy["region"] = ecs["region"]
+    if "aws_profile" in ecs:
+        legacy["aws_profile"] = ecs["aws_profile"]
+    return legacy
+
+
 def _load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load rc.yml from the current directory or specified path."""
     path = Path(config_path) if config_path else Path.cwd() / RC_CONFIG_FILE
@@ -75,7 +95,10 @@ def _load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         sys.exit(1)
 
     with open(path) as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+
+    if int(config.get("version", 0)) == 2:
+        config = _flatten_v2_to_legacy(config)
 
     required = ['cluster', 'region', 'compose_file', 'project_name']
     for key in required:

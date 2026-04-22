@@ -133,3 +133,57 @@ class TestResolveProvider:
         from remote_compose.provider import ProviderNotFoundError
         with pytest.raises(ProviderNotFoundError, match="azure"):
             resolve_provider(v2)
+
+
+class TestV2LegacyFlatten:
+    """_load_config must surface v2 rc.yml in the flat shape that
+    backup/restore/list (and other legacy helpers) expect. This is how
+    v2-migrated projects keep access to the existing db backup tooling
+    without duplicating the code path per provider."""
+
+    def _v2(self) -> dict:
+        return {
+            "version": 2,
+            "project": "ss-debuggai",
+            "compose_file": "docker-compose.ecs.yml",
+            "provider": "ecs",
+            "provider_config": {"ecs": {
+                "cluster": "ss-debuggai-prod",
+                "region": "us-west-2",
+                "aws_profile": "debuggai",
+            }},
+            "services": {"django": {"cpu": 1024, "memory": 4096,
+                                     "type": "application"}},
+            "backup": {"bucket": "ss-debuggai-db-dumps", "service": "django"},
+        }
+
+    def test_flatten_exposes_legacy_keys(self):
+        from remote_compose.cli import _flatten_v2_to_legacy
+        flat = _flatten_v2_to_legacy(self._v2())
+        assert flat["project_name"] == "ss-debuggai"
+        assert flat["compose_file"] == "docker-compose.ecs.yml"
+        assert flat["cluster"] == "ss-debuggai-prod"
+        assert flat["region"] == "us-west-2"
+        assert flat["aws_profile"] == "debuggai"
+        assert flat["backup"] == {"bucket": "ss-debuggai-db-dumps",
+                                   "service": "django"}
+
+    def test_load_config_accepts_v2(self, tmp_path, monkeypatch):
+        from remote_compose import cli as cli_mod
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2())
+        monkeypatch.chdir(tmp_path)
+        cfg = cli_mod._load_config()
+        # Legacy commands must be able to pull these without knowing about v2.
+        assert cfg["project_name"] == "ss-debuggai"
+        assert cfg["cluster"] == "ss-debuggai-prod"
+        assert cfg["backup"]["bucket"] == "ss-debuggai-db-dumps"
+
+    def test_load_config_still_accepts_v1(self, tmp_path, monkeypatch):
+        from remote_compose import cli as cli_mod
+        p = tmp_path / "rc.yml"
+        _write(p, V1_SAMPLE)
+        monkeypatch.chdir(tmp_path)
+        cfg = cli_mod._load_config()
+        assert cfg["project_name"] == "legacy"
+        assert cfg["cluster"] == "old"
