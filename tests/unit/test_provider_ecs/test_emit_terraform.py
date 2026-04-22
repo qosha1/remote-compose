@@ -78,6 +78,25 @@ class TestEmitTerraformStructural:
         ECSProvider().emit_terraform(_ctx(tmp_path, aws_profile="prod"), out)
         assert 'profile = "prod"' in (out / "providers.tf").read_text()
 
+    def test_aws_profile_omitted_when_unset(self, tmp_path):
+        out = tmp_path / "tf"
+        ctx = _ctx(tmp_path)
+        ctx.provider_config["ecs"].pop("aws_profile", None)
+        ECSProvider().emit_terraform(ctx, out)
+        assert "profile =" not in (out / "providers.tf").read_text()
+
+    def test_aws_profile_passed_to_boto3_session(self, tmp_path):
+        from remote_compose.provider.ecs.provider import _default_session_factory
+        ctx = _ctx(tmp_path, aws_profile="debuggai", region="us-west-1")
+        try:
+            session = _default_session_factory(ctx)
+        except Exception as exc:
+            # ProfileNotFound is fine — we only care the profile was forwarded.
+            assert "debuggai" in str(exc)
+            return
+        assert session.profile_name == "debuggai"
+        assert session.region_name == "us-west-1"
+
     def test_missing_region_rejected(self, tmp_path):
         ctx = _ctx(tmp_path)
         ctx.provider_config["ecs"].pop("region")
