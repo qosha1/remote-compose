@@ -210,3 +210,48 @@ class TestRollbackLocalBackendRejected:
         ctx = _ctx(tmp_path, tf_backend={"type": "local"})
         with pytest.raises(ProviderError, match="local terraform backend"):
             ECSProvider().rollback(ctx)
+
+
+class TestEphemeralStorage:
+    def test_emits_ephemeral_storage_block_on_fargate(self, tmp_path):
+        out = tmp_path / "tf"
+        services = {
+            "api": ServiceSpec(
+                name="api", cpu=1024, memory=4096, type="application",
+                ephemeral_storage=40,
+            ),
+        }
+        ECSProvider().emit_terraform(_ctx(tmp_path, services=services), out)
+        svc_tf = (out / "services.tf").read_text()
+        assert "ephemeral_storage {" in svc_tf
+        assert "size_in_gib = 40" in svc_tf
+
+    def test_unset_ephemeral_storage_omits_block(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path), out)
+        assert "ephemeral_storage {" not in (out / "services.tf").read_text()
+
+    def test_ephemeral_storage_on_ec2_raises(self, tmp_path):
+        services = {
+            "api": ServiceSpec(
+                name="api", cpu=1024, memory=4096, type="application",
+                launch_type="EC2", ephemeral_storage=40,
+            ),
+        }
+        with pytest.raises(ProviderConfigError, match="ephemeral_storage"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, services=services), tmp_path / "tf"
+            )
+
+    @pytest.mark.parametrize("bad", [0, 20, 201, 500])
+    def test_ephemeral_storage_out_of_range_raises(self, tmp_path, bad):
+        services = {
+            "api": ServiceSpec(
+                name="api", cpu=1024, memory=4096, type="application",
+                ephemeral_storage=bad,
+            ),
+        }
+        with pytest.raises(ProviderConfigError, match="between 21 and 200"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, services=services), tmp_path / "tf"
+            )

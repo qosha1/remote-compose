@@ -144,6 +144,19 @@ class ECSProvider(Provider):
                     f"got {launch_type!r}"
                 )
 
+            if spec.ephemeral_storage is not None:
+                if launch_type != "FARGATE":
+                    raise ProviderConfigError(
+                        f"service {name!r}: ephemeral_storage is only supported "
+                        f"on FARGATE launch_type, got {launch_type!r}"
+                    )
+                if not (21 <= spec.ephemeral_storage <= 200):
+                    raise ProviderConfigError(
+                        f"service {name!r}: ephemeral_storage must be between "
+                        f"21 and 200 GiB (AWS Fargate limits), got "
+                        f"{spec.ephemeral_storage}"
+                    )
+
             svc_mounts = []
             for vol_entry in spec.volumes or []:
                 vol_name = vol_entry.get("name")
@@ -187,6 +200,7 @@ class ECSProvider(Provider):
                 # def uses it verbatim instead of an ECR placeholder.
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
+                "ephemeral_storage": spec.ephemeral_storage,
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
