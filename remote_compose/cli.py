@@ -598,6 +598,10 @@ def provision(ctx, dry_run):
 @click.pass_context
 def deploy(ctx, no_build, dry_run, tag, code_only, selected_services):
     """Build images, push to ECR, and deploy all services."""
+    from remote_compose.cli_v2 import dispatch_if_v2
+    if dispatch_if_v2(ctx.obj.get('config_path'), 'deploy'):
+        return
+
     if code_only and selected_services:
         click.echo("Error: --code-only and --services are mutually exclusive", err=True)
         sys.exit(1)
@@ -732,6 +736,10 @@ def deploy(ctx, no_build, dry_run, tag, code_only, selected_services):
 @click.pass_context
 def status(ctx):
     """Show service status table."""
+    from remote_compose.cli_v2 import dispatch_if_v2
+    if dispatch_if_v2(ctx.obj.get('config_path'), 'status'):
+        return
+
     config = _load_config(ctx.obj.get('config_path'))
     _bootstrap_django(config)
 
@@ -1384,9 +1392,14 @@ cli.add_command(db_group)
 
 @cli.command()
 @click.option('--infra', is_flag=True, help='Also destroy VPC, ALB, etc.')
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt')
 @click.pass_context
-def destroy(ctx, infra):
+def destroy(ctx, infra, yes):
     """Tear down all services (prompts for confirmation)."""
+    from remote_compose.cli_v2 import dispatch_if_v2
+    if dispatch_if_v2(ctx.obj.get('config_path'), 'destroy', yes=yes):
+        return
+
     config = _load_config(ctx.obj.get('config_path'))
     _bootstrap_django(config)
 
@@ -1612,6 +1625,18 @@ def _print_service_table(context):
         svc_type = svc_res.get('type', '')
 
         click.echo(f"  {svc_name:<24} {status_str:<12} {tasks_str:<8} {svc_type:<16}")
+
+
+@cli.command(name='plan')
+@click.pass_context
+def plan_cmd(ctx):
+    """Show terraform plan for the current rc.yml v2 config."""
+    from remote_compose.cli_v2 import dispatch_if_v2
+    if dispatch_if_v2(ctx.obj.get('config_path'), 'plan'):
+        return
+    click.echo("rc plan requires a rc.yml v2 config. Run `rc migrate` first.",
+               err=True)
+    raise click.exceptions.Exit(1)
 
 
 @cli.command(name='doctor')

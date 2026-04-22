@@ -51,9 +51,17 @@ resource "aws_ecs_service" "api" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.api.arn
   }
 }
 
@@ -128,9 +136,17 @@ resource "aws_ecs_service" "db" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.db.arn
   }
 }
 
@@ -190,9 +206,17 @@ resource "aws_ecs_service" "web" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.web.arn
   }
   load_balancer {
     target_group_arn = aws_lb_target_group.default.arn
@@ -260,9 +284,17 @@ resource "aws_ecs_service" "worker" {
   }
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.worker.arn
   }
 }
 

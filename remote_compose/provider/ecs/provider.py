@@ -181,6 +181,12 @@ class ECSProvider(Provider):
                 "health_check_path": spec.health_check_path,
                 "launch_type": launch_type,
                 "mounts": svc_mounts,
+                "env": dict(spec.env or {}),
+                "command": list(spec.command or []),
+                # Pre-built compose image; if set (and no build context), task
+                # def uses it verbatim instead of an ECR placeholder.
+                "compose_image": spec.image if not spec.build_context else None,
+                "has_build_context": bool(spec.build_context),
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
@@ -194,6 +200,10 @@ class ECSProvider(Provider):
         has_public_service = default_public is not None
         has_ec2_service = len(ec2_demands) > 0
         has_efs = len(efs_volumes) > 0
+        # Service discovery is cheap (one Cloud Map namespace + one entry per
+        # service) and turns multi-service compose into ECS that actually
+        # talks to itself. Enable whenever there is more than one service.
+        has_service_discovery = len(ctx.services) > 1
 
         # Secrets: split into file (terraform-created) vs aws_sm (pre-existing ARN ref).
         file_secrets: list[dict[str, Any]] = []
@@ -268,6 +278,7 @@ class ECSProvider(Provider):
             "services": services_view,
             "has_public_service": has_public_service,
             "has_ec2_service": has_ec2_service,
+            "has_service_discovery": has_service_discovery,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
             "efs_volumes": sorted(efs_volumes.values(), key=lambda v: v["name"]),
@@ -316,12 +327,84 @@ class ECSProvider(Provider):
         runner.init()
         runner.apply()
         outputs = runner.output()
+
+        warnings: list[str] = []
+        pushed = self._build_and_push_images(ctx, outputs, warnings)
+        if pushed:
+            # ECS won't pull a new :latest automatically — force it.
+            self._force_new_deployments(ctx, pushed)
+
         return DeployResult(
             revision_id=_revision_id_from_dir(out_dir),
             services=sorted(ctx.services.keys()),
             duration_s=time.monotonic() - start,
             terraform_outputs=outputs,
+            warnings=warnings,
         )
+
+    def _build_and_push_images(
+        self,
+        ctx: DeployContext,
+        outputs: dict,
+        warnings: list,
+    ) -> list[str]:
+        """Build each service that has a compose build: context, push to its ECR repo.
+
+        Returns the list of service names that were pushed (caller forces
+        new deployments for exactly these).
+        """
+        to_build = [s for s in ctx.services.values() if s.build_context]
+        if not to_build:
+            return []
+
+        repos = (outputs.get("ecr_repositories") or {}).get("value") or {}
+        if not repos:
+            warnings.append(
+                "terraform outputs missing ecr_repositories — skipping image build+push"
+            )
+            return []
+
+        from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
+        from .ecr_auth import ECRAuthenticator
+
+        builder = ImageBuilder(progress=self.progress)
+        session = self.session_factory(ctx)
+        auth = ECRAuthenticator(session=session)
+        pusher = ImagePusher(authenticator=auth, progress=self.progress)
+
+        pushed: list[str] = []
+        for spec in to_build:
+            repo_url = repos.get(spec.name)
+            if not repo_url:
+                warnings.append(
+                    f"service {spec.name!r}: no ECR repo in terraform outputs"
+                )
+                continue
+            tag = f"{repo_url}:latest"
+            build = ImageBuildSpec(
+                service=spec.name,
+                context=spec.build_context,
+                dockerfile=Path(spec.dockerfile) if spec.dockerfile else None,
+                build_args=dict(spec.build_args or {}),
+                tags=[tag],
+                platform="linux/amd64",
+            )
+            tags = builder.build(build)
+            pusher.push(tags)
+            pushed.append(spec.name)
+        return pushed
+
+    def _force_new_deployments(self, ctx: DeployContext, services: list[str]) -> None:
+        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
+        session = self.session_factory(ctx)
+        client = session.client("ecs")
+        for svc in services:
+            client.update_service(
+                cluster=cluster,
+                service=svc,
+                forceNewDeployment=True,
+            )
 
     def destroy(self, ctx: DeployContext) -> None:
         out_dir = self._tf_dir(ctx)

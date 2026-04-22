@@ -53,6 +53,18 @@ class ServiceSpec:
     port: Optional[int] = None
     ephemeral_storage: Optional[int] = None
     volumes: list[dict[str, Any]] = field(default_factory=list)
+    # Populated from docker-compose.yml when the service has a `build:` stanza.
+    # build_context is an absolute path. When None, the service uses a pre-built
+    # image (skipped by the ImageBuilder/ImagePusher path in Provider.deploy).
+    build_context: Optional[Any] = None
+    build_args: dict[str, str] = field(default_factory=dict)
+    dockerfile: Optional[str] = None
+    image: Optional[str] = None
+    # Plain environment variables (docker-compose environment:). Flows into
+    # the ECS task definition containerDefinitions.environment[].
+    env: dict[str, str] = field(default_factory=dict)
+    # Command override — when set, renders as containerDefinitions.command[].
+    command: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: ./api
+      args:
+        APP_VERSION: "${APP_VERSION:-dev}"
+    environment:
+      DATABASE_URL: postgresql://demo:demo@db:5432/demo
+      REDIS_URL: redis://cache:6379/0
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-dev-not-for-prod}"
+      APP_VERSION: "${APP_VERSION:-dev}"
+    ports:
+      - "${HOST_PORT:-8088}:8080"
+    depends_on:
+      - db
+      - cache
+
+  worker:
+    build:
+      context: ./worker
+    environment:
+      DATABASE_URL: postgresql://demo:demo@db:5432/demo
+      REDIS_URL: redis://cache:6379/0
+    depends_on:
+      - db
+      - cache
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  cache:
+    image: redis:7-alpine
+
+volumes:
+  pgdata:

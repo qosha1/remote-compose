@@ -1,0 +1,135 @@
+"""Unit tests for the CLI → Provider v2 dispatcher."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from remote_compose.cli_v2 import (
+    build_deploy_context,
+    dispatch_if_v2,
+    load_rc_yml,
+    resolve_provider,
+)
+
+
+V2_SAMPLE = {
+    "version": 2,
+    "project": "cli-test",
+    "compose_file": "docker-compose.yml",
+    "provider": "fake",
+    "provider_config": {},
+    "services": {
+        "web": {"cpu": 256, "memory": 512, "type": "proxy",
+                "public": True, "port": 80},
+    },
+    "terraform": {"backend": {"type": "local"}},
+}
+
+
+V1_SAMPLE = {
+    "cluster": "old",
+    "region": "us-west-2",
+    "compose_file": "docker-compose.yml",
+    "project_name": "legacy",
+    "services": {"web": {"cpu": 256, "memory": 512, "type": "proxy"}},
+}
+
+
+def _write(path: Path, data: dict) -> None:
+    path.write_text(yaml.safe_dump(data))
+
+
+class TestLoadRcYml:
+    def test_v2_parses(self, tmp_path):
+        p = tmp_path / "rc.yml"
+        _write(p, V2_SAMPLE)
+        version, raw, v2 = load_rc_yml(p)
+        assert version == 2
+        assert v2 is not None
+        assert v2.project == "cli-test"
+
+    def test_v1_detected_without_parse(self, tmp_path):
+        p = tmp_path / "rc.yml"
+        _write(p, V1_SAMPLE)
+        version, raw, v2 = load_rc_yml(p)
+        assert version == 1
+        assert v2 is None
+
+    def test_missing_version_treated_as_v1(self, tmp_path):
+        p = tmp_path / "rc.yml"
+        _write(p, {"project_name": "x", "compose_file": "c.yml", "services": {}})
+        version, _, v2 = load_rc_yml(p)
+        assert version == 1
+        assert v2 is None
+
+
+class TestBuildDeployContext:
+    def test_context_mirrors_v2_schema(self, tmp_path):
+        p = tmp_path / "rc.yml"
+        _write(p, V2_SAMPLE)
+        _, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert ctx.project == "cli-test"
+        assert "web" in ctx.services
+        assert ctx.services["web"].cpu == 256
+        assert ctx.services["web"].public is True
+        assert ctx.working_dir == tmp_path.resolve()
+
+    def test_relative_compose_path_resolved(self, tmp_path):
+        (tmp_path / "docker-compose.yml").write_text("services:\n  web: {image: nginx}\n")
+        p = tmp_path / "rc.yml"
+        _write(p, V2_SAMPLE)
+        _, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert ctx.compose_path == (tmp_path / "docker-compose.yml").resolve()
+
+    def test_none_backend_fields_stripped(self, tmp_path):
+        cfg = dict(V2_SAMPLE)
+        cfg["terraform"] = {"backend": {"type": "s3", "bucket": "b", "key": "k.tfstate",
+                                         "region": "us-west-2", "dynamodb_table": None}}
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        _, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert "dynamodb_table" not in ctx.tf_backend_config
+
+
+class TestDispatcher:
+    def test_returns_false_for_v1(self, tmp_path, monkeypatch):
+        p = tmp_path / "rc.yml"
+        _write(p, V1_SAMPLE)
+        assert dispatch_if_v2(p, "deploy") is False
+
+    def test_returns_false_when_no_rc_yml(self, tmp_path):
+        assert dispatch_if_v2(tmp_path / "missing.yml", "deploy") is False
+
+    def test_v2_plan_dispatches(self, tmp_path, capsys):
+        p = tmp_path / "rc.yml"
+        _write(p, V2_SAMPLE)
+        ok = dispatch_if_v2(p, "plan")
+        assert ok is True
+        out = capsys.readouterr().out
+        assert "provider=fake" in out
+        assert "Terraform plan" in out
+
+
+class TestResolveProvider:
+    def test_fake_resolves(self, tmp_path):
+        p = tmp_path / "rc.yml"
+        _write(p, V2_SAMPLE)
+        _, _, v2 = load_rc_yml(p)
+        prov = resolve_provider(v2)
+        assert prov.name == "fake"
+
+    def test_unknown_provider_raises_with_hint(self, tmp_path):
+        cfg = dict(V2_SAMPLE)
+        cfg["provider"] = "azure"
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        _, _, v2 = load_rc_yml(p)
+        from remote_compose.provider import ProviderNotFoundError
+        with pytest.raises(ProviderNotFoundError, match="azure"):
+            resolve_provider(v2)

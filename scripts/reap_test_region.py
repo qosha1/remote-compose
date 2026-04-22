@@ -84,11 +84,14 @@ class Reaper:
             return False
 
     def _tagged(self, tags: list[dict]) -> bool:
-        return any(
-            t.get("Key") == PROJECT_TAG_KEY
-            and (t.get("Value") or "").startswith(PROJECT_TAG_PREFIX)
-            for t in tags or []
-        )
+        # AWS is inconsistent: EC2/ELB/EFS return Key/Value; ECS returns
+        # key/value (lowercase). Accept either form.
+        for t in tags or []:
+            k = t.get("Key") or t.get("key") or ""
+            v = t.get("Value") or t.get("value") or ""
+            if k == PROJECT_TAG_KEY and v.startswith(PROJECT_TAG_PREFIX):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # ECS
@@ -307,6 +310,50 @@ class Reaper:
     # VPC + dependencies
     # ------------------------------------------------------------------
 
+    def _drain_vpc_enis(self, ec2, vpc_id: str, timeout: int = 180) -> None:
+        """Wait for ENIs in the VPC to detach, then delete any stragglers.
+
+        ECS-managed Fargate tasks hold onto their ENIs for up to ~60s after
+        service deletion. If we don't wait, the subnet/IGW/VPC deletion
+        fails with DependencyViolation.
+        """
+        deadline = time.time() + timeout
+        while True:
+            enis = ec2.describe_network_interfaces(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("NetworkInterfaces", [])
+            if not enis:
+                return
+            # Try to detach anything still attached (owned by non-AWS callers).
+            for eni in enis:
+                attachment = eni.get("Attachment") or {}
+                if attachment.get("AttachmentId"):
+                    try:
+                        ec2.detach_network_interface(
+                            AttachmentId=attachment["AttachmentId"], Force=True,
+                        )
+                    except ClientError:
+                        pass
+            # Delete any ENIs that are now available (or never were attached).
+            still_there = []
+            for eni in enis:
+                status = eni.get("Status")
+                if status == "available":
+                    try:
+                        ec2.delete_network_interface(
+                            NetworkInterfaceId=eni["NetworkInterfaceId"]
+                        )
+                    except ClientError:
+                        still_there.append(eni["NetworkInterfaceId"])
+                else:
+                    still_there.append(eni["NetworkInterfaceId"])
+            if not still_there:
+                return
+            if time.time() > deadline:
+                self._log(f"WARN: {len(still_there)} ENIs in {vpc_id} still present after {timeout}s")
+                return
+            time.sleep(5)
+
     def reap_vpc(self) -> None:
         ec2 = self.session.client("ec2", region_name=self.region)
         vpcs = ec2.describe_vpcs(Filters=[
@@ -314,6 +361,10 @@ class Reaper:
         ]).get("Vpcs", [])
         for vpc in vpcs:
             vpc_id = vpc["VpcId"]
+
+            # Detach any lingering ENIs owned by ECS-managed tasks. Fargate
+            # releases them lazily after service delete (~60s); wait + force.
+            self._drain_vpc_enis(ec2, vpc_id)
             # security groups (non-default)
             sgs = ec2.describe_security_groups(Filters=[
                 {"Name": "vpc-id", "Values": [vpc_id]},

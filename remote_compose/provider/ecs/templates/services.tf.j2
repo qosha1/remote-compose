@@ -20,8 +20,24 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 
   container_definitions = jsonencode([{
     name      = "{{ svc.name }}"
+{%- if svc.has_build_context %}
     image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+{%- elif svc.compose_image %}
+    image     = "{{ svc.compose_image }}"
+{%- else %}
+    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+{%- endif %}
     essential = true
+{%- if svc.command %}
+    command = {{ svc.command | tojson }}
+{%- endif %}
+{%- if svc.env %}
+    environment = [
+{%- for k, v in svc.env.items() %}
+      { name = "{{ k }}", value = "{{ v | replace('\\', '\\\\') | replace('"', '\\"') | replace('$', '$$') }}" }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
 {%- if svc.port %}
     portMappings = [{
       containerPort = {{ svc.port }}
@@ -92,10 +108,21 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
+
+{%- if has_service_discovery %}
+  service_registries {
+    registry_arn = aws_service_discovery_service.{{ svc.tf_name }}.arn
+  }
+{%- endif %}
 
 {%- if svc.public %}
   load_balancer {

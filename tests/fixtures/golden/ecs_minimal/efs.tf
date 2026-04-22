@@ -21,9 +21,12 @@ resource "aws_security_group" "efs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+# Encryption defaults to false: AWS rejects encrypted=true on accounts that
+# haven't initialized the aws/elasticfilesystem KMS key (rc-e5u.26). Production
+# users: set encrypted=true + provide kms_key_id once the key exists.
 resource "aws_efs_file_system" "pgdata" {
   creation_token = "${var.project}-pgdata"
-  encrypted      = true
+  encrypted      = false
   performance_mode = "generalPurpose"
   throughput_mode  = "bursting"
 
@@ -34,9 +37,10 @@ resource "aws_efs_file_system" "pgdata" {
 }
 
 resource "aws_efs_mount_target" "pgdata" {
-  count           = length(aws_subnet.private)
+  # Tasks run in public subnets (rc-e5u.25) so mount targets live there too.
+  count           = length(aws_subnet.public)
   file_system_id  = aws_efs_file_system.pgdata.id
-  subnet_id       = aws_subnet.private[count.index].id
+  subnet_id       = aws_subnet.public[count.index].id
   security_groups = [aws_security_group.efs.id]
 }
 resource "aws_efs_access_point" "db__pgdata" {

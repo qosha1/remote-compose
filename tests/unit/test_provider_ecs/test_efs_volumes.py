@@ -60,9 +60,12 @@ class TestSingleVolume:
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
         assert 'aws_efs_file_system" "pgdata"' in efs_tf
-        assert "encrypted      = true" in efs_tf
+        # encrypted defaults to false (rc-e5u.26); production overrides.
+        assert "encrypted      = false" in efs_tf
 
-    def test_mount_targets_per_private_subnet(self, tmp_path):
+    def test_mount_targets_match_task_subnets(self, tmp_path):
+        """Mount targets must live in the same subnets as tasks.
+        Tasks currently run in public subnets (rc-e5u.25)."""
         ctx = _ctx(tmp_path, {
             "postgres": ServiceSpec(
                 name="postgres", cpu=512, memory=1024, type="infrastructure",
@@ -73,7 +76,7 @@ class TestSingleVolume:
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
         assert 'aws_efs_mount_target" "pgdata"' in efs_tf
-        assert "count           = length(aws_subnet.private)" in efs_tf
+        assert "count           = length(aws_subnet.public)" in efs_tf
 
     def test_access_point_per_service_volume_pair(self, tmp_path):
         ctx = _ctx(tmp_path, {
