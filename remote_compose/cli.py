@@ -1614,5 +1614,75 @@ def _print_service_table(context):
         click.echo(f"  {svc_name:<24} {status_str:<12} {tasks_str:<8} {svc_type:<16}")
 
 
+@cli.command(name='doctor')
+@click.option('--fix', is_flag=True,
+              help='Attempt to install/upgrade missing deps via the platform package manager.')
+def doctor_cmd(fix):
+    """Check that terraform/docker/python/AWS are set up correctly."""
+    from remote_compose import doctor
+    report = doctor.run()
+    click.echo(report.render_table())
+    if not report.ok and not fix:
+        click.echo("\n  Some hard requirements are missing. Re-run with --fix "
+                   "to attempt repair, or `rc install`.", err=True)
+        raise click.exceptions.Exit(1)
+    if fix and not report.ok:
+        click.echo("\n  Attempting fixes...\n")
+        outcomes = doctor.apply_fixes(report)
+        for name, ok, detail in outcomes:
+            mark = "✓" if ok else "✗"
+            click.echo(f"    {mark} {name}: {detail}")
+        click.echo("\n  Re-running checks...\n")
+        report = doctor.run()
+        click.echo(report.render_table())
+        if not report.ok:
+            raise click.exceptions.Exit(1)
+
+
+@cli.command(name='install')
+@click.pass_context
+def install_cmd(ctx):
+    """Install/upgrade every prerequisite (alias for `rc doctor --fix`)."""
+    ctx.invoke(doctor_cmd, fix=True)
+
+
+@cli.command(name='migrate')
+@click.option('--in', 'in_path', default='rc.yml', show_default=True,
+              help='Path to rc.yml v1 input.')
+@click.option('--out', 'out_path', default='rc.v2.yml', show_default=True,
+              help='Path to write rc.yml v2 output.')
+@click.option('--force', is_flag=True,
+              help='Write output even if unmigratable fields are present.')
+def migrate_cmd(in_path, out_path, force):
+    """Convert a v1 rc.yml to v2 schema."""
+    import yaml
+    from remote_compose.config import v1_schema
+    from remote_compose.config.migrate import migrate as _migrate
+
+    raw = v1_schema.load(in_path)
+    if not v1_schema.is_v1(raw):
+        click.echo(f"{in_path} is already v2; nothing to migrate.")
+        return
+
+    result = _migrate(raw, strict=False)
+
+    for w in result.warnings:
+        click.echo(f"warning: {w}", err=True)
+    for u in result.unmigratable:
+        click.echo(f"unmigratable: {u}", err=True)
+
+    if result.unmigratable and not force:
+        click.echo(
+            f"refusing to write {out_path}: {len(result.unmigratable)} "
+            f"unmigratable field(s). Re-run with --force to write anyway.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    with open(out_path, 'w') as f:
+        yaml.safe_dump(result.v2, f, sort_keys=False)
+    click.echo(f"Wrote {out_path} (version 2).")
+
+
 if __name__ == '__main__':
     cli()

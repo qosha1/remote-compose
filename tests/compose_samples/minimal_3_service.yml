@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+  api:
+    image: python:3.11-alpine
+    command: ["python", "-m", "http.server", "8000"]
+    depends_on:
+      - cache
+
+  cache:
+    image: redis:7-alpine

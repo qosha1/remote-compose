@@ -1,0 +1,118 @@
+
+# ------------------------------------------------------------------
+# EC2 capacity for EC2-launch services
+# ------------------------------------------------------------------
+
+data "aws_ssm_parameter" "ecs_ami" {
+  name = "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
+}
+
+resource "aws_iam_role" "ec2_instance" {
+  name = "${var.project}-ec2-instance"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_instance_ecs" {
+  role       = aws_iam_role.ec2_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_instance_ssm" {
+  role       = aws_iam_role.ec2_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_instance" {
+  name = "${var.project}-ec2-instance"
+  role = aws_iam_role.ec2_instance.name
+}
+
+resource "aws_security_group" "ec2_instances" {
+  name        = "${var.project}-ec2-instances"
+  description = "ECS EC2 instances - only talk to ALB and within VPC."
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
+    security_groups = [aws_security_group.alb.id]
+  }
+  ingress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    self      = true
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_launch_template" "ec2" {
+  name_prefix   = "${var.project}-ec2-"
+  image_id      = data.aws_ssm_parameter.ecs_ami.value
+  instance_type = "t3.small"
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_instance.name
+  }
+
+  vpc_security_group_ids = [aws_security_group.ec2_instances.id]
+
+  user_data = base64encode(<<-EOT
+    #!/bin/bash
+    echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config
+    echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+  EOT
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = { Name = "${var.project}-ecs-instance" }
+  }
+}
+
+resource "aws_autoscaling_group" "ec2" {
+  name                = "${var.project}-ec2-asg"
+  vpc_zone_identifier = aws_subnet.private[*].id
+  min_size            = 1
+  max_size            = 4
+  desired_capacity    = 2
+  launch_template {
+    id      = aws_launch_template.ec2.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "AmazonECSManaged"
+    value               = "true"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_ecs_capacity_provider" "ec2" {
+  name = "${var.project}-ec2-cp"
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn = aws_autoscaling_group.ec2.arn
+    managed_termination_protection = "DISABLED"
+
+    managed_scaling {
+      status                    = "ENABLED"
+      target_capacity           = 80
+      minimum_scaling_step_size = 1
+      maximum_scaling_step_size = 10
+    }
+  }
+}

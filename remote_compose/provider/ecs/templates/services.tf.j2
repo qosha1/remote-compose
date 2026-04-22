@@ -1,0 +1,110 @@
+{%- for svc in services %}
+resource "aws_ecr_repository" "{{ svc.tf_name }}" {
+  name                 = "${var.project}/{{ svc.name }}"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
+  family                   = "${var.project}-{{ svc.name }}"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["{{ svc.launch_type }}"]
+  cpu                      = "{{ svc.cpu }}"
+  memory                   = "{{ svc.memory }}"
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([{
+    name      = "{{ svc.name }}"
+    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+    essential = true
+{%- if svc.port %}
+    portMappings = [{
+      containerPort = {{ svc.port }}
+      protocol      = "tcp"
+    }]
+{%- endif %}
+{%- if svc.mounts %}
+    mountPoints = [
+{%- for m in svc.mounts %}
+      {
+        sourceVolume  = "{{ m.volume }}"
+        containerPath = "{{ m.mount_path }}"
+        readOnly      = false
+      }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+{%- if secrets %}
+    secrets = [
+{%- for sec in secrets %}
+      {
+        name      = "{{ sec.env_name }}"
+        valueFrom = {{ sec.value_from_ref }}
+      }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.tasks.name
+        "awslogs-region"        = var.region
+        "awslogs-stream-prefix" = "{{ svc.name }}"
+      }
+    }
+  }])
+
+{%- for m in svc.mounts %}
+  volume {
+    name = "{{ m.volume }}"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.{{ m.volume_tf_name }}.id
+      transit_encryption = "ENABLED"
+
+      authorization_config {
+        access_point_id = aws_efs_access_point.{{ m.access_point_tf_name }}.id
+        iam             = "DISABLED"
+      }
+    }
+  }
+{%- endfor %}
+}
+
+resource "aws_ecs_service" "{{ svc.tf_name }}" {
+  name            = "{{ svc.name }}"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.{{ svc.tf_name }}.arn
+  desired_count   = {{ svc.replicas }}
+{%- if svc.launch_type == "EC2" %}
+
+  capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.ec2.name
+    weight            = 1
+    base              = 1
+  }
+{%- else %}
+  launch_type     = "FARGATE"
+{%- endif %}
+
+  network_configuration {
+    subnets          = aws_subnet.private[*].id
+    security_groups  = [aws_security_group.tasks.id]
+    assign_public_ip = false
+  }
+
+{%- if svc.public %}
+  load_balancer {
+    target_group_arn = aws_lb_target_group.default.arn
+    container_name   = "{{ svc.name }}"
+    container_port   = {{ svc.port }}
+  }
+
+  depends_on = [aws_lb_listener.http]
+{%- endif %}
+}
+{% endfor %}
