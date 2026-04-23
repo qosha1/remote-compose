@@ -231,6 +231,23 @@ class TestRollbackLocalBackendRejected:
             ECSProvider().rollback(ctx)
 
 
+class TestExecuteCommand:
+    def test_services_enable_execute_command(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path), out)
+        svc_tf = (out / "services.tf").read_text()
+        # Should appear once per aws_ecs_service resource.
+        assert svc_tf.count("enable_execute_command = true") >= 3
+
+    def test_task_role_has_ssmmessages_policy(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path), out)
+        iam_tf = (out / "iam.tf").read_text()
+        assert "task_execute_command" in iam_tf
+        assert "ssmmessages:CreateControlChannel" in iam_tf
+        assert "ssmmessages:OpenDataChannel" in iam_tf
+
+
 class TestEphemeralStorage:
     def test_emits_ephemeral_storage_block_on_fargate(self, tmp_path):
         out = tmp_path / "tf"

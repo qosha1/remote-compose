@@ -48,6 +48,9 @@ resource "aws_ecs_service" "api" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.api.arn
   desired_count   = 2
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -133,6 +136,9 @@ resource "aws_ecs_service" "db" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.db.arn
   desired_count   = 1
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -203,6 +209,9 @@ resource "aws_ecs_service" "web" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.web.arn
   desired_count   = 1
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -276,6 +285,9 @@ resource "aws_ecs_service" "worker" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.worker.arn
   desired_count   = 1
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ec2.name

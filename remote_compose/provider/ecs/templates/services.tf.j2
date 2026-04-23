@@ -102,6 +102,9 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.{{ svc.tf_name }}.arn
   desired_count   = {{ svc.replicas }}
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
 {%- if svc.launch_type == "EC2" %}
 
   capacity_provider_strategy {

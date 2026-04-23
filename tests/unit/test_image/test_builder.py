@@ -76,6 +76,20 @@ class TestImageBuilder:
         assert "-f" in cmd
         assert str(spec.dockerfile) in cmd
 
+    def test_relative_dockerfile_resolved_against_context(self, spec):
+        # docker resolves a relative -f against the caller's cwd, NOT the
+        # build context. Builder must join a relative dockerfile path to the
+        # context so compose-style "compose/foo/Dockerfile" works.
+        spec.dockerfile = Path("compose/production/django/Dockerfile")
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ImageBuilder(docker_bin="docker").build(spec)
+        cmd = run.call_args.args[0]
+        f_idx = cmd.index("-f")
+        passed = cmd[f_idx + 1]
+        assert passed == str(spec.context / spec.dockerfile)
+        assert Path(passed).is_absolute()
+
     def test_target_stage(self, spec):
         spec.target = "production"
         with mock.patch("subprocess.run") as run:

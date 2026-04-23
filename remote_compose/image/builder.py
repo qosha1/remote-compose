@@ -47,7 +47,13 @@ class ImageBuilder:
 
         cmd = [self.docker_bin, "build"]
         if spec.dockerfile:
-            cmd += ["-f", str(spec.dockerfile)]
+            # Docker resolves a relative -f against the caller's cwd, not the
+            # build context. Join to the context so callers can pass the
+            # compose-style "./compose/.../Dockerfile" relative path verbatim.
+            df = spec.dockerfile
+            if not df.is_absolute():
+                df = spec.context / df
+            cmd += ["-f", str(df)]
         if spec.target:
             cmd += ["--target", spec.target]
         if spec.platform:

@@ -26,6 +26,27 @@ resource "aws_iam_role" "task" {
     }]
   })
 }
+
+# Needed for `aws ecs execute-command` / rc exec / rc db backup.
+# The SSM agent inside the task opens channels back to AWS through these.
+resource "aws_iam_role_policy" "task_execute_command" {
+  name = "${var.project}-task-exec-cmd"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+      ]
+      Resource = "*"
+    }]
+  })
+}
 # Task execution role needs GetSecretValue for every secret referenced.
 resource "aws_iam_role_policy" "task_execution_secrets" {
   name = "${var.project}-task-exec-secrets"
