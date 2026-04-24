@@ -65,6 +65,87 @@ services:
 """
 
 
+def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
+    """If rc.yml is v2, push file-sourced secrets and return True.
+
+    Returns False for v1 so the caller falls back to the legacy pipeline.
+    Uploads each file-sourced secret as a JSON blob {KEY: value, ...} to
+    the SM secret the provider created (name = "<project>/<secret_name>").
+    This matches the ECS JSON-key syntax the provider emits in task defs.
+    """
+    import json
+    from pathlib import Path as _Path
+    path = _Path(config_path) if config_path else _Path.cwd() / RC_CONFIG_FILE
+    if not path.exists():
+        return False
+
+    from remote_compose.cli_v2 import load_rc_yml
+    try:
+        version, raw, v2 = load_rc_yml(path)
+    except Exception as exc:
+        click.echo(f"rc.yml parse failed: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+    if version != 2 or v2 is None:
+        return False
+
+    from remote_compose.envfile import EnvFileError, parse as parse_env
+    ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+    region = ecs_cfg.get("region")
+    aws_profile = ecs_cfg.get("aws_profile")
+    if not region:
+        click.echo("rc.yml v2: provider_config.ecs.region is required.", err=True)
+        raise click.exceptions.Exit(1)
+
+    file_secrets = [s for s in (v2.secrets or []) if s.source == "file"]
+    if not file_secrets:
+        click.echo("No file-sourced secrets in rc.yml.")
+        return True
+
+    import boto3
+    session = boto3.Session(region_name=region, profile_name=aws_profile)
+    sm = session.client("secretsmanager")
+
+    click.echo(f"\nRemote Compose v2 — pushing secrets for {v2.project} in {region}\n")
+
+    project_dir = path.parent
+    total_keys = 0
+    for sec in file_secrets:
+        env_path = _Path(sec.path)
+        if not env_path.is_absolute():
+            env_path = (project_dir / env_path).resolve()
+        try:
+            body = parse_env(env_path)
+        except EnvFileError as exc:
+            click.echo(f"  {sec.name}: {exc}", err=True)
+            raise click.exceptions.Exit(1)
+        if not body:
+            click.echo(f"  {sec.name}: {env_path} has no entries, skipping")
+            continue
+        sm_name = f"{v2.project}/{sec.name}"
+        click.echo(f"  {sec.name} → {sm_name} ({len(body)} keys)...", nl=False)
+        sm.put_secret_value(SecretId=sm_name, SecretString=json.dumps(body))
+        total_keys += len(body)
+        click.echo(" done")
+
+    click.echo(f"\n  Pushed {total_keys} keys across {len(file_secrets)} secret(s).")
+
+    if rollout and file_secrets:
+        cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
+        ecs = session.client("ecs")
+        services = sorted(v2.services.keys()) if v2.services else []
+        if services:
+            click.echo(f"\n  Forcing new deployment on {len(services)} service(s)...")
+            for svc_name in services:
+                try:
+                    ecs.update_service(
+                        cluster=cluster, service=svc_name, forceNewDeployment=True
+                    )
+                    click.echo(f"    {svc_name} ✓")
+                except Exception as exc:
+                    click.echo(f"    {svc_name}: rollout failed — {exc}", err=True)
+    return True
+
+
 def _flatten_v2_to_legacy(v2: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten a v2 rc.yml into the v1 flat dict shape that legacy helpers
     (backup/restore/list, exec, logs, status) expect.
@@ -1056,10 +1137,20 @@ def secrets_group():
 
 
 @secrets_group.command(name='push')
+@click.option('--rollout/--no-rollout', default=True,
+              help='Force new ECS deployments so running tasks pick up the new secrets.')
 @click.pass_context
-def secrets_push(ctx):
+def secrets_push(ctx, rollout):
     """Push secrets from env files defined in rc.yml."""
-    config = _load_config(ctx.obj.get('config_path'))
+    config_path = ctx.obj.get('config_path')
+
+    # v2 path: read rc.yml directly; push one SM secret per file block,
+    # uploaded as JSON so ECS JSON-key selectors resolve per-key env vars.
+    if _secrets_push_v2(config_path, rollout=rollout):
+        return
+
+    # Legacy v1 path below — requires Django models + rc provision.
+    config = _load_config(config_path)
     _bootstrap_django(config)
 
     secrets_files = config.get('secrets', [])

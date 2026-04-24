@@ -31,9 +31,16 @@ GOLDEN_DIR = Path(__file__).parent.parent.parent / "fixtures" / "golden" / "ecs_
 
 def _canonical_ctx(working_dir: Path) -> DeployContext:
     """Locked-down inputs so the golden fixture stays stable."""
+    # The file secret is read at emit time for KEY names; provide a stable
+    # env file under working_dir so the fixture is reproducible.
+    env_dir = working_dir / ".envs" / ".production"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / ".django").write_text(
+        "SECRET_KEY=placeholder\nDATABASE_URL=placeholder\n"
+    )
     return DeployContext(
         project="golden",
-        compose_path=Path("docker-compose.yml"),
+        compose_path=working_dir / "docker-compose.yml",
         rc_yml_v2={
             "version": 2, "project": "golden",
             "domain": "api.example.com",

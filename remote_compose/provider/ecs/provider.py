@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
 from ...terraform.emitter import TerraformEmitter
 from ...terraform.runner import TerraformRunner
@@ -220,21 +221,55 @@ class ECSProvider(Provider):
         has_service_discovery = len(ctx.services) > 1
 
         # Secrets: split into file (terraform-created) vs aws_sm (pre-existing ARN ref).
+        #
+        # For source=file secrets, the provider reads KEY NAMES from the file
+        # at emit time (values are never read) so every key gets its own
+        # entry in the task def's `secrets` block via ECS's JSON-key syntax
+        # `arn:KEY::`. Without this, the whole file's contents would arrive
+        # in the container as one env var — useless for any real app.
+        #
+        # Values are uploaded out-of-band by `rc secrets push` which packs
+        # the file into a JSON blob on the SM secret.
         file_secrets: list[dict[str, Any]] = []
         aws_sm_secrets: list[dict[str, Any]] = []
         secrets_view: list[dict[str, Any]] = []
+        project_dir = (ctx.compose_path.parent if ctx.compose_path else Path.cwd())
         for sec in ctx.secrets or []:
-            env_name = _env_name_for_secret(sec.name)
             if sec.source == "file":
                 tf_sec_name = _tf_name(sec.name)
+                if not sec.path:
+                    raise ProviderConfigError(
+                        f"secret {sec.name!r}: source=file requires path"
+                    )
+                file_path = Path(sec.path)
+                if not file_path.is_absolute():
+                    file_path = (project_dir / file_path).resolve()
+                try:
+                    file_keys = env_file_keys(file_path)
+                except EnvFileError as exc:
+                    raise ProviderConfigError(
+                        f"secret {sec.name!r}: {exc}"
+                    ) from exc
+                if not file_keys:
+                    raise ProviderConfigError(
+                        f"secret {sec.name!r}: {file_path} has no KEY=value entries"
+                    )
                 file_secrets.append({
                     "name": sec.name,
                     "tf_name": tf_sec_name,
+                    "path": str(file_path),
+                    "keys": file_keys,
                 })
-                secrets_view.append({
-                    "env_name": env_name,
-                    "value_from_ref": f"aws_secretsmanager_secret.{tf_sec_name}.arn",
-                })
+                # One task-def secrets[] entry per KEY in the file, pointing
+                # at the same SM secret ARN with a JSON-key selector.
+                for key in file_keys:
+                    secrets_view.append({
+                        "env_name": key,
+                        "value_from_ref": (
+                            f'"${{aws_secretsmanager_secret.{tf_sec_name}.arn}}'
+                            f':{key}::"'
+                        ),
+                    })
             elif sec.source == "aws_sm":
                 if not sec.arn:
                     raise ProviderConfigError(
@@ -244,9 +279,11 @@ class ECSProvider(Provider):
                     "name": sec.name,
                     "arn": sec.arn,
                 })
-                # Quote the ARN so it renders as a HCL string literal
+                # Pre-existing SM secret; we don't know its shape, so the
+                # whole value lands in one env var. Users wanting key splits
+                # on aws_sm should reference sub-keys via sec.ref (future).
                 secrets_view.append({
-                    "env_name": env_name,
+                    "env_name": _env_name_for_secret(sec.name),
                     "value_from_ref": f'"{sec.arn}"',
                 })
             elif sec.source in {"k8s_secret", "gcp_sm"}:

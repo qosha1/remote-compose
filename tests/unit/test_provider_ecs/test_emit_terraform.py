@@ -214,8 +214,10 @@ class TestDeterminism:
 class TestSecretsLeakage:
     def test_secret_values_never_in_emitted_hcl(self, tmp_path):
         sentinel = "SECRET_SENTINEL_abc123"
+        env = tmp_path / ".app"
+        env.write_text(f"SECRET_KEY={sentinel}\nOTHER=y\n")
         ctx = _ctx(tmp_path, secrets=[
-            SecretRef(name="app", source="file", path=f"/tmp/{sentinel}"),
+            SecretRef(name="app", source="file", path=str(env)),
         ])
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)

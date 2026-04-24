@@ -25,6 +25,8 @@ REF_RE = re.compile(
 
 
 def _ctx(tmp_path: Path) -> DeployContext:
+    env = tmp_path / ".django"
+    env.write_text("SECRET_KEY=placeholder\nDATABASE_URL=placeholder\n")
     return DeployContext(
         project="struct",
         compose_path=tmp_path / "docker-compose.yml",
@@ -45,7 +47,7 @@ def _ctx(tmp_path: Path) -> DeployContext:
                                   type="worker", launch_type="EC2"),
         },
         secrets=[
-            SecretRef(name="django", source="file", path="/x/.django"),
+            SecretRef(name="django", source="file", path=str(env)),
         ],
     )
 

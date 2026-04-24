@@ -28,6 +28,14 @@ def _ctx(tmp_path: Path, secrets: list[SecretRef]) -> DeployContext:
     )
 
 
+def _write_env(tmp_path: Path, rel: str, body: str = "SECRET_KEY=x\nDATABASE_URL=y\n") -> Path:
+    """Create an env file under tmp_path and return its path."""
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    return p
+
+
 class TestNoSecrets:
     def test_secrets_tf_empty(self, tmp_path):
         out = tmp_path / "tf"
@@ -88,6 +96,7 @@ class TestAwsSmSecret:
 
 class TestFileSecret:
     def test_terraform_creates_placeholder_secret(self, tmp_path):
+        _write_env(tmp_path, ".envs/.production/.django")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             _ctx(tmp_path, [SecretRef(name="django", source="file",
@@ -99,6 +108,7 @@ class TestFileSecret:
         assert 'aws_secretsmanager_secret_version" "django_placeholder"' in secrets_tf
 
     def test_placeholder_uses_ignore_changes_lifecycle(self, tmp_path):
+        _write_env(tmp_path, ".envs/.production/.django")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             _ctx(tmp_path, [SecretRef(name="django", source="file",
@@ -108,34 +118,87 @@ class TestFileSecret:
         secrets_tf = (out / "secrets.tf").read_text()
         assert "ignore_changes = [secret_string]" in secrets_tf
 
-    def test_task_def_references_terraform_arn(self, tmp_path):
+    def test_task_def_emits_one_entry_per_key_with_json_selector(self, tmp_path):
+        env = _write_env(tmp_path, ".django",
+                         "SECRET_KEY=x\nDATABASE_URL=y\nDEBUG=0\n")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, [SecretRef(name="django", source="file", path="/x/.django")]),
+            _ctx(tmp_path, [SecretRef(name="django", source="file", path=str(env))]),
             out,
         )
         services = (out / "services.tf").read_text()
-        assert "aws_secretsmanager_secret.django.arn" in services
-        assert "DJANGO" in services  # env name
+        # One task-def `secrets[]` entry per key, each with ECS JSON-key syntax
+        # "arn:KEY::" so the container gets individual env vars.
+        for key in ("SECRET_KEY", "DATABASE_URL", "DEBUG"):
+            assert f'name      = "{key}"' in services
+            assert f":{key}::" in services
+        # All three point at the same SM secret ARN.
+        assert services.count("aws_secretsmanager_secret.django.arn") >= 3
 
     def test_iam_policy_references_terraform_arn(self, tmp_path):
+        env = _write_env(tmp_path, ".django")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, [SecretRef(name="django", source="file", path="/x/.django")]),
+            _ctx(tmp_path, [SecretRef(name="django", source="file", path=str(env))]),
             out,
         )
         iam = (out / "iam.tf").read_text()
         assert "task_execution_secrets" in iam
         assert "aws_secretsmanager_secret.django.arn" in iam
 
+    def test_missing_file_rejected(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="env file not found"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, [SecretRef(name="django", source="file",
+                                          path="/nonexistent/.django")]),
+                tmp_path / "tf",
+            )
+
+    def test_empty_env_file_rejected(self, tmp_path):
+        env = _write_env(tmp_path, ".empty", "# just a comment\n")
+        with pytest.raises(ProviderConfigError, match="no KEY=value entries"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, [SecretRef(name="empty", source="file", path=str(env))]),
+                tmp_path / "tf",
+            )
+
+    def test_missing_path_rejected(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="requires path"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, [SecretRef(name="django", source="file")]),
+                tmp_path / "tf",
+            )
+
+    def test_malformed_env_file_rejected(self, tmp_path):
+        env = _write_env(tmp_path, ".bad", "NO_EQUALS_HERE\n")
+        with pytest.raises(ProviderConfigError, match="expected KEY=value"):
+            ECSProvider().emit_terraform(
+                _ctx(tmp_path, [SecretRef(name="bad", source="file", path=str(env))]),
+                tmp_path / "tf",
+            )
+
+    def test_relative_path_resolved_against_compose_dir(self, tmp_path):
+        # Relative path in rc.yml resolves against the compose file's dir,
+        # matching docker-compose and user expectation.
+        _write_env(tmp_path, ".envs/.prod/.django")
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            _ctx(tmp_path, [SecretRef(name="django", source="file",
+                                      path=".envs/.prod/.django")]),
+            out,
+        )
+        # Succeeds only if the provider resolved the relative path correctly.
+        assert 'aws_secretsmanager_secret" "django"' in (out / "secrets.tf").read_text()
+
 
 class TestMixedSecrets:
     def test_file_and_aws_sm_coexist(self, tmp_path):
+        env = _write_env(tmp_path, ".django")
         arn = "arn:aws:secretsmanager:us-west-2:1:secret:db-AbCdEf"
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             _ctx(tmp_path, [
-                SecretRef(name="django", source="file", path="/x/.django"),
+                SecretRef(name="django", source="file", path=str(env)),
                 SecretRef(name="db",     source="aws_sm", arn=arn),
             ]),
             out,
@@ -154,12 +217,13 @@ class TestMixedSecrets:
 
 class TestValueNeverLeaks:
     def test_sentinel_never_appears_in_any_hcl(self, tmp_path):
-        """Even in exotic fields (path, arn) the VALUE must not land in HCL."""
+        """Secret VALUES from the env file must not land in HCL, ever."""
         sentinel = "SECRET_SENTINEL_f00ba2c0de"
+        env = _write_env(tmp_path, ".django", f"SECRET_KEY={sentinel}\nOTHER=y\n")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             _ctx(tmp_path, [
-                SecretRef(name="django", source="file", path=f"/tmp/{sentinel}"),
+                SecretRef(name="django", source="file", path=str(env)),
             ]),
             out,
         )

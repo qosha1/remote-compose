@@ -187,3 +187,75 @@ class TestV2LegacyFlatten:
         cfg = cli_mod._load_config()
         assert cfg["project_name"] == "legacy"
         assert cfg["cluster"] == "old"
+
+
+class TestSecretsPushV2:
+    """rc secrets push for v2 rc.yml: parse each .env file, upload as
+    JSON to SM, force redeploy. boto3 mocked end-to-end."""
+
+    def _v2_cfg(self, env_path: str) -> dict:
+        return {
+            "version": 2, "project": "testproj",
+            "compose_file": "docker-compose.yml",
+            "provider": "ecs",
+            "provider_config": {"ecs": {
+                "cluster": "testproj-cluster", "region": "us-west-1",
+            }},
+            "services": {"django": {"cpu": 256, "memory": 512,
+                                     "type": "application"}},
+            "secrets": [{"name": "django", "source": "file", "path": env_path}],
+        }
+
+    def test_push_uploads_json_and_triggers_rollout(self, tmp_path, monkeypatch):
+        import json as _json
+        from unittest import mock
+        from remote_compose import cli as cli_mod
+
+        env_file = tmp_path / ".envs" / ".test" / ".django"
+        env_file.parent.mkdir(parents=True)
+        env_file.write_text("SECRET_KEY=abc\nDATABASE_URL=postgres://x\n")
+
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2_cfg(".envs/.test/.django"))
+        monkeypatch.chdir(tmp_path)
+
+        sm = mock.Mock()
+        ecs = mock.Mock()
+        session = mock.Mock()
+        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[name]
+        with mock.patch("boto3.Session", return_value=session):
+            handled = cli_mod._secrets_push_v2(str(p), rollout=True)
+
+        assert handled is True
+        sm.put_secret_value.assert_called_once()
+        call_kwargs = sm.put_secret_value.call_args.kwargs
+        assert call_kwargs["SecretId"] == "testproj/django"
+        body = _json.loads(call_kwargs["SecretString"])
+        assert body == {"SECRET_KEY": "abc", "DATABASE_URL": "postgres://x"}
+        ecs.update_service.assert_called_once_with(
+            cluster="testproj-cluster", service="django", forceNewDeployment=True,
+        )
+
+    def test_push_skips_rollout_when_flagged(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli as cli_mod
+
+        env_file = tmp_path / ".django"
+        env_file.write_text("K=v\n")
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2_cfg(str(env_file)))
+        monkeypatch.chdir(tmp_path)
+
+        sm = mock.Mock(); ecs = mock.Mock()
+        session = mock.Mock()
+        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[name]
+        with mock.patch("boto3.Session", return_value=session):
+            cli_mod._secrets_push_v2(str(p), rollout=False)
+        ecs.update_service.assert_not_called()
+
+    def test_push_returns_false_for_v1(self, tmp_path, monkeypatch):
+        from remote_compose import cli as cli_mod
+        p = tmp_path / "rc.yml"
+        _write(p, V1_SAMPLE)
+        monkeypatch.chdir(tmp_path)
+        assert cli_mod._secrets_push_v2(str(p), rollout=True) is False

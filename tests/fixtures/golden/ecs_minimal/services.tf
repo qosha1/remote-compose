@@ -24,8 +24,12 @@ resource "aws_ecs_task_definition" "api" {
     essential = true
     secrets = [
       {
-        name      = "DJANGO"
-        valueFrom = aws_secretsmanager_secret.django.arn
+        name      = "SECRET_KEY"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:SECRET_KEY::"
+      },
+      {
+        name      = "DATABASE_URL"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:DATABASE_URL::"
       },
       {
         name      = "DB_PASSWORD"
@@ -100,8 +104,12 @@ resource "aws_ecs_task_definition" "db" {
     ]
     secrets = [
       {
-        name      = "DJANGO"
-        valueFrom = aws_secretsmanager_secret.django.arn
+        name      = "SECRET_KEY"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:SECRET_KEY::"
+      },
+      {
+        name      = "DATABASE_URL"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:DATABASE_URL::"
       },
       {
         name      = "DB_PASSWORD"
@@ -185,8 +193,12 @@ resource "aws_ecs_task_definition" "web" {
     }]
     secrets = [
       {
-        name      = "DJANGO"
-        valueFrom = aws_secretsmanager_secret.django.arn
+        name      = "SECRET_KEY"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:SECRET_KEY::"
+      },
+      {
+        name      = "DATABASE_URL"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:DATABASE_URL::"
       },
       {
         name      = "DB_PASSWORD"
@@ -261,8 +273,12 @@ resource "aws_ecs_task_definition" "worker" {
     essential = true
     secrets = [
       {
-        name      = "DJANGO"
-        valueFrom = aws_secretsmanager_secret.django.arn
+        name      = "SECRET_KEY"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:SECRET_KEY::"
+      },
+      {
+        name      = "DATABASE_URL"
+        valueFrom = "${aws_secretsmanager_secret.django.arn}:DATABASE_URL::"
       },
       {
         name      = "DB_PASSWORD"
