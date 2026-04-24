@@ -206,3 +206,91 @@ class TestValidation:
         })
         with pytest.raises(ProviderConfigError, match="mount"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+
+class TestPosixUserOverride:
+    """EFS access point posix_user is uid=1000/gid=1000 by default; the
+    uid/gid keys on a volume entry override so containers running as a
+    non-standard user (postgres=70, redis=999, etc.) can actually use
+    the mount. See rc-e5u.27."""
+
+    def test_default_is_1000(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "app": ServiceSpec(name="app", cpu=256, memory=512, type="application",
+                               volumes=[{"name": "data", "mount": "/data"}]),
+        })
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs = (out / "efs.tf").read_text()
+        assert "uid = 1000" in efs
+        assert "gid = 1000" in efs
+        assert 'permissions = "0755"' in efs
+
+    def test_uid_gid_override(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "postgres": ServiceSpec(
+                name="postgres", cpu=256, memory=512, type="infrastructure",
+                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
+                          "uid": 70, "gid": 70}],
+            ),
+        })
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs = (out / "efs.tf").read_text()
+        assert "uid = 70" in efs
+        assert "gid = 70" in efs
+
+    def test_mode_override(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "app": ServiceSpec(name="app", cpu=256, memory=512, type="application",
+                               volumes=[{"name": "data", "mount": "/data",
+                                          "mode": "0700"}]),
+        })
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        assert 'permissions = "0700"' in (out / "efs.tf").read_text()
+
+    def test_non_integer_uid_rejected(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
+                             volumes=[{"name": "d", "mount": "/d", "uid": "seventy"}]),
+        })
+        with pytest.raises(ProviderConfigError, match="uid/gid must be integers"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+    def test_invalid_mode_rejected(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
+                             volumes=[{"name": "d", "mount": "/d", "mode": "755"}]),
+        })
+        with pytest.raises(ProviderConfigError, match="POSIX octal"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+
+class TestStatefulDeploymentStrategy:
+    """EFS-mounting services must stop-then-start to avoid two tasks
+    concurrently mounting the same data dir during forceNewDeployment."""
+
+    def test_stateful_service_has_min_0_max_100(self, tmp_path):
+        ctx = _ctx(tmp_path, {
+            "postgres": ServiceSpec(
+                name="postgres", cpu=256, memory=512, type="infrastructure",
+                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
+                          "uid": 70, "gid": 70}],
+            ),
+            "stateless": ServiceSpec(name="stateless", cpu=256, memory=512,
+                                     type="application"),
+        })
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        services = (out / "services.tf").read_text()
+
+        postgres_block = services.split('resource "aws_ecs_service" "postgres"')[1]
+        postgres_block = postgres_block.split("resource ")[0]
+        assert "deployment_minimum_healthy_percent = 0" in postgres_block
+        assert "deployment_maximum_percent         = 100" in postgres_block
+
+        stateless_block = services.split('resource "aws_ecs_service" "stateless"')[1]
+        stateless_block = stateless_block.split("resource ")[0] \
+            if "resource " in stateless_block else stateless_block
+        assert "deployment_minimum_healthy_percent" not in stateless_block

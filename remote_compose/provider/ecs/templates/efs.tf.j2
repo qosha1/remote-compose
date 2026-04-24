@@ -51,17 +51,20 @@ resource "aws_efs_mount_target" "{{ vol.tf_name }}" {
 resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
   file_system_id = aws_efs_file_system.{{ mount.volume_tf_name }}.id
 
+  # uid/gid default to 1000; override per volume in rc.yml when the
+  # container runs as a non-standard user (postgres:16-alpine = 70,
+  # redis:7-alpine = 999, etc.).
   posix_user {
-    uid = 1000
-    gid = 1000
+    uid = {{ mount.uid }}
+    gid = {{ mount.gid }}
   }
 
   root_directory {
     path = "/{{ mount.service }}"
     creation_info {
-      owner_uid   = 1000
-      owner_gid   = 1000
-      permissions = "0755"
+      owner_uid   = {{ mount.uid }}
+      owner_gid   = {{ mount.gid }}
+      permissions = "{{ mount.mode }}"
     }
   }
 

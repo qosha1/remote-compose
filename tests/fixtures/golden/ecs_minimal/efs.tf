@@ -46,6 +46,9 @@ resource "aws_efs_mount_target" "pgdata" {
 resource "aws_efs_access_point" "db__pgdata" {
   file_system_id = aws_efs_file_system.pgdata.id
 
+  # uid/gid default to 1000; override per volume in rc.yml when the
+  # container runs as a non-standard user (postgres:16-alpine = 70,
+  # redis:7-alpine = 999, etc.).
   posix_user {
     uid = 1000
     gid = 1000

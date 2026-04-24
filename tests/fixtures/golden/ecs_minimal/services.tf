@@ -147,6 +147,11 @@ resource "aws_ecs_service" "db" {
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).
   # Task role carries ssmmessages:* perms (see iam.tf).
   enable_execute_command = true
+  # Service mounts EFS: stop the old task before starting the replacement,
+  # otherwise two containers briefly share the same data directory and
+  # stateful engines (postgres initdb) can wipe each other.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
   launch_type     = "FARGATE"
 
   network_configuration {

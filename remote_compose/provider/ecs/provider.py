@@ -167,6 +167,26 @@ class ECSProvider(Provider):
                         f"service {name!r}: each volume entry requires "
                         f"'name' and 'mount', got {vol_entry!r}"
                     )
+                # Per-service posix user for the EFS access point. Default
+                # 1000:1000 works for most app images. Stateful images that
+                # run as a non-standard uid must override — e.g. postgres
+                # :16-alpine runs as uid=70, redis:7-alpine as uid=999.
+                try:
+                    vol_uid = int(vol_entry.get("uid", 1000))
+                    vol_gid = int(vol_entry.get("gid", 1000))
+                except (TypeError, ValueError) as exc:
+                    raise ProviderConfigError(
+                        f"service {name!r} volume {vol_name!r}: uid/gid must "
+                        f"be integers, got {vol_entry!r}"
+                    ) from exc
+                vol_mode = vol_entry.get("mode", "0755")
+                if not isinstance(vol_mode, str) or not re.fullmatch(
+                    r"0[0-7]{3}", vol_mode
+                ):
+                    raise ProviderConfigError(
+                        f"service {name!r} volume {vol_name!r}: mode must be "
+                        f"a POSIX octal string like '0755', got {vol_mode!r}"
+                    )
                 vol_tf = _tf_name(vol_name)
                 efs_volumes.setdefault(vol_name, {
                     "name": vol_name,
@@ -177,12 +197,21 @@ class ECSProvider(Provider):
                     "volume": vol_name,
                     "volume_tf_name": vol_tf,
                     "mount_path": mount_path,
+                    "uid": vol_uid,
+                    "gid": vol_gid,
+                    "mode": vol_mode,
                     "service": name,
                     "access_point_tf_name": ap_tf,
                 }
                 svc_mounts.append(mount_view)
                 service_volume_mounts.append(mount_view)
 
+            # Stateful services that mount EFS cannot safely run two task
+            # copies against the same mount (the replacement's entrypoint
+            # can race the live primary — postgres initdb will wipe the
+            # data dir before the old task realizes it's being replaced).
+            # Force stop-then-start for any service with EFS volumes.
+            stateful = len(svc_mounts) > 0
             svc_view = {
                 "name": name,
                 "tf_name": _tf_name(name),
@@ -195,6 +224,7 @@ class ECSProvider(Provider):
                 "health_check_path": spec.health_check_path,
                 "launch_type": launch_type,
                 "mounts": svc_mounts,
+                "stateful": stateful,
                 "env": dict(spec.env or {}),
                 "command": list(spec.command or []),
                 # Pre-built compose image; if set (and no build context), task
