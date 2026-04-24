@@ -118,10 +118,15 @@ class TestGoldenFixtureMatches:
 
 def _regenerate() -> None:
     """Overwrite the golden fixture with a fresh emit. Human-invoked only."""
+    import tempfile
     if GOLDEN_DIR.exists():
         shutil.rmtree(GOLDEN_DIR)
     GOLDEN_DIR.mkdir(parents=True)
-    ECSProvider().emit_terraform(_canonical_ctx(GOLDEN_DIR.parent), GOLDEN_DIR)
+    # Use a tempdir as working_dir so the ctx's helper-created files
+    # (.envs/.production/.django for the file-secret) don't leak into
+    # tests/fixtures/.
+    with tempfile.TemporaryDirectory() as work:
+        ECSProvider().emit_terraform(_canonical_ctx(Path(work)), GOLDEN_DIR)
     print(f"Regenerated golden fixture at {GOLDEN_DIR}")
     for p in sorted(GOLDEN_DIR.iterdir()):
         print(f"  {p.name}  {p.stat().st_size}B")

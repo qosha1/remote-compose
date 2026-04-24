@@ -26,6 +26,48 @@ VALID_TLS_MODES = {"acm", "cert-manager", "manual"}
 
 
 @dataclass
+class LifecycleHookV2:
+    """A named one-shot command that runs inside a service container.
+
+    Examples: 'migrate' (django manage.py migrate), 'createsuperuser',
+    'seed' (rails db:seed), 'shell' (interactive REPL).
+    """
+    name: str
+    command: list[str]
+    auto_on_deploy: bool = False
+    run_once: bool = False
+    interactive: bool = False
+    probe: Optional[list[str]] = None  # used by run_once: nonzero = "not yet run"
+
+    def validate(self) -> None:
+        if not isinstance(self.command, list) or not self.command:
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: command must be a non-empty list"
+            )
+        if not all(isinstance(c, str) for c in self.command):
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: command must be list[str]"
+            )
+        if self.run_once and not self.probe:
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: run_once requires a probe command "
+                f"(returns nonzero = 'not yet run')"
+            )
+        if self.probe is not None and (
+            not isinstance(self.probe, list) or not self.probe
+            or not all(isinstance(c, str) for c in self.probe)
+        ):
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: probe must be a non-empty list[str]"
+            )
+        if self.auto_on_deploy and self.interactive:
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: auto_on_deploy hooks cannot be "
+                f"interactive (no human at deploy time)"
+            )
+
+
+@dataclass
 class ServiceV2:
     name: str
     cpu: int
@@ -39,6 +81,7 @@ class ServiceV2:
     ephemeral_storage: Optional[int] = None
     default_target: bool = False
     volumes: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle: dict[str, LifecycleHookV2] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -166,6 +209,44 @@ def _parse_terraform(raw: dict[str, Any]) -> TerraformConfig:
     )
 
 
+def _parse_lifecycle(svc_name: str, raw: dict[str, Any]) -> dict[str, LifecycleHookV2]:
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"service {svc_name!r}: lifecycle must be a mapping of "
+            f"hook-name → spec, got {type(raw).__name__}"
+        )
+    out: dict[str, LifecycleHookV2] = {}
+    for hook_name, hook_raw in raw.items():
+        if not isinstance(hook_raw, dict):
+            raise ConfigError(
+                f"service {svc_name!r}: lifecycle.{hook_name} must be a "
+                f"mapping, got {type(hook_raw).__name__}"
+            )
+        cmd_raw = hook_raw.get("command")
+        if cmd_raw is not None and not isinstance(cmd_raw, list):
+            raise ConfigError(
+                f"lifecycle hook {hook_name!r}: command must be a non-empty list, "
+                f"got {type(cmd_raw).__name__}"
+            )
+        probe_raw = hook_raw.get("probe")
+        if probe_raw is not None and not isinstance(probe_raw, list):
+            raise ConfigError(
+                f"lifecycle hook {hook_name!r}: probe must be a non-empty list[str], "
+                f"got {type(probe_raw).__name__}"
+            )
+        hook = LifecycleHookV2(
+            name=hook_name,
+            command=list(cmd_raw or []),
+            auto_on_deploy=bool(hook_raw.get("auto_on_deploy", False)),
+            run_once=bool(hook_raw.get("run_once", False)),
+            interactive=bool(hook_raw.get("interactive", False)),
+            probe=list(probe_raw) if probe_raw else None,
+        )
+        hook.validate()
+        out[hook_name] = hook
+    return out
+
+
 def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
     try:
         return ServiceV2(
@@ -181,6 +262,8 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             ephemeral_storage=raw.get("ephemeral_storage"),
             default_target=bool(raw.get("default_target", False)),
             volumes=list(raw.get("volumes", [])),
+            lifecycle=_parse_lifecycle(name, raw["lifecycle"])
+                       if raw.get("lifecycle") else {},
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")

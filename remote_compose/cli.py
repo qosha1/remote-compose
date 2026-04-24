@@ -146,6 +146,219 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     return True
 
 
+def _db_push_v2(
+    config_path: Optional[str], local_file: str, service: Optional[str], yes: bool
+) -> bool:
+    """rc db push for v2 stacks: upload local dump → S3 → exec restore.
+
+    Returns True when handled (rc.yml v2 detected), else False so the
+    caller can decide what to do (currently: exit with error).
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+    path = _Path(config_path) if config_path else _Path.cwd() / RC_CONFIG_FILE
+    if not path.exists():
+        return False
+
+    from remote_compose.cli_v2 import (
+        build_deploy_context, load_rc_yml, resolve_provider,
+    )
+    try:
+        version, raw, v2 = load_rc_yml(path)
+    except Exception as exc:
+        click.echo(f"rc.yml parse failed: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+    if version != 2 or v2 is None:
+        return False
+
+    backup_cfg = v2.backup
+    if not backup_cfg or not backup_cfg.bucket:
+        click.echo(
+            "rc db push: rc.yml v2 must declare backup.bucket (S3 staging "
+            "for the dump upload).",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    bucket = backup_cfg.bucket
+    target_service = service or backup_cfg.service
+    if not target_service:
+        click.echo(
+            "rc db push: backup.service not set in rc.yml and --service not "
+            "passed. Specify which service container has psql/pg_restore.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if target_service not in v2.services:
+        click.echo(
+            f"rc db push: service {target_service!r} not in rc.yml.", err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+    region = ecs_cfg.get("region")
+    aws_profile = ecs_cfg.get("aws_profile")
+
+    local = _Path(local_file)
+    fmt = _detect_dump_format(local.name)
+    size_mb = local.stat().st_size / (1024 * 1024)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    s3_key = f"{v2.project}/pushed/{timestamp}-{local.name}"
+    s3_uri = f"s3://{bucket}/{s3_key}"
+
+    click.echo(f"\nrc db push v2 — {v2.project}")
+    click.echo(f"  local:   {local} ({size_mb:.1f} MB)")
+    click.echo(f"  upload:  {s3_uri}")
+    click.echo(f"  target:  {target_service} container in us-west-1")
+    click.echo(f"  format:  {fmt}")
+    if not yes and not click.confirm("\n  This will overwrite existing data. Continue?"):
+        click.echo("  Aborted.")
+        return True
+
+    import boto3
+    session = boto3.Session(region_name=region, profile_name=aws_profile)
+    s3 = session.client("s3")
+    click.echo(f"\n  [1/3] Uploading {local.name} to {s3_uri}...")
+    s3.upload_file(str(local), bucket, s3_key)
+    click.echo(f"        upload complete")
+
+    presigned = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": s3_key},
+        ExpiresIn=7200,
+    )
+
+    deploy_ctx = build_deploy_context(v2, raw, path)
+    provider = resolve_provider(v2)
+
+    restore_script = _build_restore_script(local.name, presigned, fmt)
+    click.echo(f"\n  [2/3] Connecting to {target_service} container, "
+               f"restoring (this may take a while for large dumps)...\n")
+    result = provider.exec(
+        deploy_ctx, target_service,
+        ["sh", "-c", restore_script],
+        timeout=3600,
+    )
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.stderr:
+        click.echo(result.stderr, nl=False, err=True)
+    click.echo(f"\n  [3/3] Cleaning up s3://{bucket}/{s3_key}...")
+    try:
+        s3.delete_object(Bucket=bucket, Key=s3_key)
+        click.echo(f"        deleted (kept locally: {local})")
+    except Exception as exc:
+        click.echo(
+            f"        warning: failed to delete S3 object: {exc}",
+            err=True,
+        )
+    if result.exit_code != 0:
+        click.echo(
+            f"\n  rc db push: restore exited {result.exit_code}",
+            err=True,
+        )
+        raise click.exceptions.Exit(result.exit_code)
+    click.echo("\n  rc db push: complete.")
+    return True
+
+
+def _detect_dump_format(filename: str) -> str:
+    name = filename.lower()
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "tar+pg_restore"
+    if name.endswith(".sql"):
+        return "psql"
+    if name.endswith(".dump") or name.endswith(".pgdump") or name.endswith(".bin"):
+        return "pg_restore"
+    raise click.exceptions.UsageError(
+        f"rc db push: cannot detect dump format from filename {filename!r} — "
+        f"expected one of .dump / .pgdump / .sql / .tar.gz"
+    )
+
+
+def _build_restore_script(filename: str, presigned_url: str, fmt: str) -> str:
+    """Generate a /bin/sh script that downloads the dump and restores it.
+
+    Runs inside the target ECS container. The restore CLI is chosen by
+    fmt; common Postgres env vars (POSTGRES_HOST/USER/DB/PASSWORD) are
+    expected to be in the container's env (provider already wires them
+    via secrets).
+    """
+    pg_common = (
+        "-h ${POSTGRES_HOST:-postgres} "
+        "-p ${POSTGRES_PORT:-5432} "
+        "-U ${POSTGRES_USER:-postgres} "
+        "-d ${POSTGRES_DB:-postgres}"
+    )
+    if fmt == "tar+pg_restore":
+        download = (
+            "mkdir -p /tmp/_rcpush; "
+            f'curl -fsSL -o /tmp/_rcpush/{filename} '
+            f'"{presigned_url}"; '
+            f"tar -xzf /tmp/_rcpush/{filename} -C /tmp/_rcpush; "
+            "DUMP_DIR=$(find /tmp/_rcpush -maxdepth 1 -type d "
+            "! -path /tmp/_rcpush | head -1); "
+            f"PGPASSWORD=$POSTGRES_PASSWORD pg_restore -Fd -v "
+            f"{pg_common} --no-owner --clean --if-exists \"$DUMP_DIR\""
+        )
+    elif fmt == "pg_restore":
+        download = (
+            f'curl -fsSL -o /tmp/_rcpush.dump "{presigned_url}"; '
+            f"PGPASSWORD=$POSTGRES_PASSWORD pg_restore -v "
+            f"{pg_common} --no-owner --clean --if-exists /tmp/_rcpush.dump"
+        )
+    elif fmt == "psql":
+        download = (
+            f'curl -fsSL -o /tmp/_rcpush.sql "{presigned_url}"; '
+            f"PGPASSWORD=$POSTGRES_PASSWORD psql {pg_common} -f /tmp/_rcpush.sql"
+        )
+    else:
+        raise click.exceptions.UsageError(f"unknown format {fmt!r}")
+    return f"set -e; {download}; rc=$?; rm -rf /tmp/_rcpush*; exit $rc"
+
+
+def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
+    """Route 'rc exec' through Provider.exec for v2 stacks; return True
+    when handled. False signals the caller to fall back to the legacy
+    v1 path.
+    """
+    from pathlib import Path as _Path
+    path = _Path(config_path) if config_path else _Path.cwd() / RC_CONFIG_FILE
+    if not path.exists():
+        return False
+
+    from remote_compose.cli_v2 import (
+        build_deploy_context, load_rc_yml, resolve_provider,
+    )
+    try:
+        version, raw, v2 = load_rc_yml(path)
+    except Exception:
+        return False
+    if version != 2 or v2 is None:
+        return False
+
+    if service not in v2.services:
+        click.echo(
+            f"rc exec: service {service!r} not in rc.yml services. "
+            f"Available: {', '.join(sorted(v2.services))}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    ctx = build_deploy_context(v2, raw, path)
+    provider = resolve_provider(v2)
+
+    interactive = sys.stdin.isatty()
+    result = provider.exec(ctx, service, command, interactive=interactive)
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.stderr:
+        click.echo(result.stderr, nl=False, err=True)
+    if result.exit_code != 0:
+        raise click.exceptions.Exit(result.exit_code)
+    return True
+
+
 def _flatten_v2_to_legacy(v2: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten a v2 rc.yml into the v1 flat dict shape that legacy helpers
     (backup/restore/list, exec, logs, status) expect.
@@ -975,7 +1188,7 @@ def restart(ctx, service):
 @click.option('--container', default=None, help='Container name (default: first container)')
 @click.pass_context
 def exec_cmd(ctx, service, command, container):
-    """Execute a command in a running ECS task.
+    """Execute a command in a running container of a service.
 
     \b
     Examples:
@@ -999,6 +1212,11 @@ def exec_cmd(ctx, service, command, container):
             err=True,
         )
         sys.exit(1)
+
+    # v2 path: route through Provider.exec which knows about v2 stacks.
+    # Returns True when handled (rc.yml v2 detected), else falls through.
+    if _exec_v2(ctx.obj.get('config_path'), service, list(command)):
+        return
 
     config = _load_config(ctx.obj.get('config_path'))
     _bootstrap_django(config)
@@ -1435,6 +1653,43 @@ def db_restore(ctx, backup_file, service, yes):
     _exec_interactive(aws_cmd)
 
 
+@db_group.command(name='push')
+@click.argument('local_file', type=click.Path(exists=True, dir_okay=False))
+@click.option('--service', default=None, help='Service to exec into (default: backup.service from rc.yml)')
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt')
+@click.pass_context
+def db_push(ctx, local_file, service, yes):
+    """Upload a LOCAL dump file and restore it into the deployed database.
+
+    \b
+    Useful for seeding test stacks with real data dumped from a local
+    Docker volume:
+
+      docker exec sentinal_postgres pg_dump -Fc -U postgres sentinal \\
+          > /tmp/sentinal.dump
+      rc db push /tmp/sentinal.dump
+
+    \b
+    Format auto-detected by extension:
+      *.dump        -> pg_restore custom format
+      *.tar.gz      -> tar xz | pg_restore directory
+      *.sql         -> psql
+
+    \b
+    Examples:
+      rc db push /tmp/sentinal.dump
+      rc db push --service postgres backup.tar.gz
+    """
+    if _db_push_v2(ctx.obj.get('config_path'), local_file, service, yes):
+        return
+    click.echo(
+        "rc db push currently requires rc.yml v2 (uses Provider.exec for "
+        "execute-command). v1 not supported.",
+        err=True,
+    )
+    raise click.exceptions.Exit(1)
+
+
 @db_group.command(name='list')
 @click.pass_context
 def db_list(ctx):
@@ -1821,6 +2076,103 @@ def migrate_cmd(in_path, out_path, force):
     with open(out_path, 'w') as f:
         yaml.safe_dump(result.v2, f, sort_keys=False)
     click.echo(f"Wrote {out_path} (version 2).")
+
+
+# =============================================================================
+# rc lifecycle — run a named hook declared in rc.yml v2
+# =============================================================================
+
+@cli.command(name='lifecycle')
+@click.argument('hook')
+@click.argument('service', required=False, default=None)
+@click.pass_context
+def lifecycle_cmd(ctx, hook, service):
+    """Run a named lifecycle hook declared on a service in rc.yml.
+
+    \b
+    Examples:
+      rc lifecycle migrate                  # one service declares it
+      rc lifecycle migrate django           # disambiguate explicitly
+      rc lifecycle createsuperuser
+    """
+    from pathlib import Path as _Path
+    config_path = ctx.obj.get('config_path')
+    path = _Path(config_path) if config_path else _Path.cwd() / RC_CONFIG_FILE
+    if not path.exists():
+        click.echo(f"rc lifecycle: {path} not found.", err=True)
+        raise click.exceptions.Exit(1)
+
+    from remote_compose.cli_v2 import (
+        build_deploy_context, load_rc_yml, resolve_provider,
+    )
+    try:
+        version, raw, v2 = load_rc_yml(path)
+    except Exception as exc:
+        click.echo(f"rc.yml parse failed: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+    if version != 2 or v2 is None:
+        click.echo(
+            "rc lifecycle requires rc.yml v2 (declares services[*].lifecycle).",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    # Resolve which service declares this hook.
+    declarers = [
+        name for name, svc in v2.services.items() if hook in (svc.lifecycle or {})
+    ]
+    if service is not None:
+        if service not in v2.services:
+            click.echo(f"rc lifecycle: unknown service {service!r}.", err=True)
+            raise click.exceptions.Exit(1)
+        if service not in declarers:
+            click.echo(
+                f"rc lifecycle: service {service!r} does not declare hook {hook!r}.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
+        target = service
+    else:
+        if not declarers:
+            click.echo(
+                f"rc lifecycle: no service declares hook {hook!r}. "
+                f"Add a `lifecycle.{hook}` block to a service in rc.yml.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
+        if len(declarers) > 1:
+            click.echo(
+                f"rc lifecycle: multiple services declare hook {hook!r}: "
+                f"{', '.join(declarers)}. Disambiguate: rc lifecycle {hook} <service>.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
+        target = declarers[0]
+
+    spec = v2.services[target].lifecycle[hook]
+    deploy_ctx = build_deploy_context(v2, raw, path)
+    provider = resolve_provider(v2)
+
+    # run_once: probe first; skip if probe exits 0.
+    if spec.run_once and spec.probe:
+        probe_result = provider.exec(deploy_ctx, target, list(spec.probe))
+        if probe_result.exit_code == 0:
+            click.echo(
+                f"rc lifecycle: {hook} on {target} already done (probe exit 0); skipping.",
+            )
+            return
+
+    click.echo(f"rc lifecycle: running {hook} on {target}...")
+    result = provider.exec(
+        deploy_ctx, target, list(spec.command),
+        interactive=spec.interactive,
+    )
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.stderr:
+        click.echo(result.stderr, nl=False, err=True)
+    if result.exit_code != 0:
+        raise click.exceptions.Exit(result.exit_code)
 
 
 if __name__ == '__main__':

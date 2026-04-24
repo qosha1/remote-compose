@@ -170,3 +170,30 @@ class TestEcsCfgDomainFallback:
         domain = (out / "domain.tf").read_text()
         assert '"ecs.example.com"' in domain
         assert '"toplevel.example.com"' not in domain
+
+
+class TestRoute53ZoneOverride:
+    """The 2-label _zone_from_domain heuristic fails when the R53 zone
+    is a delegated subdomain (e.g. api.startsimpli.com delegated, but
+    startsimpli.com not held by the account). The route53_zone override
+    lets users bypass the heuristic."""
+
+    def test_explicit_zone_wins_over_heuristic(self, tmp_path):
+        ctx = _ctx(tmp_path,
+                   domain="migration-test.api.startsimpli.com")
+        ctx.provider_config["ecs"]["route53_zone"] = "api.startsimpli.com"
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        domain = (out / "domain.tf").read_text()
+        assert 'name         = "api.startsimpli.com"' in domain
+        assert 'name         = "startsimpli.com"' not in domain
+
+    def test_no_override_falls_back_to_heuristic(self, tmp_path):
+        ctx = _ctx(tmp_path,
+                   domain="migration-test.api.startsimpli.com")
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        domain = (out / "domain.tf").read_text()
+        # Heuristic strips to last two labels — not what we want for nested
+        # zones, hence the override.
+        assert 'name         = "startsimpli.com"' in domain

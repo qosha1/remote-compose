@@ -65,6 +65,10 @@ class ServiceSpec:
     env: dict[str, str] = field(default_factory=dict)
     # Command override — when set, renders as containerDefinitions.command[].
     command: list[str] = field(default_factory=list)
+    # Named lifecycle hooks (rc lifecycle migrate, rc lifecycle createsuperuser).
+    # Keyed by hook name; values are dicts with: command (list[str]), and
+    # optional flags auto_on_deploy / run_once / interactive / probe.
+    lifecycle: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

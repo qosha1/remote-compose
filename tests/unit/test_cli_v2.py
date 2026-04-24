@@ -259,3 +259,221 @@ class TestSecretsPushV2:
         _write(p, V1_SAMPLE)
         monkeypatch.chdir(tmp_path)
         assert cli_mod._secrets_push_v2(str(p), rollout=True) is False
+
+
+class TestAutoOnDeployHooks:
+    """rc deploy must run all auto_on_deploy hooks after the rollout
+    completes, in declaration order, honoring run_once probes."""
+
+    def _v2_with_hooks(self, hooks: dict) -> dict:
+        return {
+            "version": 2, "project": "p",
+            "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "provider_config": {},
+            "terraform": {"backend": {"type": "local"}},
+            "services": {
+                "django": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "public": True, "port": 80,
+                    "lifecycle": hooks,
+                },
+            },
+        }
+
+    def test_auto_on_deploy_hook_runs_after_deploy(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "migrate": {"command": ["./bin/migrate"], "auto_on_deploy": True},
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        provider.exec.return_value = mock.Mock(
+            exit_code=0, stdout="ok", stderr="",
+        )
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            assert v2mod.dispatch_if_v2(str(p), "deploy") is True
+        # exec called once for the migrate hook with the right command.
+        provider.exec.assert_called_once()
+        args = provider.exec.call_args
+        assert args.args[1] == "django"
+        assert args.args[2] == ["./bin/migrate"]
+
+    def test_auto_on_deploy_runs_in_declaration_order(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "first": {"command": ["./first"], "auto_on_deploy": True},
+            "second": {"command": ["./second"], "auto_on_deploy": True},
+            "third": {"command": ["./third"], "auto_on_deploy": True},
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        provider.exec.return_value = mock.Mock(exit_code=0, stdout="", stderr="")
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            v2mod.dispatch_if_v2(str(p), "deploy")
+        called_cmds = [c.args[2] for c in provider.exec.call_args_list]
+        assert called_cmds == [["./first"], ["./second"], ["./third"]]
+
+    def test_run_once_probe_skips_when_satisfied(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "createsuperuser": {
+                "command": ["./csu"], "auto_on_deploy": True,
+                "run_once": True, "probe": ["./check"],
+            },
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        # Probe returns exit 0 — already done.
+        probe_result = mock.Mock(exit_code=0, stdout="", stderr="")
+        run_result = mock.Mock(exit_code=0, stdout="", stderr="")
+        provider.exec.side_effect = [probe_result, run_result]
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            v2mod.dispatch_if_v2(str(p), "deploy")
+        # Only the probe ran; createsuperuser command itself was skipped.
+        assert provider.exec.call_count == 1
+        assert provider.exec.call_args.args[2] == ["./check"]
+
+    def test_run_once_probe_runs_command_when_not_satisfied(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "csu": {
+                "command": ["./csu"], "auto_on_deploy": True,
+                "run_once": True, "probe": ["./check"],
+            },
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        # Probe nonzero -> not done -> run command.
+        provider.exec.side_effect = [
+            mock.Mock(exit_code=1, stdout="", stderr=""),
+            mock.Mock(exit_code=0, stdout="", stderr=""),
+        ]
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            v2mod.dispatch_if_v2(str(p), "deploy")
+        cmds = [c.args[2] for c in provider.exec.call_args_list]
+        assert cmds == [["./check"], ["./csu"]]
+
+    def test_hook_failure_does_not_fail_deploy(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "migrate": {"command": ["./fail"], "auto_on_deploy": True},
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        provider.exec.return_value = mock.Mock(
+            exit_code=1, stdout="", stderr="boom",
+        )
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            # Should NOT raise; hook failures are warnings.
+            assert v2mod.dispatch_if_v2(str(p), "deploy") is True
+
+    def test_no_auto_hooks_short_circuits(self, tmp_path, monkeypatch):
+        from unittest import mock
+        from remote_compose import cli_v2 as v2mod
+        cfg = self._v2_with_hooks({
+            "shell": {"command": ["./shell"], "interactive": True},
+        })
+        p = tmp_path / "rc.yml"
+        _write(p, cfg)
+        monkeypatch.chdir(tmp_path)
+
+        provider = mock.Mock()
+        provider.deploy.return_value = mock.Mock(
+            revision_id="r1", services=["django"], duration_s=1.0,
+            terraform_outputs={}, warnings=[],
+        )
+        with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
+            v2mod.dispatch_if_v2(str(p), "deploy")
+        provider.exec.assert_not_called()
+
+
+class TestDbPushFormatDetection:
+    def test_dump_extension(self):
+        from remote_compose.cli import _detect_dump_format
+        assert _detect_dump_format("foo.dump") == "pg_restore"
+        assert _detect_dump_format("backup.pgdump") == "pg_restore"
+
+    def test_targz_extension(self):
+        from remote_compose.cli import _detect_dump_format
+        assert _detect_dump_format("dir.tar.gz") == "tar+pg_restore"
+        assert _detect_dump_format("dir.tgz") == "tar+pg_restore"
+
+    def test_sql_extension(self):
+        from remote_compose.cli import _detect_dump_format
+        assert _detect_dump_format("seed.sql") == "psql"
+
+    def test_unknown_extension_rejected(self):
+        from remote_compose.cli import _detect_dump_format
+        import click
+        with pytest.raises(click.exceptions.UsageError, match="cannot detect"):
+            _detect_dump_format("data.bak")
+
+
+class TestDbPushRestoreScript:
+    def test_pg_restore_script_uses_curl_then_pg_restore(self):
+        from remote_compose.cli import _build_restore_script
+        s = _build_restore_script("x.dump", "https://signed", "pg_restore")
+        assert "curl -fsSL" in s
+        assert "pg_restore" in s
+        assert "https://signed" in s
+        assert "--no-owner --clean --if-exists" in s
+
+    def test_targz_script_extracts_then_restores_directory(self):
+        from remote_compose.cli import _build_restore_script
+        s = _build_restore_script("x.tar.gz", "https://signed", "tar+pg_restore")
+        assert "tar -xzf" in s
+        assert "pg_restore -Fd" in s
+
+    def test_psql_script_uses_psql_f(self):
+        from remote_compose.cli import _build_restore_script
+        s = _build_restore_script("seed.sql", "https://signed", "psql")
+        assert "psql " in s
+        assert "-f /tmp/_rcpush.sql" in s
+
+    def test_script_cleans_up_on_exit(self):
+        from remote_compose.cli import _build_restore_script
+        for fmt, name in [("pg_restore", "x.dump"), ("psql", "x.sql"),
+                          ("tar+pg_restore", "x.tar.gz")]:
+            s = _build_restore_script(name, "https://signed", fmt)
+            assert "rm -rf /tmp/_rcpush*" in s

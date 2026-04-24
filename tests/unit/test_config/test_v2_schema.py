@@ -142,3 +142,86 @@ class TestTls:
         raw["tls"] = {"mode": "letsencrypt"}
         with pytest.raises(ConfigError, match="tls.mode"):
             parse(raw)
+
+
+class TestLifecycle:
+    def test_no_lifecycle_block_is_empty_dict(self):
+        cfg = parse(_minimal())
+        assert cfg.services["web"].lifecycle == {}
+
+    def test_basic_lifecycle_hook_parses(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "migrate": {"command": ["python", "manage.py", "migrate"]},
+        }
+        cfg = parse(raw)
+        hook = cfg.services["web"].lifecycle["migrate"]
+        assert hook.command == ["python", "manage.py", "migrate"]
+        assert hook.auto_on_deploy is False
+        assert hook.run_once is False
+        assert hook.interactive is False
+        assert hook.probe is None
+
+    def test_auto_on_deploy_flag(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "migrate": {"command": ["./bin/migrate"], "auto_on_deploy": True},
+        }
+        cfg = parse(raw)
+        assert cfg.services["web"].lifecycle["migrate"].auto_on_deploy is True
+
+    def test_run_once_with_probe_parses(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "createsuperuser": {
+                "command": ["python", "manage.py", "createsuperuser", "--noinput"],
+                "run_once": True,
+                "probe": ["sh", "-c", "test $(...) -gt 0"],
+            },
+        }
+        cfg = parse(raw)
+        hook = cfg.services["web"].lifecycle["createsuperuser"]
+        assert hook.run_once is True
+        assert hook.probe == ["sh", "-c", "test $(...) -gt 0"]
+
+    def test_interactive_hook(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "shell": {"command": ["python", "manage.py", "shell"], "interactive": True},
+        }
+        cfg = parse(raw)
+        assert cfg.services["web"].lifecycle["shell"].interactive is True
+
+    def test_empty_command_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {"x": {"command": []}}
+        with pytest.raises(ConfigError, match="non-empty list"):
+            parse(raw)
+
+    def test_non_list_command_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {"x": {"command": "echo hi"}}
+        with pytest.raises(ConfigError, match="non-empty list"):
+            parse(raw)
+
+    def test_run_once_without_probe_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "x": {"command": ["true"], "run_once": True},
+        }
+        with pytest.raises(ConfigError, match="run_once requires"):
+            parse(raw)
+
+    def test_auto_on_deploy_with_interactive_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = {
+            "x": {"command": ["true"], "auto_on_deploy": True, "interactive": True},
+        }
+        with pytest.raises(ConfigError, match="cannot be interactive"):
+            parse(raw)
+
+    def test_lifecycle_must_be_mapping(self):
+        raw = _minimal()
+        raw["services"]["web"]["lifecycle"] = ["migrate", "shell"]
+        with pytest.raises(ConfigError, match="must be a mapping"):
+            parse(raw)

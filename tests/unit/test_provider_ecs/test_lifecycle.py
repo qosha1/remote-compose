@@ -265,15 +265,64 @@ class TestLogsAndExec:
         ctx = _ctx(tmp_path)
         assert list(provider.logs(ctx, "web")) == []
 
-    def test_exec_invokes_execute_command(self, provider, mock_session, tmp_path):
+    def test_exec_captures_stdout_via_sentinels(self, provider, mock_session, tmp_path):
+        from unittest import mock as _mock
         ecs = mock_session.client.return_value
         ecs.list_tasks.return_value = {"taskArns": ["arn:aws:ecs:...:task/abc"]}
-        ecs.execute_command.return_value = {"session": {"sessionId": "sess-1"}}
         ctx = _ctx(tmp_path)
-        result = provider.exec(ctx, "web", ["ls", "-la"])
+        # Simulate aws ecs execute-command stdout: session manager chrome
+        # before, then our sentinel-bracketed payload, then chrome after.
+        fake_stdout = (
+            "Starting session...\n"
+            "__RC_EXEC_BEGIN__\n"
+            "hello world\n"
+            "__RC_EXEC_EXIT__=0\n"
+            "__RC_EXEC_END__\n"
+            "Exiting session...\n"
+        ).encode()
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(returncode=0, stdout=fake_stdout, stderr=b"")
+            result = provider.exec(ctx, "web", ["echo", "hello world"])
         assert result.exit_code == 0
-        assert result.stdout == "sess-1"
-        ecs.execute_command.assert_called_once()
+        assert "hello world" in result.stdout
+        # Sentinels must NOT leak into the user-visible stdout.
+        assert "__RC_EXEC_BEGIN__" not in result.stdout
+        assert "__RC_EXEC_EXIT__" not in result.stdout
+        # Verify aws CLI was invoked with the right cluster + task + container.
+        cmd = run.call_args.args[0]
+        assert "aws" in cmd[0]
+        assert "execute-command" in cmd
+        assert "--task" in cmd
+        assert "arn:aws:ecs:...:task/abc" in cmd
+
+    def test_exec_returns_real_exit_code_from_sentinel(self, provider, mock_session, tmp_path):
+        from unittest import mock as _mock
+        mock_session.client.return_value.list_tasks.return_value = {
+            "taskArns": ["arn:task/abc"]
+        }
+        ctx = _ctx(tmp_path)
+        fake_stdout = (
+            "__RC_EXEC_BEGIN__\noops\n__RC_EXEC_EXIT__=42\n__RC_EXEC_END__\n"
+        ).encode()
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(returncode=0, stdout=fake_stdout, stderr=b"")
+            result = provider.exec(ctx, "web", ["false"])
+        assert result.exit_code == 42
+
+    def test_exec_handles_session_manager_failure(self, provider, mock_session, tmp_path):
+        from unittest import mock as _mock
+        mock_session.client.return_value.list_tasks.return_value = {
+            "taskArns": ["arn:task/abc"]
+        }
+        ctx = _ctx(tmp_path)
+        # No sentinels — session died before our wrapper started.
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(
+                returncode=254, stdout=b"", stderr=b"InvalidParameterException",
+            )
+            result = provider.exec(ctx, "web", ["whoami"])
+        assert result.exit_code == 254
+        assert "InvalidParameterException" in result.stderr
 
     def test_exec_no_running_tasks_returns_error(self, provider, mock_session, tmp_path):
         mock_session.client.return_value.list_tasks.return_value = {"taskArns": []}

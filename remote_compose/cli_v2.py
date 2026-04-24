@@ -164,6 +164,16 @@ def build_deploy_context(
             image=img,
             env=_service_env(svc_compose),
             command=_service_command(svc_compose),
+            lifecycle={
+                hook_name: {
+                    "command": list(h.command),
+                    "auto_on_deploy": h.auto_on_deploy,
+                    "run_once": h.run_once,
+                    "interactive": h.interactive,
+                    "probe": list(h.probe) if h.probe else None,
+                }
+                for hook_name, h in (svc.lifecycle or {}).items()
+            },
         )
 
     secrets = [
@@ -262,6 +272,38 @@ def render_deploy(result) -> str:
     return "\n".join(lines)
 
 
+def _run_auto_on_deploy_hooks(provider, ctx, v2) -> None:
+    """Run every services[*].lifecycle.<hook> with auto_on_deploy=true,
+    in declaration order. Honors run_once via probe. Hook failures are
+    surfaced as warnings, not deploy failures — the user can rerun a
+    failing hook with `rc lifecycle <hook>` and see full output."""
+    import click as _click
+    hooks: list[tuple[str, str, "object"]] = []
+    for svc_name, svc in v2.services.items():
+        for hook_name, hook in (svc.lifecycle or {}).items():
+            if hook.auto_on_deploy:
+                hooks.append((svc_name, hook_name, hook))
+    if not hooks:
+        return
+    _click.echo("\n  Running auto_on_deploy lifecycle hooks:")
+    for svc_name, hook_name, hook in hooks:
+        if hook.run_once and hook.probe:
+            probe = provider.exec(ctx, svc_name, list(hook.probe))
+            if probe.exit_code == 0:
+                _click.echo(f"    {hook_name} on {svc_name}: skipped (run_once probe satisfied)")
+                continue
+        _click.echo(f"    {hook_name} on {svc_name}...")
+        result = provider.exec(ctx, svc_name, list(hook.command))
+        if result.exit_code == 0:
+            _click.echo(f"      ok")
+        else:
+            _click.echo(
+                f"      FAILED (exit {result.exit_code}); "
+                f"rerun with `rc lifecycle {hook_name} {svc_name}` to see full output",
+                err=True,
+            )
+
+
 def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bool:
     """Dispatch a CLI command through the v2 Provider pathway.
 
@@ -297,6 +339,7 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     if command == "deploy":
         result = provider.deploy(ctx)
         click.echo(render_deploy(result))
+        _run_auto_on_deploy_hooks(provider, ctx, v2)
         return True
 
     if command == "destroy":

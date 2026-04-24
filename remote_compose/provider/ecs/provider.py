@@ -648,33 +648,168 @@ class ECSProvider(Provider):
         service: str,
         command: list[str],
         interactive: bool = False,
+        timeout: int = 600,
     ) -> ExecResult:
-        """Delegates to ``ecs execute-command`` via SSM. Full interactive path lives in cli.py."""
+        """Run a command in a live container of the named service.
+
+        Non-interactive path: wraps the user's command in `__RC_BEGIN__`/
+        `__RC_EXIT__=$?`/`__RC_END__` sentinels with a final sync+sleep so
+        SSM has time to flush stdout before the session closes (which
+        otherwise eats the last few KB on fast-exiting commands). Returns
+        a real exit code parsed from the sentinel.
+
+        Interactive path (TTY): exec replaces the current process with
+        `aws ecs execute-command --interactive` so the user gets a real
+        terminal. Caller never observes a return value because the
+        process is replaced; this method only returns when the shell
+        spawn itself fails.
+        """
+        import os as _os
+        import re as _re
+        import shlex
+        import subprocess
+
         ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
-        session = self.session_factory(ctx)
-        client = session.client("ecs")
+        region = ecs_cfg.get("region")
+        profile = ecs_cfg.get("aws_profile")
 
-        tasks = client.list_tasks(
+        boto = self.session_factory(ctx)
+        ecs_client = boto.client("ecs")
+        tasks = ecs_client.list_tasks(
             cluster=cluster, serviceName=service, desiredStatus="RUNNING"
         ).get("taskArns") or []
         if not tasks:
-            return ExecResult(exit_code=1, stdout="", stderr=f"no running tasks for {service}")
+            return ExecResult(
+                exit_code=1, stdout="",
+                stderr=f"no running tasks for service {service!r}",
+            )
+        task_arn = tasks[0]
 
-        resp = client.execute_command(
-            cluster=cluster,
-            task=tasks[0],
-            interactive=interactive,
-            command=" ".join(command),
+        env = _os.environ.copy()
+        if profile:
+            env["AWS_PROFILE"] = profile
+
+        if interactive:
+            return self._exec_interactive_tty(
+                cluster, task_arn, service, command, region, env,
+            )
+        return self._exec_capture(
+            cluster, task_arn, service, command, region, env, timeout,
         )
-        # Non-interactive path doesn't stream; for a real shell the CLI uses
-        # `aws ecs execute-command` interactively (see remote_compose/cli.py).
-        session_meta = resp.get("session") or {}
+
+    _SENTINEL_BEGIN = "__RC_EXEC_BEGIN__"
+    _SENTINEL_END = "__RC_EXEC_END__"
+    _SENTINEL_EXIT = "__RC_EXEC_EXIT__"
+
+    def _exec_capture(
+        self, cluster: str, task_arn: str, container: str,
+        command: list[str], region: Optional[str], env: dict, timeout: int,
+    ) -> ExecResult:
+        import re as _re
+        import shlex
+        import subprocess
+
+        user_cmd = " ".join(shlex.quote(c) for c in command)
+        # `sync; sleep 1` after the user command lets SSM drain its stdout
+        # buffer before the session exits — without it, the last several KB
+        # of output get swallowed on fast commands. Sentinels let us strip
+        # session-manager-plugin chrome and recover the user's real output.
+        wrapped_inner = (
+            f"echo {self._SENTINEL_BEGIN}; "
+            f"({user_cmd}); rc_rc=$?; "
+            f"echo {self._SENTINEL_EXIT}=$rc_rc; "
+            f"sync; sleep 1; "
+            f"echo {self._SENTINEL_END}"
+        )
+        wrapped = f"sh -c {shlex.quote(wrapped_inner)}"
+
+        aws_cmd = [
+            "aws", "ecs", "execute-command",
+            "--cluster", cluster,
+            "--task", task_arn,
+            "--container", container,
+            "--interactive",
+            "--command", wrapped,
+        ]
+        if region:
+            aws_cmd.extend(["--region", region])
+
+        # SSM session-manager-plugin needs stdin to stay open for the
+        # whole session — closing stdin (input=b"" or DEVNULL) causes
+        # "Cannot perform start session: EOF" before our wrapper runs on
+        # any command that takes more than a beat. Pipe in a never-EOFing
+        # stream and let the wrapped command's own exit close the session.
+        keepalive = subprocess.Popen(
+            ["sh", "-c", "while true; do sleep 60; done"],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            proc = subprocess.run(
+                aws_cmd, stdin=keepalive.stdout,
+                capture_output=True, env=env, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ExecResult(
+                exit_code=124,
+                stdout=(exc.stdout or b"").decode("utf-8", errors="replace"),
+                stderr=f"exec timed out after {timeout}s",
+            )
+        finally:
+            keepalive.terminate()
+            try:
+                keepalive.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                keepalive.kill()
+
+        raw_out = proc.stdout.decode("utf-8", errors="replace")
+        raw_err = proc.stderr.decode("utf-8", errors="replace")
+
+        if self._SENTINEL_BEGIN in raw_out and self._SENTINEL_END in raw_out:
+            mid = raw_out.split(self._SENTINEL_BEGIN, 1)[1]
+            mid = mid.split(self._SENTINEL_END, 1)[0]
+            exit_re = _re.compile(rf"{_re.escape(self._SENTINEL_EXIT)}=(\d+)")
+            match = exit_re.search(mid)
+            exit_code = int(match.group(1)) if match else 0
+            stdout = exit_re.sub("", mid)
+            # Strip leading newline from the BEGIN echo and any trailing
+            # whitespace from the END echo padding.
+            stdout = stdout.strip("\n").rstrip() + "\n" if stdout.strip() else ""
+            return ExecResult(exit_code=exit_code, stdout=stdout, stderr=raw_err)
+
+        # No sentinels found — session likely failed before our wrapper
+        # ran. Surface what AWS gave us so the user can debug.
         return ExecResult(
-            exit_code=0,
-            stdout=str(session_meta.get("sessionId", "")),
-            stderr="",
+            exit_code=proc.returncode or 1,
+            stdout=raw_out,
+            stderr=raw_err or (
+                "exec failed: SSM session ended without our sentinels — "
+                "check that ECS Exec is enabled (provider does this on v2 "
+                "deploys) and that the task role carries ssmmessages:* perms"
+            ),
         )
+
+    def _exec_interactive_tty(
+        self, cluster: str, task_arn: str, container: str,
+        command: list[str], region: Optional[str], env: dict,
+    ) -> ExecResult:
+        import os as _os
+        import shlex
+        user_cmd = " ".join(shlex.quote(c) for c in command)
+        aws_cmd = [
+            "aws", "ecs", "execute-command",
+            "--cluster", cluster,
+            "--task", task_arn,
+            "--container", container,
+            "--interactive",
+            "--command", user_cmd,
+        ]
+        if region:
+            aws_cmd.extend(["--region", region])
+        # Replace this process so the user gets a true tty session. If
+        # execvpe returns at all, it failed.
+        _os.execvpe(aws_cmd[0], aws_cmd, env)
+        return ExecResult(exit_code=126, stdout="", stderr="execvpe returned")
 
     # -----------------------------------------------------------------
     # Helpers
@@ -702,7 +837,11 @@ class ECSProvider(Provider):
                 f"domain {domain!r} is set but no service is marked public; "
                 "there is nothing to route traffic to"
             )
-        zone = _zone_from_domain(domain)
+        # Explicit zone override wins over the 2-label heuristic. Accounts
+        # often delegate a subdomain (e.g. api.example.com) without holding
+        # the apex, which breaks _zone_from_domain's naive last-two-labels
+        # guess on any 3+ label FQDN.
+        zone = ecs_cfg.get("route53_zone") or _zone_from_domain(domain)
 
         tls = (ctx.rc_yml_v2 or {}).get("tls") or {}
         tls_mode = tls.get("mode", "acm")
