@@ -189,6 +189,202 @@ class TestV2LegacyFlatten:
         assert cfg["cluster"] == "old"
 
 
+class TestComposeBuildTarget:
+    """Compose 'build: { target: dev }' must pass --target dev to docker
+    build. Multi-stage Dockerfiles are common; ignoring target ships the
+    wrong image."""
+
+    def test_build_target_extracted(self, tmp_path):
+        from remote_compose.cli_v2 import _service_build_info
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services:\n  web:\n    build:\n      context: .\n      target: dev\n")
+        svc = {"build": {"context": ".", "target": "dev"}}
+        _bc, _args, dfile, img, target = _service_build_info_full(svc, compose)
+        assert target == "dev"
+
+    def test_build_target_absent_returns_none(self, tmp_path):
+        from remote_compose.cli_v2 import _service_build_info
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("")
+        svc = {"build": {"context": "."}}
+        _bc, _args, dfile, img, target = _service_build_info_full(svc, compose)
+        assert target is None
+
+    def test_short_build_string_no_target(self, tmp_path):
+        from remote_compose.cli_v2 import _service_build_info
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("")
+        svc = {"build": "."}
+        _bc, _args, dfile, img, target = _service_build_info_full(svc, compose)
+        assert target is None
+
+    def test_target_flows_to_service_spec(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  api:\n    build:\n      context: .\n      target: production\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        # ServiceSpec exposes 'target' so ImageBuildSpec gets it.
+        assert ctx.services["api"].target == "production"
+
+
+# Helper that asserts the new 5-tuple shape of _service_build_info.
+def _service_build_info_full(svc_compose, compose_path):
+    from remote_compose.cli_v2 import _service_build_info
+    result = _service_build_info(svc_compose, compose_path)
+    # New shape: (build_context, build_args, dockerfile, image, target).
+    assert len(result) == 5, f"_service_build_info must return 5-tuple, got {len(result)}"
+    return result
+
+
+class TestComposeEnvFile:
+    """Compose 'env_file: [path1, path2]' is the canonical way to ship
+    env into a service. Provider must read each file and merge into
+    ServiceSpec.env, with compose 'environment:' map values winning."""
+
+    def test_single_env_file_parsed(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        env = tmp_path / ".env.api"
+        env.write_text("FOO=1\nBAR=two\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            f"services:\n  api:\n    image: busybox\n    env_file:\n      - {env}\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["FOO"] == "1"
+        assert ctx.services["api"].env["BAR"] == "two"
+
+    def test_multiple_env_files_merge_in_order(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        e1 = tmp_path / ".env.1"; e1.write_text("FOO=from1\nA=alpha\n")
+        e2 = tmp_path / ".env.2"; e2.write_text("FOO=from2\nB=beta\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            f"services:\n  api:\n    image: busybox\n    env_file:\n      - {e1}\n      - {e2}\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["FOO"] == "from2"  # later file wins
+        assert ctx.services["api"].env["A"] == "alpha"
+        assert ctx.services["api"].env["B"] == "beta"
+
+    def test_environment_map_overrides_env_file(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        e1 = tmp_path / ".env"; e1.write_text("FOO=from_file\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            f"services:\n  api:\n    image: busybox\n    env_file: [{e1}]\n"
+            f"    environment:\n      FOO: from_environment\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["FOO"] == "from_environment"
+
+    def test_env_file_string_form_accepted(self, tmp_path, monkeypatch):
+        # Compose accepts 'env_file: ./path' as a shortcut for a single file.
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        e = tmp_path / ".env"; e.write_text("FOO=ok\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            f"services:\n  api:\n    image: busybox\n    env_file: {e}\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["FOO"] == "ok"
+
+    def test_env_file_relative_path_resolves_against_compose_dir(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        envs = tmp_path / ".envs" / ".local"; envs.mkdir(parents=True)
+        (envs / ".django").write_text("DJANGO_SETTING=ok\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  api:\n    image: busybox\n    env_file:\n"
+            "      - ./.envs/.local/.django\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["DJANGO_SETTING"] == "ok"
+
+
+class TestComposePortsArray:
+    """Compose 'ports: [7788:7788, 5901:5901, 9222:9222]' must produce
+    multiple containerPort entries. Today only the first one survives."""
+
+    def test_multiple_ports_extracted(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  vnc:\n    image: busybox\n    ports:\n"
+            "      - '7788:7788'\n      - '5901:5901'\n      - '9222:9222'\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        # ServiceSpec.extra_ports lists ALL ports beyond the primary
+        # public port, so the task def can expose every one.
+        spec = ctx.services["vnc"]
+        all_ports = sorted({spec.port} | set(spec.extra_ports or []))
+        assert all_ports == [5901, 7788, 9222], f"got {all_ports}"
+
+    def test_no_ports_means_empty_extras(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services:\n  worker:\n    image: busybox\n")
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake", "services": {},
+        })
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["worker"].extra_ports == []
+
+
 class TestComposeAutoImport:
     """build_deploy_context auto-includes compose services that rc.yml
     doesn't list, so adding a service in docker-compose.yml deploys

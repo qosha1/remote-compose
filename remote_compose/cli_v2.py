@@ -55,22 +55,29 @@ def _parse_compose_services(compose_path: Path) -> dict[str, dict]:
 
 def _service_build_info(
     svc_compose: dict, compose_path: Path
-) -> tuple[Optional[Path], dict[str, str], Optional[str], Optional[str]]:
-    """Return (build_context, build_args, dockerfile, image) for a compose svc."""
+) -> tuple[Optional[Path], dict[str, str], Optional[str], Optional[str], Optional[str]]:
+    """Return (build_context, build_args, dockerfile, image, target) for a compose svc."""
     build = svc_compose.get("build")
     image = svc_compose.get("image")
     if build is None:
-        return None, {}, None, image
+        return None, {}, None, image, None
     compose_dir = compose_path.parent
     if isinstance(build, str):
-        return (compose_dir / build).resolve(), {}, None, image
+        return (compose_dir / build).resolve(), {}, None, image, None
     context = build.get("context", ".")
     context_path = (compose_dir / context).resolve()
     args = build.get("args") or {}
     if isinstance(args, list):
         args = dict(kv.split("=", 1) for kv in args if "=" in kv)
     dockerfile = build.get("dockerfile")
-    return context_path, {str(k): str(v) for k, v in args.items()}, dockerfile, image
+    target = build.get("target")
+    return (
+        context_path,
+        {str(k): str(v) for k, v in args.items()},
+        dockerfile,
+        image,
+        target,
+    )
 
 
 _COMPOSE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -95,27 +102,84 @@ def _expand_compose_vars(value: str) -> str:
     return _COMPOSE_VAR_RE.sub(repl, value)
 
 
-def _service_env(svc_compose: dict) -> dict[str, str]:
-    """Extract compose `environment:` into a flat string dict.
+def _service_env(svc_compose: dict, compose_path: Optional[Path] = None) -> dict[str, str]:
+    """Extract compose `environment:` and `env_file:` into a flat dict.
 
-    Supports both the dict form ({VAR: value}) and the list form
-    ([VAR=value, VAR2=value2]). Compose-style ${VAR} / ${VAR:-default}
-    references are expanded at parse time using the current process env.
+    Merge order (later wins):
+      1. each env_file in declaration order
+      2. environment: dict / list
+
+    Supports environment as dict or list, env_file as string or list.
+    Relative env_file paths resolve against the compose file's dir.
+    Compose-style ${VAR} / ${VAR:-default} references in environment:
+    values are expanded against the current process env.
     """
+    out: dict[str, str] = {}
+    compose_dir = compose_path.parent if compose_path else Path.cwd()
+
+    env_files_raw = svc_compose.get("env_file")
+    if env_files_raw is not None:
+        env_files: list = (
+            [env_files_raw] if isinstance(env_files_raw, str) else list(env_files_raw)
+        )
+        from .envfile import EnvFileError, parse as _parse_env
+        for ref in env_files:
+            ref_path = Path(ref)
+            if not ref_path.is_absolute():
+                ref_path = (compose_dir / ref_path).resolve()
+            try:
+                file_vars = _parse_env(ref_path)
+            except EnvFileError:
+                # Compose silently skips missing env_file in some modes; we
+                # surface as warning by populating an empty dict so the
+                # service still attempts to deploy. Hard failures should
+                # come from the secrets/lifecycle layer, not env discovery.
+                file_vars = {}
+            out.update(file_vars)
+
     env = svc_compose.get("environment")
     if env is None:
-        raw = {}
+        environment_dict: dict[str, str] = {}
     elif isinstance(env, dict):
-        raw = {str(k): str(v) for k, v in env.items()}
+        environment_dict = {str(k): str(v) for k, v in env.items()}
     elif isinstance(env, list):
-        raw = {}
+        environment_dict = {}
         for entry in env:
             if "=" in str(entry):
                 k, v = str(entry).split("=", 1)
-                raw[k] = v
+                environment_dict[k] = v
     else:
-        raw = {}
-    return {k: _expand_compose_vars(v) for k, v in raw.items()}
+        environment_dict = {}
+    # environment: wins over env_file
+    out.update({k: _expand_compose_vars(v) for k, v in environment_dict.items()})
+    return out
+
+
+def _service_compose_ports(svc_compose: dict) -> list[int]:
+    """Parse compose ports[] into a list of unique containerPort ints,
+    sorted. Accepts the "host:container" string form or the long-syntax
+    dict form. Compose's published port mapping is irrelevant on Fargate
+    (each task gets its own ENI), so only the container side matters."""
+    out: list[int] = []
+    for entry in svc_compose.get("ports") or []:
+        if isinstance(entry, dict):
+            target = entry.get("target")
+            if target is not None:
+                out.append(int(target))
+            continue
+        s = str(entry)
+        # Strip optional "host_ip:" prefix.
+        if s.count(":") == 2:
+            s = s.split(":", 1)[1]
+        if ":" in s:
+            _host, container = s.split(":", 1)
+        else:
+            container = s
+        # Container side may include /tcp or /udp suffix.
+        container = container.split("/", 1)[0].strip()
+        if container.isdigit():
+            out.append(int(container))
+    return sorted(set(out))
 
 
 def _service_command(svc_compose: dict) -> list[str]:
@@ -164,9 +228,14 @@ def build_deploy_context(
     for name in sorted(deploy_names):
         svc = v2.services.get(name)
         svc_compose = compose_services.get(name) or {}
-        bc, bargs, dfile, img = _service_build_info(svc_compose, compose_path)
+        bc, bargs, dfile, img, target = _service_build_info(svc_compose, compose_path)
+        all_compose_ports = _service_compose_ports(svc_compose)
+        env = _service_env(svc_compose, compose_path)
+        cmd = _service_command(svc_compose)
         if svc is not None:
             # rc.yml-declared service; honor every override.
+            primary_port = svc.port or (all_compose_ports[0] if all_compose_ports else None)
+            extras = [p for p in all_compose_ports if p != primary_port]
             services[name] = ServiceSpec(
                 name=name,
                 cpu=svc.cpu,
@@ -176,15 +245,17 @@ def build_deploy_context(
                 launch_type=svc.launch_type,
                 health_check_path=svc.health_check_path,
                 public=svc.public,
-                port=svc.port,
+                port=primary_port,
                 ephemeral_storage=svc.ephemeral_storage,
                 volumes=list(svc.volumes or []),
                 build_context=bc,
                 build_args=bargs,
                 dockerfile=dfile,
                 image=img,
-                env=_service_env(svc_compose),
-                command=_service_command(svc_compose),
+                target=target,
+                extra_ports=extras,
+                env=env,
+                command=cmd,
                 lifecycle={
                     hook_name: {
                         "command": list(h.command),
@@ -202,19 +273,23 @@ def build_deploy_context(
             # Compose-only service: derive sensible defaults. type=worker
             # when no port (background processes), type=application when
             # the compose has a ports[] entry, never public by default.
-            ports = svc_compose.get("ports") or []
-            inferred_type = "application" if ports else "worker"
+            inferred_type = "application" if all_compose_ports else "worker"
+            primary_port = all_compose_ports[0] if all_compose_ports else None
+            extras = all_compose_ports[1:] if len(all_compose_ports) > 1 else []
             services[name] = ServiceSpec(
                 name=name,
                 cpu=256,
                 memory=512,
                 type=inferred_type,
+                port=primary_port,
                 build_context=bc,
                 build_args=bargs,
                 dockerfile=dfile,
                 image=img,
-                env=_service_env(svc_compose),
-                command=_service_command(svc_compose),
+                target=target,
+                extra_ports=extras,
+                env=env,
+                command=cmd,
             )
 
     secrets = [

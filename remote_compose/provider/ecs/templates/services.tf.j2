@@ -38,11 +38,15 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 {%- endfor %}
     ]
 {%- endif %}
+{%- if svc.port or svc.extra_ports %}
+    portMappings = [
 {%- if svc.port %}
-    portMappings = [{
-      containerPort = {{ svc.port }}
-      protocol      = "tcp"
-    }]
+      { containerPort = {{ svc.port }}, protocol = "tcp" }{% if svc.extra_ports %},{% endif %}
+{%- endif %}
+{%- for ep in svc.extra_ports %}
+      { containerPort = {{ ep }}, protocol = "tcp" }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
 {%- endif %}
 {%- if svc.mounts %}
     mountPoints = [

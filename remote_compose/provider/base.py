@@ -60,6 +60,13 @@ class ServiceSpec:
     build_args: dict[str, str] = field(default_factory=dict)
     dockerfile: Optional[str] = None
     image: Optional[str] = None
+    # Compose 'build: { target: <stage> }' for multi-stage builds. Passed
+    # through to docker build --target.
+    target: Optional[str] = None
+    # Additional containerPorts beyond the primary `port`. Sourced from
+    # compose ports[]. Intra-VPC reachable via the tasks SG without per-
+    # port ALB wiring (use this for VNC, devtools, internal-only ports).
+    extra_ports: list[int] = field(default_factory=list)
     # Plain environment variables (docker-compose environment:). Flows into
     # the ECS task definition containerDefinitions.environment[].
     env: dict[str, str] = field(default_factory=dict)

@@ -232,6 +232,9 @@ class ECSProvider(Provider):
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
                 "ephemeral_storage": spec.ephemeral_storage,
+                # Extra container ports (compose ports[] beyond the primary).
+                # Reachable intra-VPC via the tasks SG; not wired to ALB.
+                "extra_ports": list(spec.extra_ports or []),
                 # Multi-domain routing: when the service declares its own
                 # ALB hostname, it gets a dedicated target group + listener
                 # rule keyed on Host header.
@@ -526,6 +529,7 @@ class ECSProvider(Provider):
                 service=spec.name,
                 context=spec.build_context,
                 dockerfile=Path(spec.dockerfile) if spec.dockerfile else None,
+                target=spec.target,
                 build_args=dict(spec.build_args or {}),
                 tags=[tag],
                 platform="linux/amd64",

@@ -192,10 +192,9 @@ resource "aws_ecs_task_definition" "web" {
     name      = "web"
     image     = "${aws_ecr_repository.web.repository_url}:latest"
     essential = true
-    portMappings = [{
-      containerPort = 80
-      protocol      = "tcp"
-    }]
+    portMappings = [
+      { containerPort = 80, protocol = "tcp" }
+    ]
     secrets = [
       {
         name      = "SECRET_KEY"
