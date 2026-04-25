@@ -129,3 +129,5 @@ Core commands in `management/commands/`:
 - `create_target`, `list_targets`, `test_target`: Target management
 - `deploy`, `list_deployments`, `deployment_logs`, `rollback`: Deployment ops
 - `ecs_cluster`, `ecs_deploy`, `ecs_service`: ECS management
+
+Never attribute Claude / AI in git commits — no `Co-Authored-By`, no `Generated with Claude` footer, plain message only.
