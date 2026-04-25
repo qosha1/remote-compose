@@ -2345,6 +2345,73 @@ def copilot_import(from_dir, out_dir, env_name, project_name, force):
 
 
 # =============================================================================
+# rc compose import — scaffold a starter rc.yml from a docker-compose.yml
+# =============================================================================
+
+@cli.group(name='compose')
+def compose_group():
+    """docker-compose interop helpers."""
+    pass
+
+
+@compose_group.command(name='import')
+@click.option('--from', 'compose_file', default='./docker-compose.yml',
+              show_default=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help='Path to the source docker-compose.yml.')
+@click.option('--out', 'out_path', default='./rc.yml', show_default=True,
+              type=click.Path(dir_okay=False),
+              help='Where to write the scaffolded rc.yml.')
+@click.option('--project', 'project_name', default=None,
+              help='rc.yml v2 project field. Defaults to the parent dir name '
+                   'of the compose file.')
+@click.option('--force', is_flag=True,
+              help='Overwrite an existing rc.yml at --out.')
+def compose_import(compose_file, out_path, project_name, force):
+    """Scaffold a starter rc.yml v2 from an existing docker-compose.yml.
+
+    \b
+    Reads docker-compose.yml and writes an rc.yml shell with project +
+    provider + provider_config defaults, plus per-service overrides for
+    things we can detect (public ports, db services with volume hints,
+    worker-shaped names). env_file refs surface as commented stubs in the
+    secrets: block.
+
+    \b
+    The auto-import path makes services[] OPTIONAL — compose drives the
+    deploy set with cpu=256/memory=512 defaults. Add a service entry only
+    to OVERRIDE those defaults.
+
+    \b
+    Examples:
+      rc compose import
+      rc compose import --from docker-compose.prod.yml --project myapp
+    """
+    from pathlib import Path as _Path
+    from remote_compose.compose_import import scaffold_rc_yml
+
+    src = _Path(compose_file).resolve()
+    dst = _Path(out_path).resolve()
+
+    if dst.exists() and not force:
+        click.echo(
+            f"refusing to overwrite {dst} — re-run with --force to replace.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    rc_yml = scaffold_rc_yml(src, project=project_name)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(rc_yml)
+
+    click.echo(f"\nrc compose import")
+    click.echo(f"  source:  {src}")
+    click.echo(f"  wrote:   {dst}")
+    click.echo(f"\n  Next: edit {dst.name} (provider region, secrets), "
+               f"then `rc plan`.")
+
+
+# =============================================================================
 # rc audit — sweep an AWS account for resources matching a project
 # =============================================================================
 

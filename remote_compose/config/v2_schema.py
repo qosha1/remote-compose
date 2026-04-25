@@ -355,8 +355,12 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
     try:
         return ServiceV2(
             name=name,
-            cpu=int(raw["cpu"]),
-            memory=int(raw["memory"]),
+            # cpu / memory default to 256 / 512 when omitted so partial
+            # overrides (rc.yml entry that only sets type or public)
+            # match the auto-import path's defaults — see
+            # cli_v2.build_deploy_context.
+            cpu=int(raw.get("cpu", 256)),
+            memory=int(raw.get("memory", 512)),
             replicas=int(raw.get("replicas", 1)),
             type=raw.get("type", "application"),
             launch_type=raw.get("launch_type"),

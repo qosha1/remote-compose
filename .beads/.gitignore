@@ -27,6 +27,10 @@ beads.right.meta.json
 backup/
 embeddeddolt/
 interactions.jsonl
+dolt/
+dolt-server.lock
+dolt-server.pid
+dolt-server.port
 
 # Keep JSONL exports and config (source of truth for git)
 !issues.jsonl
