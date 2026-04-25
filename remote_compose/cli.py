@@ -1705,6 +1705,76 @@ def db_push(ctx, local_file, service, yes):
     raise click.exceptions.Exit(1)
 
 
+@db_group.command(name='dump-local')
+@click.option('--container', 'container_name', required=True,
+              help='Local Docker container hosting postgres (e.g. sentinal_postgres).')
+@click.option('--to', 'output_path_str', default=None,
+              help='Local path to write the dump. Defaults to /tmp/rc-dumps/<project>-<timestamp>.dump.')
+@click.option('--user', 'pg_user', default=None,
+              help='Override POSTGRES_USER (auto-discovered from container env by default).')
+@click.option('--database', 'pg_db', default=None,
+              help='Override POSTGRES_DB (auto-discovered from container env by default).')
+@click.option('--port', 'pg_port', type=int, default=None,
+              help='Override POSTGRES_PORT (auto-discovered from container env by default).')
+@click.pass_context
+def db_dump_local(ctx, container_name, output_path_str, pg_user, pg_db, pg_port):
+    """Dump a local Docker postgres container to a file for `rc db push`.
+
+    \b
+    Discovers POSTGRES_USER / POSTGRES_DB / POSTGRES_PORT from the
+    container's own env vars so you don't have to remember per-project
+    port quirks (e.g. sentinal_postgres listens on 5434 inside the
+    container, not 5432).
+
+    \b
+    Examples:
+      rc db dump-local --container sentinal_postgres
+      rc db dump-local --container my_pg --to /tmp/x.dump
+      rc db push /tmp/x.dump        # pair with rc db push for full seed flow
+    """
+    from pathlib import Path as _Path
+    from remote_compose.dblocal import (
+        DumpLocalError, default_dump_path, dump_local,
+    )
+
+    if output_path_str:
+        output_path = _Path(output_path_str)
+    else:
+        # Derive project name for the default file name from rc.yml v2 if present.
+        project = "rc-db-dump"
+        try:
+            from remote_compose.cli_v2 import load_rc_yml
+            rc_path = _Path(ctx.obj.get('config_path') or 'rc.yml')
+            if rc_path.exists():
+                version, _, v2 = load_rc_yml(rc_path)
+                if version == 2 and v2 is not None:
+                    project = v2.project
+        except Exception:
+            pass
+        output_path = default_dump_path(project)
+
+    click.echo(f"\nrc db dump-local — {container_name}")
+    click.echo(f"  output: {output_path}")
+    try:
+        result = dump_local(
+            container=container_name,
+            output_path=output_path,
+            user=pg_user,
+            database=pg_db,
+            port=pg_port,
+        )
+    except DumpLocalError as exc:
+        click.echo(f"\n  FAILED: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+
+    mb = result.size_bytes / (1024 * 1024)
+    click.echo(f"  user:   {result.user}")
+    click.echo(f"  db:     {result.database}")
+    click.echo(f"  port:   {result.port}")
+    click.echo(f"  size:   {mb:.1f} MB")
+    click.echo(f"\n  Next: rc db push {result.path}")
+
+
 @db_group.command(name='list')
 @click.pass_context
 def db_list(ctx):
