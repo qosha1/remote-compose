@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
 from ...terraform.emitter import TerraformEmitter
-from ...terraform.runner import TerraformRunner
+from ...terraform.runner import TerraformError, TerraformRunner
 from ..base import (
     DeployContext,
     DeployResult,
@@ -469,6 +469,7 @@ class ECSProvider(Provider):
         self.emit_terraform(ctx, out_dir)
         runner = self.runner_factory(out_dir)
         runner.init()
+        self._reconcile_orphan_log_groups(ctx, runner)
         runner.apply()
         outputs = runner.output()
 
@@ -538,6 +539,69 @@ class ECSProvider(Provider):
             pusher.push(tags)
             pushed.append(spec.name)
         return pushed
+
+    def _reconcile_orphan_log_groups(
+        self, ctx: DeployContext, runner: TerraformRunner,
+    ) -> None:
+        """Import an AWS-side orphan container-insights log group, if any.
+
+        Container Insights auto-creates ``/aws/ecs/containerinsights/<cluster>/performance``
+        on first task launch when the log group isn't already present. Stacks
+        deployed before terraform managed that log group end up with an
+        orphan: AWS owns it, state doesn't, and the next ``terraform apply``
+        fails with ResourceAlreadyExistsException.
+
+        Detect the orphan via boto3, then ``terraform import`` it into state
+        so the apply that follows is uneventful. Idempotent: if the resource
+        is already in state, terraform import errors with "already managed"
+        — swallowed.
+
+        Best-effort: any AWS or terraform error is logged via progress and
+        ignored. The user can still recover via the documented manual import.
+        """
+        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
+        log_group_name = (
+            f"/aws/ecs/containerinsights/{cluster_name}/performance"
+        )
+
+        try:
+            session = self.session_factory(ctx)
+            logs = session.client("logs")
+            resp = logs.describe_log_groups(logGroupNamePrefix=log_group_name)
+            groups = resp.get("logGroups", [])
+            existing = [
+                g for g in groups
+                if isinstance(g, dict)
+                and g.get("logGroupName") == log_group_name
+            ]
+            if not existing:
+                return
+        except Exception:
+            # boto3 unavailable, mocked, or describe failed — let terraform
+            # try normally; if AWS does have an orphan, apply errors and
+            # the user runs the documented manual import.
+            return
+
+        try:
+            runner.import_resource(
+                "aws_cloudwatch_log_group.container_insights",
+                log_group_name,
+            )
+            if self.progress:
+                self.progress(
+                    f"imported orphan log group {log_group_name} into "
+                    f"terraform state"
+                )
+        except TerraformError as exc:
+            msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
+            if "already managed" in msg or "already exists in state" in msg:
+                return  # already imported on a prior deploy
+            if self.progress:
+                self.progress(
+                    f"warning: failed to import orphan log group "
+                    f"{log_group_name}: {exc}"
+                )
 
     def _force_new_deployments(self, ctx: DeployContext, services: list[str]) -> None:
         ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}

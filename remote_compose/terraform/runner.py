@@ -119,6 +119,16 @@ class TerraformRunner:
         stdout = self._run(args)
         return json.loads(stdout) if stdout.strip() else {}
 
+    def import_resource(self, address: str, resource_id: str) -> None:
+        """Bring an existing real-world resource under terraform management.
+
+        Equivalent to ``terraform import <address> <resource_id>``. Used by
+        providers to reconcile orphans (e.g. AWS auto-created log groups
+        from prior deploys) before ``apply`` would otherwise fail with
+        ResourceAlreadyExistsException.
+        """
+        self._run(["import", "-input=false", "-no-color", address, resource_id])
+
     # -----------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------
