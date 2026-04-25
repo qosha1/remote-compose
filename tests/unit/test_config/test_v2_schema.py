@@ -180,6 +180,24 @@ class TestServiceDomain:
         cfg = parse(raw)
         assert cfg.services["web"].domain == "example.com"
 
+    def test_wildcard_domain_accepted(self):
+        # ACM, R53, and ALB listener rules all support wildcard hosts
+        # at the leftmost label. Real-world Copilot manifests use them
+        # (e.g. nginx http.alias: *.example.com).
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "*.example.com"
+        cfg = parse(raw)
+        assert cfg.services["web"].domain == "*.example.com"
+
+    def test_wildcard_only_at_leftmost_label_rejected(self):
+        # *.foo and a.*.b are both invalid for ACM (only leftmost label
+        # may be a wildcard).
+        for bad in ["*", "foo.*.example.com", "*example.com"]:
+            raw = _minimal()
+            raw["services"]["web"]["domain"] = bad
+            with pytest.raises(ConfigError, match="domain"):
+                parse(raw)
+
     def test_two_services_can_have_distinct_domains(self):
         raw = _minimal()
         raw["services"]["api"] = {

@@ -31,12 +31,21 @@ _FQDN_LABEL_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
 
 def _looks_like_fqdn(name: str) -> bool:
     """Crude FQDN check: at least one dot, RFC1123-ish labels, no
-    trailing dot, no leading/trailing hyphen on any label."""
+    trailing dot, no leading/trailing hyphen on any label.
+
+    Accepts a leading ``*.`` wildcard — ACM, Route 53, and most ALB
+    listener rule conditions support wildcard hostnames at the leftmost
+    label only.
+    """
     if not name or "." not in name or name.endswith("."):
         return False
     if " " in name:
         return False
     labels = name.split(".")
+    if labels[0] == "*":
+        labels = labels[1:]
+        if not labels:
+            return False
     return all(_FQDN_LABEL_RE.match(label) for label in labels)
 
 

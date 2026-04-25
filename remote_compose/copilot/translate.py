@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .discover import CopilotService
+from .discover import CopilotApp, CopilotService
 
 
 # ---------------------------------------------------------------------
@@ -418,6 +418,61 @@ def translate_env_and_secrets(
     return compose_env, rc_secrets, warnings
 
 
+# ---------------------------------------------------------------------
+# Per-environment overrides (rc-e5u.43.7)
+# ---------------------------------------------------------------------
+
+def apply_environment_overrides(
+    svc: CopilotService, env: str | None,
+) -> CopilotService:
+    """Return a new CopilotService with the manifest's environments.<env>
+    overrides deep-merged onto the base raw dict.
+
+    When env is None or the named env isn't in the manifest's
+    environments block, returns the service unchanged. Never mutates
+    the input — translators may iterate the same base manifest for
+    multiple envs.
+    """
+    if env is None:
+        return svc
+    envs_block = (svc.raw or {}).get("environments") or {}
+    overrides = envs_block.get(env)
+    if not overrides or not isinstance(overrides, dict):
+        return svc
+    merged = _deep_merge(svc.raw, overrides)
+    # The collapsed manifest has no further use for the environments
+    # block — drop it so downstream re-reads don't see stale overrides.
+    merged.pop("environments", None)
+    return CopilotService(
+        name=svc.name,
+        type=str(merged.get("type", svc.type)),
+        manifest_path=svc.manifest_path,
+        raw=merged,
+        addons=list(svc.addons or []),
+    )
+
+
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Recursive merge: nested dicts merge per-key; everything else
+    (scalars, lists) is replaced wholesale by the override side.
+
+    Returns a fresh dict — neither input is mutated.
+    """
+    out: dict[str, Any] = {}
+    for key in base:
+        out[key] = base[key] if not isinstance(base[key], dict) else dict(base[key])
+    for key, val in overrides.items():
+        if (
+            key in out
+            and isinstance(out[key], dict)
+            and isinstance(val, dict)
+        ):
+            out[key] = _deep_merge(out[key], val)
+        else:
+            out[key] = val
+    return out
+
+
 def _apply_http_aliases(http: dict[str, Any], out: dict[str, Any]) -> None:
     """http.alias can be a single string, a list of strings, or a list
     of mapping objects {name: ..., hosted_zone: ...}. We extract names
@@ -436,3 +491,178 @@ def _apply_http_aliases(http: dict[str, Any], out: dict[str, Any]) -> None:
         out["domain"] = names[0]
         if len(names) > 1:
             out["aliases"] = names[1:]
+
+
+# ---------------------------------------------------------------------
+# Composer — wires every translator together (rc-e5u.43.9)
+# ---------------------------------------------------------------------
+
+@dataclass
+class ImportResult:
+    rc_yml: dict[str, Any]
+    docker_compose: dict[str, Any]
+    warnings: list[TranslationWarning]
+    summary: str
+
+
+def compose_app(
+    app: CopilotApp,
+    project: str | None = None,
+    env: str | None = None,
+) -> ImportResult:
+    """Compose a CopilotApp into rc.yml v2 + docker-compose dicts.
+
+    Pure function — never writes files. The CLI command (43.9) wraps
+    this with file IO + a summary print.
+
+    `project`: rc.yml v2 'project' field. Defaults to the parent
+    directory name of the copilot/ tree, or 'myapp' if that's empty.
+    `env`: when set, deep-merges environments.<env> overrides on each
+    service before translation; also resolves the
+    ``${COPILOT_ENVIRONMENT_NAME}`` placeholder in secret ARNs.
+    """
+    project_name = project or _default_project_name(app)
+    rc_yml: dict[str, Any] = {
+        "version": 2,
+        "project": project_name,
+        "compose_file": "docker-compose.yml",
+        "provider": "ecs",
+        "provider_config": {"ecs": {
+            "region": _guess_region(app) or "us-west-2",
+            "cluster": f"{project_name}-cluster",
+            "vpc_cidr": "10.0.0.0/16",
+            "default_launch_type": "FARGATE",
+        }},
+        "terraform": {
+            "output_dir": "./terraform/${provider}",
+            "backend": {"type": "local"},
+        },
+        "services": {},
+        "secrets": [],
+    }
+    compose: dict[str, Any] = {"services": {}}
+    warnings: list[TranslationWarning] = []
+    excluded: list[str] = []
+
+    seen_secret_names: set[str] = set()
+    for svc in app.services:
+        merged = apply_environment_overrides(svc, env)
+
+        type_overrides, w = translate_service_type(merged)
+        warnings.extend(w)
+        if type_overrides.get("_skip"):
+            excluded.append(merged.name)
+            continue
+
+        image_block, w = translate_image(merged)
+        warnings.extend(w)
+        resource_overrides, w = translate_resources(merged)
+        warnings.extend(w)
+        storage_overrides, w = translate_storage(merged)
+        warnings.extend(w)
+        _net_out, w = translate_network(merged)
+        warnings.extend(w)
+        compose_env, svc_secrets, w = translate_env_and_secrets(merged, env=env)
+        warnings.extend(w)
+
+        # Build the rc.yml services entry — overrides layer in order:
+        # type → resources → storage → image-side-effects (none today).
+        rc_svc: dict[str, Any] = {}
+        for layer in (type_overrides, resource_overrides, storage_overrides):
+            for k, v in layer.items():
+                if k.startswith("_"):
+                    continue
+                rc_svc[k] = v
+        rc_yml["services"][merged.name] = rc_svc
+
+        # Compose entry: image/build + environment.
+        compose_svc: dict[str, Any] = dict(image_block)
+        if compose_env:
+            compose_svc["environment"] = compose_env
+        compose["services"][merged.name] = compose_svc
+
+        # Top-level secrets list dedupes by name.
+        for s in svc_secrets:
+            if s["name"] in seen_secret_names:
+                continue
+            seen_secret_names.add(s["name"])
+            rc_yml["secrets"].append(s)
+
+    if excluded:
+        rc_yml["compose"] = {"exclude": excluded}
+
+    summary = _build_summary(app, rc_yml, excluded, warnings, env)
+    return ImportResult(
+        rc_yml=rc_yml,
+        docker_compose=compose,
+        warnings=warnings,
+        summary=summary,
+    )
+
+
+def _default_project_name(app: CopilotApp) -> str:
+    # copilot/ usually lives under <repo>/copilot, so the parent dir
+    # name is the natural project label. Fall back to 'myapp' for
+    # repo-root copilot/ trees or odd shapes.
+    parent = app.root.parent
+    name = parent.name if parent and parent.name else ""
+    if not name or name in {"/", ".", ""}:
+        return "myapp"
+    return name
+
+
+def _guess_region(app: CopilotApp) -> str | None:
+    """Best-effort: extract a region from any ACM cert ARN found in
+    environment manifests. Returns None when nothing matches."""
+    import re
+    arn_re = re.compile(r"arn:aws:acm:([a-z0-9-]+):")
+    for env in app.environments:
+        certs = (env.raw.get("http", {}) or {}).get("public", {}).get("certificates") or []
+        for c in certs:
+            m = arn_re.match(str(c))
+            if m:
+                return m.group(1)
+    return None
+
+
+def _build_summary(
+    app: CopilotApp,
+    rc_yml: dict[str, Any],
+    excluded: list[str],
+    warnings: list[TranslationWarning],
+    env: str | None,
+) -> str:
+    """Human-readable wrap of what got translated and what needs review."""
+    lines: list[str] = []
+    lines.append(f"# Copilot import summary — {rc_yml['project']}")
+    lines.append("")
+    lines.append(f"Source: {app.root}")
+    lines.append(f"Environment selected: {env or '(none — base manifest values)'}")
+    lines.append(f"Services translated: {len(rc_yml['services'])}")
+    if rc_yml["services"]:
+        for name in sorted(rc_yml["services"]):
+            lines.append(f"  - {name}")
+    if excluded:
+        lines.append("")
+        lines.append(f"Services skipped: {len(excluded)} (Static Site or similar)")
+        for name in excluded:
+            lines.append(f"  - {name}")
+    if warnings:
+        lines.append("")
+        lines.append(f"Warnings: {len(warnings)} — manual review recommended")
+        # Group by warning class for scannability.
+        by_kind: dict[str, list[TranslationWarning]] = {}
+        for w in warnings:
+            by_kind.setdefault(w.__class__.__name__, []).append(w)
+        for kind, group in sorted(by_kind.items()):
+            lines.append("")
+            lines.append(f"  {kind}: {len(group)}")
+            for w in group:
+                lines.append(f"    [{w.service}] {w.message}")
+    if app.pipelines:
+        lines.append("")
+        lines.append(
+            f"Pipelines detected ({len(app.pipelines)}) — not translated. "
+            f"Set up CI/CD separately (rc deploy is what your pipeline should call)."
+        )
+    return "\n".join(lines) + "\n"
