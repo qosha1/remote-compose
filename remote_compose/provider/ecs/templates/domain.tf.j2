@@ -1,6 +1,11 @@
 {%- if has_domain %}
 # ------------------------------------------------------------------
-# Custom domain, ACM certificate (DNS-validated), Route 53 A-record
+# Custom domain(s), ACM certificate (DNS-validated), Route 53 A-records
+#
+# Single-domain stacks: domain_name + one A-record. Multi-domain stacks:
+# primary domain on cert subject, alt domains on cert SANs, one A-record
+# per name. Single ACM cert covers all hostnames; ALB host-header
+# listener rules in alb.tf route per service.
 # ------------------------------------------------------------------
 
 data "aws_route53_zone" "main" {
@@ -11,6 +16,13 @@ data "aws_route53_zone" "main" {
 {%- if tls_mode == "acm" %}
 resource "aws_acm_certificate" "main" {
   domain_name       = "{{ domain }}"
+{%- if san_domains %}
+  subject_alternative_names = [
+{%- for san in san_domains %}
+    "{{ san }}"{% if not loop.last %},{% endif %}
+{%- endfor %}
+  ]
+{%- endif %}
   validation_method = "DNS"
 
   lifecycle {
@@ -41,9 +53,11 @@ resource "aws_acm_certificate_validation" "main" {
 }
 {%- endif %}
 
-resource "aws_route53_record" "app" {
+# A-record per hostname pointing at the shared ALB.
+{%- for d in all_domains %}
+resource "aws_route53_record" "app_{{ loop.index }}" {
   zone_id = data.aws_route53_zone.main.zone_id
-  name    = "{{ domain }}"
+  name    = "{{ d }}"
   type    = "A"
 
   alias {
@@ -52,4 +66,5 @@ resource "aws_route53_record" "app" {
     evaluate_target_health = true
   }
 }
+{%- endfor %}
 {%- endif %}

@@ -69,6 +69,10 @@ class ServiceSpec:
     # Keyed by hook name; values are dicts with: command (list[str]), and
     # optional flags auto_on_deploy / run_once / interactive / probe.
     lifecycle: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # ALB host-based routing. When set + public=true, the provider creates a
+    # dedicated target group + ALB listener rule (host_header) + R53 record
+    # for this service, and adds the name to the ACM cert SANs.
+    domain: Optional[str] = None
 
 
 @dataclass

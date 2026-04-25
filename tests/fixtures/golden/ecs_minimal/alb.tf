@@ -6,7 +6,6 @@ resource "aws_lb" "main" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id
 }
-
 resource "aws_lb_target_group" "default" {
   name        = "${var.project}-tg"
   port        = 80
@@ -22,6 +21,12 @@ resource "aws_lb_target_group" "default" {
     interval            = 30
     timeout             = 5
   }
+}
+
+# When the default_target service has its own domain, its per-service TG
+# acts as the default. Otherwise we emit a dedicated default TG above.
+locals {
+  default_target_group_arn = aws_lb_target_group.default.arn
 }
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
@@ -47,6 +52,6 @@ resource "aws_lb_listener" "https" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.default.arn
+    target_group_arn = local.default_target_group_arn
   }
 }

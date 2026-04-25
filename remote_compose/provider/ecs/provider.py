@@ -232,6 +232,10 @@ class ECSProvider(Provider):
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
                 "ephemeral_storage": spec.ephemeral_storage,
+                # Multi-domain routing: when the service declares its own
+                # ALB hostname, it gets a dedicated target group + listener
+                # rule keyed on Host header.
+                "domain": spec.domain if spec.public else None,
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
@@ -243,6 +247,19 @@ class ECSProvider(Provider):
                 default_public = svc_view
 
         has_public_service = default_public is not None
+        # Per-service domain routing. Each service with public=true and
+        # domain set gets a dedicated target group + ALB listener rule
+        # (host_header) + R53 alias record + ACM cert SAN. The default
+        # listener action still forwards to default_public (catch-all).
+        domained_services = sorted(
+            [s for s in services_view if s.get("domain")],
+            key=lambda s: s["domain"],
+        )
+        # Listener rules need distinct priorities. Start at 100 and step
+        # by 10 so users can hand-write rules in between later.
+        for i, dsvc in enumerate(domained_services):
+            dsvc["listener_rule_priority"] = 100 + i * 10
+        has_domained_services = len(domained_services) > 0
         has_ec2_service = len(ec2_demands) > 0
         has_efs = len(efs_volumes) > 0
         # Service discovery is cheap (one Cloud Map namespace + one entry per
@@ -359,7 +376,9 @@ class ECSProvider(Provider):
             backup_retention_value = int(backup_retention)
         has_managed_backup_bucket = bool(backup_bucket) and backup_managed
 
-        domain_info = self._resolve_domain(ctx, ecs_cfg, has_public_service)
+        domain_info = self._resolve_domain(
+            ctx, ecs_cfg, has_public_service, domained_services,
+        )
 
         environment = "rc-test" if ctx.project.startswith("rc-test-") else None
 
@@ -388,8 +407,19 @@ class ECSProvider(Provider):
             "zone": (domain_info or {}).get("zone"),
             "tls_mode": (domain_info or {}).get("tls_mode"),
             "certificate_arn": (domain_info or {}).get("certificate_arn"),
+            "san_domains": (domain_info or {}).get("san_domains") or [],
+            "all_domains": (domain_info or {}).get("all_domains") or [],
             "default_target_port": default_target_port,
             "default_health_check_path": default_health_check_path,
+            "domained_services": domained_services,
+            "has_domained_services": has_domained_services,
+            "default_target_tf_name": (default_public or {}).get("tf_name"),
+            # When the default_target service ALSO declares its own domain,
+            # its per-service TG IS the default — emitting a separate empty
+            # aws_lb_target_group.default would 503 on unmatched hosts.
+            "default_target_has_own_tg": bool(
+                default_public and default_public.get("domain")
+            ),
             "backend_block": render_backend_block(ctx.tf_backend_config or {"type": "local"}),
             "has_managed_backup_bucket": has_managed_backup_bucket,
             "backup_bucket": backup_bucket,
@@ -841,25 +871,40 @@ class ECSProvider(Provider):
         ctx: DeployContext,
         ecs_cfg: dict,
         has_public_service: bool,
+        domained_services: list[dict] | None = None,
     ) -> Optional[dict]:
         """Resolve custom domain + TLS from rc.yml v2.
 
         Returns None when no domain is configured, or when there is no public
         service to attach it to (can't HTTPS a worker-only deployment).
+
+        When `domained_services` is non-empty (services declare per-host
+        ALB routing), the returned dict's `domain` is the primary cert
+        subject (lowest sort order across legacy + per-service domains)
+        and `san_domains` lists the rest. `all_domains` is the deduped
+        union, used to emit one R53 record per hostname.
         """
-        domain = ecs_cfg.get("domain") or (ctx.rc_yml_v2 or {}).get("domain")
-        if not domain:
+        domained_services = domained_services or []
+        legacy_domain = ecs_cfg.get("domain") or (ctx.rc_yml_v2 or {}).get("domain")
+        # Collect every distinct hostname that needs a cert + R53 record.
+        all_domains: list[str] = sorted({
+            *(s["domain"] for s in domained_services),
+            *([legacy_domain] if legacy_domain else []),
+        })
+        if not all_domains:
             return None
         if not has_public_service:
             raise ProviderConfigError(
-                f"domain {domain!r} is set but no service is marked public; "
-                "there is nothing to route traffic to"
+                f"domain {all_domains[0]!r} is set but no service is marked "
+                f"public; there is nothing to route traffic to"
             )
+        primary = all_domains[0]
+        sans = [d for d in all_domains if d != primary]
         # Explicit zone override wins over the 2-label heuristic. Accounts
         # often delegate a subdomain (e.g. api.example.com) without holding
         # the apex, which breaks _zone_from_domain's naive last-two-labels
         # guess on any 3+ label FQDN.
-        zone = ecs_cfg.get("route53_zone") or _zone_from_domain(domain)
+        zone = ecs_cfg.get("route53_zone") or _zone_from_domain(primary)
 
         tls = (ctx.rc_yml_v2 or {}).get("tls") or {}
         tls_mode = tls.get("mode", "acm")
@@ -874,10 +919,12 @@ class ECSProvider(Provider):
                 "tls.mode=manual requires tls.certificate_arn"
             )
         return {
-            "domain": domain,
+            "domain": primary,
             "zone": zone,
             "tls_mode": tls_mode,
             "certificate_arn": certificate_arn,
+            "san_domains": sans,
+            "all_domains": all_domains,
         }
 
     def _resolve_ec2_capacity(

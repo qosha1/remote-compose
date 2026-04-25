@@ -144,6 +144,66 @@ class TestTls:
             parse(raw)
 
 
+class TestServiceDomain:
+    """Per-service domain enables ALB host-based routing (e.g. api.foo.com
+    -> django, docs.foo.com -> docs). Validation: domain requires
+    public=true; must look like an FQDN."""
+
+    def test_domain_parses_when_set(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "api.example.com"
+        cfg = parse(raw)
+        assert cfg.services["web"].domain == "api.example.com"
+
+    def test_no_domain_means_none(self):
+        cfg = parse(_minimal())
+        assert cfg.services["web"].domain is None
+
+    def test_domain_on_private_service_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["public"] = False
+        raw["services"]["web"].pop("port", None)
+        raw["services"]["web"]["domain"] = "api.example.com"
+        with pytest.raises(ConfigError, match="public=true"):
+            parse(raw)
+
+    def test_invalid_fqdn_rejected(self):
+        for bad in ["not a domain", "no..dots.com", "trailing.dot.", "-bad.com"]:
+            raw = _minimal()
+            raw["services"]["web"]["domain"] = bad
+            with pytest.raises(ConfigError, match="domain"):
+                parse(raw)
+
+    def test_apex_domain_accepted(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "example.com"
+        cfg = parse(raw)
+        assert cfg.services["web"].domain == "example.com"
+
+    def test_two_services_can_have_distinct_domains(self):
+        raw = _minimal()
+        raw["services"]["api"] = {
+            "cpu": 256, "memory": 512, "type": "application",
+            "public": True, "port": 8080,
+            "domain": "api.example.com",
+        }
+        raw["services"]["web"]["domain"] = "example.com"
+        cfg = parse(raw)
+        assert cfg.services["api"].domain == "api.example.com"
+        assert cfg.services["web"].domain == "example.com"
+
+    def test_duplicate_domain_across_services_rejected(self):
+        raw = _minimal()
+        raw["services"]["api"] = {
+            "cpu": 256, "memory": 512, "type": "application",
+            "public": True, "port": 8080,
+            "domain": "shared.example.com",
+        }
+        raw["services"]["web"]["domain"] = "shared.example.com"
+        with pytest.raises(ConfigError, match="duplicate"):
+            parse(raw)
+
+
 class TestLifecycle:
     def test_no_lifecycle_block_is_empty_dict(self):
         cfg = parse(_minimal())

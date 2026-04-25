@@ -7,6 +7,7 @@ provider_config sub-keys a future provider may add).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +24,20 @@ VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
 VALID_CAPACITY_TYPES = {"ON_DEMAND", "SPOT", "MIXED"}
 VALID_SECRET_SOURCES = {"file", "aws_sm", "k8s_secret", "gcp_sm"}
 VALID_TLS_MODES = {"acm", "cert-manager", "manual"}
+
+
+_FQDN_LABEL_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+
+def _looks_like_fqdn(name: str) -> bool:
+    """Crude FQDN check: at least one dot, RFC1123-ish labels, no
+    trailing dot, no leading/trailing hyphen on any label."""
+    if not name or "." not in name or name.endswith("."):
+        return False
+    if " " in name:
+        return False
+    labels = name.split(".")
+    return all(_FQDN_LABEL_RE.match(label) for label in labels)
 
 
 @dataclass
@@ -82,6 +97,10 @@ class ServiceV2:
     default_target: bool = False
     volumes: list[dict[str, Any]] = field(default_factory=list)
     lifecycle: dict[str, LifecycleHookV2] = field(default_factory=dict)
+    # ALB host-based routing. When set + public=true, the provider creates
+    # a per-service target group, ALB listener rule keyed on Host header,
+    # R53 alias record, and adds the name to the ACM cert SANs.
+    domain: Optional[str] = None
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -98,6 +117,17 @@ class ServiceV2:
             raise ConfigError(
                 f"service {self.name!r}: public=true requires a port"
             )
+        if self.domain is not None:
+            if not self.public:
+                raise ConfigError(
+                    f"service {self.name!r}: domain={self.domain!r} requires "
+                    f"public=true (private services have no ALB target)"
+                )
+            if not _looks_like_fqdn(self.domain):
+                raise ConfigError(
+                    f"service {self.name!r}: domain {self.domain!r} is not a "
+                    f"valid FQDN"
+                )
 
 
 @dataclass
@@ -271,6 +301,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             volumes=list(raw.get("volumes", [])),
             lifecycle=_parse_lifecycle(name, raw["lifecycle"])
                        if raw.get("lifecycle") else {},
+            domain=raw.get("domain"),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -295,6 +326,18 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
 
     services_raw = raw.get("services", {}) or {}
     services = {n: _parse_service(n, s) for n, s in services_raw.items()}
+
+    # Cross-service uniqueness: two services can't claim the same domain.
+    seen_domains: dict[str, str] = {}
+    for svc in services.values():
+        if svc.domain:
+            existing = seen_domains.get(svc.domain)
+            if existing:
+                raise ConfigError(
+                    f"duplicate domain {svc.domain!r} on services "
+                    f"{existing!r} and {svc.name!r}"
+                )
+            seen_domains[svc.domain] = svc.name
 
     secrets_raw = raw.get("secrets", []) or []
     secrets = [_parse_secret(s) for s in secrets_raw]

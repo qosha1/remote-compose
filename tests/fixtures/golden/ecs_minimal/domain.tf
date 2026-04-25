@@ -1,6 +1,11 @@
 
 # ------------------------------------------------------------------
-# Custom domain, ACM certificate (DNS-validated), Route 53 A-record
+# Custom domain(s), ACM certificate (DNS-validated), Route 53 A-records
+#
+# Single-domain stacks: domain_name + one A-record. Multi-domain stacks:
+# primary domain on cert subject, alt domains on cert SANs, one A-record
+# per name. Single ACM cert covers all hostnames; ALB host-header
+# listener rules in alb.tf route per service.
 # ------------------------------------------------------------------
 
 data "aws_route53_zone" "main" {
@@ -38,7 +43,8 @@ resource "aws_acm_certificate_validation" "main" {
   validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
 }
 
-resource "aws_route53_record" "app" {
+# A-record per hostname pointing at the shared ALB.
+resource "aws_route53_record" "app_1" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = "api.example.com"
   type    = "A"

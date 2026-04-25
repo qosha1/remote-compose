@@ -142,7 +142,12 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 
 {%- if svc.public %}
   load_balancer {
+{%- if svc.domain %}
+    # service-specific TG attached via aws_lb_listener_rule (host-header)
+    target_group_arn = aws_lb_target_group.{{ svc.tf_name }}.arn
+{%- else %}
     target_group_arn = aws_lb_target_group.default.arn
+{%- endif %}
     container_name   = "{{ svc.name }}"
     container_port   = {{ svc.port }}
   }
