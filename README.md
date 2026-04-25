@@ -221,6 +221,7 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc secrets push [--rollout/--no-rollout]` | parse each `.env` file → upload as JSON to its SM secret → force-rolls every service |
 | `rc db backup` / `rc db restore` / `rc db list` | postgres backup round-trips through S3 (host-side presigned URLs; tasks just curl) |
 | `rc db push <file>` | upload a local dump → exec `pg_restore` inside the deployed container; auto-detects format from extension (`.dump`, `.tar.gz`, `.sql`); bootstraps `curl + ca-certificates` in containers that don't ship them |
+| `rc copilot import` | migrate an AWS Copilot app to rc.yml v2 + docker-compose; supports `--env <name>` for per-environment overrides ([guide](#aws-copilot-migration)) |
 | `rc doctor` | preflight: terraform/docker/python/boto/AWS creds checked |
 | `rc install` | platform package-manager fix for missing deps |
 
@@ -258,6 +259,55 @@ failures — rerun `rc lifecycle <hook>` for full output).
 `run_once: true` runs the `probe:` first; non-zero exit ⇒ "not yet
 done" ⇒ run the hook. Idempotent createsuperuser, fixture loading,
 schema bootstrap.
+
+### AWS Copilot migration
+
+AWS Copilot reaches **end-of-support on 2026-06-12**. Every team
+running on Copilot needs a path off it. `rc copilot import` is that
+path — it reads any `copilot/` directory tree (services, environments,
+addons, pipelines) and writes a working `rc.yml` v2 + `docker-compose.yml`
++ `IMPORT_SUMMARY.md`.
+
+```bash
+rc copilot import \
+    --from ./copilot \
+    --out  . \
+    --env  production \
+    --project my-app
+```
+
+**What translates today:**
+
+| Copilot construct | rc translation |
+|---|---|
+| `Backend Service` | private rc service (no public, no ALB) |
+| `Worker Service` | rc service `type: worker` |
+| `Load Balanced Web Service` | public rc service + port + `default_target` + domain (from `http.alias`) + aliases |
+| `image.build: { context, dockerfile, target, args }` | docker-compose `build:` block (multi-stage `target` honored) |
+| `image.location` | docker-compose `image:` (Copilot's `${TAG}` interpolation preserved) |
+| `cpu`, `memory`, `count` | rc.yml `cpu`, `memory`, `replicas` |
+| `storage.volumes.<n>: { path, efs: {uid, gid} }` | rc.yml `volumes` with EFS access-point uid/gid |
+| `variables: { KEY: value }` | docker-compose `environment:` |
+| `secrets: { KEY: { secretsmanager: arn } }` | rc.yml `secrets:` `source: aws_sm` |
+| `environments.<env>` overrides | deep-merged when `--env <env>` passed |
+| `${COPILOT_ENVIRONMENT_NAME}` | resolved when `--env` is passed; left literal otherwise |
+
+**What gets flagged for review** (typed warnings grouped in `IMPORT_SUMMARY.md`):
+
+| Copilot construct | warning |
+|---|---|
+| `Request-Driven Web Service` | `UnsupportedServiceTypeWarning` — App Runner is a different runtime; best-effort translated to public ECS for review |
+| `Static Site` | `UnsupportedServiceTypeWarning` — CloudFront+S3 has no ECS analogue; emitted to `compose.exclude` so it's not silently dropped |
+| `count: { range, cpu_percentage }` | `ScalingNotSupportedWarning` — autoscaling not yet emitted; replicas pinned to range floor |
+| `count: 0` | `ScalingNotSupportedWarning` — ECS doesn't scale-to-zero; replicas=1 |
+| `exec: false` | `ExecDisabledIgnoredWarning` — provider always enables ECS Exec |
+| `network.vpc.placement: private` | `PrivateSubnetUnsupportedWarning` — public-subnet Fargate today (rc-e5u.25 tracks the NAT variant) |
+| addons CFN templates | listed in summary — translate to terraform manually (P3 backlog) |
+
+Tested against [a corpus of real Copilot apps](tests/fixtures/copilot/README.md) including:
+- aws/copilot-cli e2e fixtures (canonical LBWS, app-with-domain, static-site)
+- a public external example (ShanikaEdiriweera/aws-copilot-example)
+- a 15-service production-grade app (sentinal: backend + workers + nginx + multi-env + secretsmanager refs)
 
 ### Local-data seeding (`rc db push`)
 
@@ -301,6 +351,9 @@ remote_compose/
 │   ├── v2_schema.py                 # ServiceV2, RcConfigV2, ComposeConfig, BackupConfig, ...
 │   └── migrate.py                   # v1 → v2 with warnings on stateful services
 ├── envfile.py                       # standalone .env parser (used by provider + rc db push + lifecycle)
+├── copilot/
+│   ├── discover.py                  # walk copilot/ → typed CopilotApp model
+│   └── translate.py                 # 5 focused translators + composer + warning types
 ├── provider/
 │   ├── base.py                      # Provider ABC, ServiceSpec, DeployContext, ExecResult, ...
 │   ├── fake.py                      # in-memory provider for the contract suite
