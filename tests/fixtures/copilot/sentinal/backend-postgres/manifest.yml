@@ -1,0 +1,80 @@
+# The manifest for the "backend-postgres" service.
+# Read the full specification for the "Worker Service" type at:
+# https://aws.github.io/copilot-cli/docs/manifest/worker-service/
+
+# Your service name will be used in naming your resources like log groups, ECS services, etc.
+name: backend-postgres
+type: Worker Service
+
+# Configuration for your containers and service.
+image:
+  # Docker build arguments.
+  build:
+    context: ./
+    dockerfile: compose/production/postgres/Dockerfile
+    port: 5432
+
+cpu: 1024 # Number of CPU units for the task.
+memory: 2048 # Amount of memory in MiB used by the task.
+count: 1 # Number of tasks that should be running in your service.
+exec: true # Enable running commands in your container.
+network:
+  connect: true # Enable Service Connect for intra-environment traffic between services.
+
+#secrets:
+# Database secret handling
+#  POSTGRES_USER:
+#    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_USERNAME::'
+#  POSTGRES_PASSWORD:
+#    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_PASSWORD::'
+#  POSTGRES_HOST:
+#    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_ENDPOINT::'
+#  POSTGRES_PORT:
+#    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_PORT::'
+#  POSTGRES_DB:
+#    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_NAME::'
+
+variables: # Pass environment variables as key value pairs.
+  DJANGO_ADMIN_URL: admin-config/
+  DJANGO_SUPERUSER_USERNAME: superuser
+  DJANGO_SUPERUSER_EMAIL: superuser@debugg.ai
+  DJANGO_AWS_REGION: us-east-2
+  # Security
+  # ------------------------------------------------------------------------------
+  # TIP: better off using DNS, however, redirect is OK too
+  DJANGO_SECURE_SSL_REDIRECT: False
+  # django-allauth
+  # ------------------------------------------------------------------------------
+  DJANGO_ACCOUNT_ALLOW_REGISTRATION: True
+  # Gunicorn
+  # ------------------------------------------------------------------------------
+  WEB_CONCURRENCY: 4
+  # Celery
+  # ------------------------------------------------------------------------------
+  CELERY_BROKER_URL: 'redis://:${REDIS_PASSWORD}@redis.${COPILOT_ENVIRONMENT_NAME}.${COPILOT_APPLICATION_NAME}.local:6379'
+  # Flower
+  CELERY_FLOWER_USER: celery_flower_user
+
+# You can override any of the values defined above by environment.
+environments:
+  prod:
+    variables:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      # AWS
+      # ------------------------------------------------------------------------------
+      DJANGO_AWS_STORAGE_BUCKET_NAME: debugg-ai-web-media
+
+      # Sentry
+      # ------------------------------------------------------------------------------
+      SENTRY_DSN: https://eee04454fc2822d31b509bbe03a95aa2@o4508576049987584.ingest.us.sentry.io/4508576051101696
+
+  staging:
+    variables:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      # AWS
+      # ------------------------------------------------------------------------------
+      DJANGO_AWS_STORAGE_BUCKET_NAME: st-debugg-ai-web-media
+
+      # Sentry
+      # ------------------------------------------------------------------------------
+      SENTRY_DSN: https://eee04454fc2822d31b509bbe03a95aa2@o4508576049987584.ingest.us.sentry.io/4508576051101696

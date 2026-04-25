@@ -1,0 +1,159 @@
+# The manifest for the "celery-beat" service.
+# Read the full specification for the "Worker Service" type at:
+# https://aws.github.io/copilot-cli/docs/manifest/worker-service/
+
+# Your service name will be used in naming your resources like log groups, ECS services, etc.
+name: backend-celery-beat
+type: Worker Service
+
+# Configuration for your containers and service.
+image:
+  location: 123456789012.dkr.ecr.us-east-2.amazonaws.com/debugg-ai-web/backend-django:${TAG}
+  # Docker build arguments.
+  # build:
+  #   context: ./
+  #   dockerfile: compose/production/django/Dockerfile
+
+cpu: 256 # Number of CPU units for the task.
+memory: 512 # Amount of memory in MiB used by the task.
+count: 1 # Number of tasks that should be running in your service.
+exec: true # Enable running commands in your container.
+network:
+  connect: true # Enable Service Connect for intra-environment traffic between services.
+
+secrets:
+  # Database secret handling
+  POSTGRES_USER:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:CELERY_DB_USERNAME::'
+  POSTGRES_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:CELERY_DB_PASSWORD::'
+  POSTGRES_HOST:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_ENDPOINT::'
+  POSTGRES_PORT:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_PORT::'
+  POSTGRES_DB:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAIN_DB_NAME::'
+
+  DJANGO_AWS_ACCESS_KEY_ID:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:AWS_ACCESS_KEY_ID::'
+  DJANGO_AWS_SECRET_ACCESS_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:AWS_SECRET_ACCESS_KEY::'
+
+  # Django stuff
+  REDIS_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:REDIS_PASSWORD::'
+  CELERY_FLOWER_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:CELERY_FLOWER_PASSWORD::'
+  DJANGO_SECRET_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:DJANGO_SECRET_KEY::'
+  OPENAI_API_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:OPENAI_API_KEY::'
+  DOMAIN_NAME:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:DOMAIN_NAME::'
+
+  PLAID_SECRET:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:PLAID_SECRET::'
+
+  STRIPE_SECRET_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:STRIPE_SECRET_KEY::'
+
+  GITHUB_CLIENT_SECRET:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:GITHUB_CLIENT_SECRET::'
+
+  SENTRY_DSN:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:SENTRY_DSN::'
+  DEBUGG_AI_HOST:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:DEBUGG_AI_HOST::'
+  DEBUGG_AI_INGEST_URL:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:DEBUGG_AI_INGEST_URL::'
+  LANGFLOW_BASE_API_URL:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:LANGFLOW_BASE_API_URL::'
+  LANGFLOW_APPLICATION_TOKEN:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:LANGFLOW_APPLICATION_TOKEN::'
+  BROWSERLESS_API_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:BROWSERLESS_API_KEY::'
+  NGROK_TUNNEL_BOT_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:NGROK_TUNNEL_BOT_KEY::'
+  NGROK_AUTH_TOKEN:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:NGROK_AUTH_TOKEN::'
+  ASTRA_DB_API_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:ASTRA_DB_API_KEY::'
+  ASTRA_DB_ENDPOINT:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:ASTRA_DB_ENDPOINT::'
+  PUBLIC_OPENAI_API_KEY:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:PUBLIC_OPENAI_API_KEY::'
+
+  BROWSER_MGR_USERNAME:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:BROWSER_MGR_USERNAME::'
+  BROWSER_MGR_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:BROWSER_MGR_PASSWORD::'
+
+  SURFER_API_SECRET:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:SURFER_API_SECRET::'
+
+  MAILJET_API_KEY_PUBLIC:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAILJET_API_KEY_PUBLIC::'
+  MAILJET_API_KEY_PRIVATE:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:MAILJET_API_KEY_PRIVATE::'
+
+
+variables: # Pass environment variables as key value pairs.
+  DJANGO_ADMIN_URL: admin-config/
+  DJANGO_AWS_REGION: us-east-2
+  DJANGO_SETTINGS_MODULE: config.settings.production
+  # Security
+  # ------------------------------------------------------------------------------
+  # TIP: better off using DNS, however, redirect is OK too
+  DJANGO_SECURE_SSL_REDIRECT: False
+  # django-allauth
+  # ------------------------------------------------------------------------------
+  DJANGO_ACCOUNT_ALLOW_REGISTRATION: True
+  # Gunicorn
+  # ------------------------------------------------------------------------------
+  WEB_CONCURRENCY: 4
+  # Celery
+  # ------------------------------------------------------------------------------
+  # Flower
+  CELERY_FLOWER_USER: celery_flower_user
+
+  PLAID_CLIENT_ID: 673bc53a5f7fd300182ed586
+  PLAID_ENV: production
+  STRIPE_PUBLISHABLE_KEY: pk_live_51GtcWyE2fP7o4J8T4hIy5rT70pwccOhTcqMz57ncktgAu9TFFbRGD9FN0AWkmatSkviaNkwmeRognAQyPkNpFtgt00FMU34k5I
+
+# You can override any of the values defined above by environment.
+environments:
+  production:
+    variables:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      # AWS
+      # ------------------------------------------------------------------------------
+      DJANGO_AWS_STORAGE_BUCKET_NAME: debugg-ai-web-media
+
+      # Sentry
+      # ------------------------------------------------------------------------------
+      SENTRY_ENVIRONMENT: production
+      DEBUGG_AI_ENVIRONMENT: production
+
+  staging:
+    variables:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      # AWS
+      # ------------------------------------------------------------------------------
+      DJANGO_AWS_STORAGE_BUCKET_NAME: st-debugg-ai-web-media
+
+      # Sentry
+      # ------------------------------------------------------------------------------
+      SENTRY_ENVIRONMENT: staging
+      DEBUGG_AI_ENVIRONMENT: staging
+
+  dev:
+    variables:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      # AWS
+      # ------------------------------------------------------------------------------
+      DJANGO_AWS_STORAGE_BUCKET_NAME: dev-debugg-ai-web-media
+
+      # Sentry
+      # ------------------------------------------------------------------------------
+      SENTRY_ENVIRONMENT: dev
+      DEBUGG_AI_ENVIRONMENT: dev

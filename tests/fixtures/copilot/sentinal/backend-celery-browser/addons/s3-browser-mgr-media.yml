@@ -1,0 +1,41 @@
+# S3 Browser Manager Media Bucket Access
+# Grants the Celery browser worker access to download recordings from browser-mgr
+
+Parameters:
+  App:
+    Type: String
+    Description: Your application's name.
+  Env:
+    Type: String
+    Description: The environment name your service is being deployed to.
+  Name:
+    Type: String
+    Description: Your workload's name.
+
+Resources:
+  BrowserMgrMediaAccessPolicy:
+    Metadata:
+      'aws:copilot:description': 'IAM policy to access browser-mgr-media S3 bucket'
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: !Sub 'Policy for ${Name} to access browser-mgr-media S3 bucket'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowGetObject
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - 'arn:aws:s3:::browser-mgr-media-123456789012/*'
+          - Sid: AllowListBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - 'arn:aws:s3:::browser-mgr-media-123456789012'
+
+Outputs:
+  BrowserMgrMediaAccessPolicyArn:
+    Description: ARN of the browser-mgr-media access policy
+    Value: !Ref BrowserMgrMediaAccessPolicy

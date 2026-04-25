@@ -1,0 +1,11 @@
+# Add the docker login creds
+- op: add
+  path: /Resources/BuildProject/Properties/Environment/EnvironmentVariables/-
+  value:
+    Name: DOCKERHUB_USERNAME
+    Value: quinnosha
+- op: add
+  path: /Resources/BuildProject/Properties/Environment/EnvironmentVariables/-
+  value:
+    Name: DOCKERHUB_PASSWORD
+    Value: 4Dockeract!

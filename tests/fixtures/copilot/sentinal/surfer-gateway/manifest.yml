@@ -1,0 +1,52 @@
+name: surfer-gateway
+type: Load Balanced Web Service
+
+# Gateway configuration
+count: 1
+cpu: 512
+memory: 1024
+
+network:
+  connnect: true
+
+# Docker configuration
+image:
+  port: 3000
+  location: 123456789012.dkr.ecr.us-east-2.amazonaws.com/copilot-debugg-ai-web-production-surfer-gateway:latest
+  # build: 
+    # dockerfile: ./compose/production/Dockerfile
+    # context: .
+
+# HTTP configuration
+http:
+  path: '/'
+  healthcheck:
+    path: '/health'
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    grace_period: 60s
+
+secrets:
+  REDIS_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:REDIS_PASSWORD::'
+
+# Environment configuration
+environments:
+  production:
+    http:
+      alias: ['surfer-gateway.debugg.ai',]
+    count: 1
+    cpu: 512
+    memory: 1024
+    env:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      # Coordinator mode
+      COORDINATOR_MODE: true
+      # Monitoring
+      MONITORING_ENABLED: true
+      # Service discovery
+      WORKER_SERVICE_NAME: surfer-worker
+      # Redis will be constructed at runtime using REDIS_PASSWORD and Copilot env vars
