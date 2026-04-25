@@ -345,6 +345,20 @@ class ECSProvider(Provider):
 
         ec2_capacity_cfg = self._resolve_ec2_capacity(ecs_cfg, ec2_demands) if has_ec2_service else None
 
+        # Backup bucket: when rc.yml v2 declares backup.bucket and it is
+        # not opted out via bucket_managed=false, terraform creates and
+        # owns it. Removes the manual `aws s3api create-bucket` step
+        # before any rc db push / rc db backup.
+        backup_cfg = (ctx.rc_yml_v2 or {}).get("backup") or {}
+        backup_bucket = backup_cfg.get("bucket")
+        backup_managed = bool(backup_cfg.get("bucket_managed", True))
+        backup_retention = backup_cfg.get("retention_days", 14)
+        if backup_retention in (None, "never", 0):
+            backup_retention_value: Optional[int] = None
+        else:
+            backup_retention_value = int(backup_retention)
+        has_managed_backup_bucket = bool(backup_bucket) and backup_managed
+
         domain_info = self._resolve_domain(ctx, ecs_cfg, has_public_service)
 
         environment = "rc-test" if ctx.project.startswith("rc-test-") else None
@@ -377,6 +391,10 @@ class ECSProvider(Provider):
             "default_target_port": default_target_port,
             "default_health_check_path": default_health_check_path,
             "backend_block": render_backend_block(ctx.tf_backend_config or {"type": "local"}),
+            "has_managed_backup_bucket": has_managed_backup_bucket,
+            "backup_bucket": backup_bucket,
+            "backup_retention_days": backup_retention_value,
+            "is_rc_test": ctx.project.startswith("rc-test-"),
         }
 
         self.emitter.render(context, out_dir)

@@ -26,3 +26,12 @@ resource "aws_cloudwatch_log_group" "tasks" {
   name              = "/ecs/${var.project}"
   retention_in_days = 30
 }
+
+# ECS Container Insights auto-creates this log group on first task launch
+# if it doesn't exist; declaring it here lets terraform manage its
+# lifecycle so `rc destroy` actually removes it (otherwise the orphan
+# log group keeps reappearing every redeploy).
+resource "aws_cloudwatch_log_group" "container_insights" {
+  name              = "/aws/ecs/containerinsights/${var.cluster_name}/performance"
+  retention_in_days = 14
+}

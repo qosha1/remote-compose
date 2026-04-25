@@ -142,6 +142,13 @@ class TerraformConfig:
 class BackupConfig:
     bucket: Optional[str] = None
     service: Optional[str] = None
+    # When True (default), the provider creates the S3 bucket via terraform
+    # alongside the rest of the stack. Set False if the bucket already
+    # exists or is owned by another team / pipeline you don't want
+    # remote-compose to touch.
+    bucket_managed: bool = True
+    # Days to keep dump objects before lifecycle expiration. None = never expire.
+    retention_days: Optional[int] = 14
 
 
 @dataclass
@@ -297,6 +304,11 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
         backup = BackupConfig(
             bucket=raw["backup"].get("bucket"),
             service=raw["backup"].get("service"),
+            bucket_managed=bool(raw["backup"].get("bucket_managed", True)),
+            retention_days=(
+                None if raw["backup"].get("retention_days") in (None, "never", 0)
+                else int(raw["backup"]["retention_days"])
+            ),
         )
 
     tls = None

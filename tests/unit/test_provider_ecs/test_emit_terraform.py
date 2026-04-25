@@ -233,6 +233,113 @@ class TestRollbackLocalBackendRejected:
             ECSProvider().rollback(ctx)
 
 
+class TestManagedBackupBucket:
+    """rc.yml v2 backup.bucket auto-creates an S3 bucket via terraform
+    so users don't have to `aws s3api create-bucket` before rc db push.
+    Opt-out via backup.bucket_managed=false for externally-owned buckets."""
+
+    def _ctx_with_backup(self, tmp_path, **backup):
+        return DeployContext(
+            project=backup.pop("project", "myproj"),
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={"backup": backup or {"bucket": "myproj-backups"}},
+            provider_config={"ecs": {
+                "region": "us-west-2", "cluster": "test", "vpc_cidr": "10.0.0.0/16",
+            }},
+            tf_backend_config={"type": "local"},
+            working_dir=tmp_path,
+            services={
+                "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
+            },
+            secrets=[],
+        )
+
+    def test_backup_bucket_emitted_when_declared(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            self._ctx_with_backup(tmp_path, bucket="myproj-backups"), out,
+        )
+        backup_tf = (out / "backup.tf").read_text()
+        assert 'aws_s3_bucket" "backups"' in backup_tf
+        assert 'bucket = "myproj-backups"' in backup_tf
+        assert "aws_s3_bucket_public_access_block" in backup_tf
+        assert "AES256" in backup_tf
+
+    def test_no_backup_block_means_no_bucket(self, tmp_path):
+        # Same context but no backup.
+        ctx = self._ctx_with_backup(tmp_path, bucket="x")
+        ctx.rc_yml_v2 = {}
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        assert (out / "backup.tf").read_text().strip() == ""
+
+    def test_bucket_managed_false_skips_creation(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            self._ctx_with_backup(
+                tmp_path, bucket="external-team-bucket", bucket_managed=False,
+            ),
+            out,
+        )
+        # No aws_s3_bucket resource since the user owns it elsewhere.
+        backup_tf = (out / "backup.tf").read_text()
+        assert "aws_s3_bucket" not in backup_tf
+
+    def test_rc_test_project_force_destroy_true(self, tmp_path):
+        out = tmp_path / "tf"
+        ctx = self._ctx_with_backup(
+            tmp_path, project="rc-test-foo", bucket="rc-test-foo-backups",
+        )
+        ECSProvider().emit_terraform(ctx, out)
+        assert "force_destroy = true" in (out / "backup.tf").read_text()
+
+    def test_non_test_project_no_force_destroy(self, tmp_path):
+        out = tmp_path / "tf"
+        ctx = self._ctx_with_backup(
+            tmp_path, project="prod-app", bucket="prod-app-backups",
+        )
+        ECSProvider().emit_terraform(ctx, out)
+        assert "force_destroy" not in (out / "backup.tf").read_text()
+
+    def test_lifecycle_rule_applied_when_retention_days(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            self._ctx_with_backup(
+                tmp_path, bucket="x", retention_days=7,
+            ),
+            out,
+        )
+        backup_tf = (out / "backup.tf").read_text()
+        assert "aws_s3_bucket_lifecycle_configuration" in backup_tf
+        assert "days = 7" in backup_tf
+
+    def test_lifecycle_omitted_when_retention_never(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            self._ctx_with_backup(
+                tmp_path, bucket="x", retention_days="never",
+            ),
+            out,
+        )
+        backup_tf = (out / "backup.tf").read_text()
+        assert "aws_s3_bucket_lifecycle_configuration" not in backup_tf
+
+
+class TestContainerInsightsLogGroup:
+    """ECS auto-creates /aws/ecs/containerinsights/<cluster>/performance
+    when Container Insights is enabled; if terraform doesn't manage it,
+    rc destroy leaks the log group every cycle. We declare it explicitly
+    so destroy is truly clean."""
+
+    def test_container_insights_log_group_emitted(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path, cluster="my-cluster"), out)
+        cluster = (out / "cluster.tf").read_text()
+        assert 'aws_cloudwatch_log_group" "container_insights"' in cluster
+        assert "/aws/ecs/containerinsights/" in cluster
+        assert "${var.cluster_name}/performance" in cluster
+
+
 class TestExecuteCommand:
     def test_services_enable_execute_command(self, tmp_path):
         out = tmp_path / "tf"

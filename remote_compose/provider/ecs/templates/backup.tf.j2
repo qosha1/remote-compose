@@ -1,0 +1,60 @@
+{%- if has_managed_backup_bucket %}
+# ------------------------------------------------------------------
+# Backup S3 bucket — staging area for `rc db push` / `rc db backup`
+# objects. When backup.bucket_managed is true (default), terraform
+# owns this bucket so destroy is truly clean.
+# ------------------------------------------------------------------
+
+resource "aws_s3_bucket" "backups" {
+  bucket = "{{ backup_bucket }}"
+{%- if is_rc_test %}
+  # rc-test-* projects are throwaway; let destroy wipe lingering dumps.
+  force_destroy = true
+{%- endif %}
+
+  tags = {
+    Purpose = "remote-compose-backups"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "backups" {
+  bucket                  = aws_s3_bucket.backups.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "backups" {
+  bucket = aws_s3_bucket.backups.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "backups" {
+  bucket = aws_s3_bucket.backups.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+{%- if backup_retention_days %}
+
+resource "aws_s3_bucket_lifecycle_configuration" "backups" {
+  bucket = aws_s3_bucket.backups.id
+  rule {
+    id     = "expire-old-dumps"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = {{ backup_retention_days }}
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = {{ backup_retention_days }}
+    }
+  }
+}
+{%- endif %}
+{%- endif %}

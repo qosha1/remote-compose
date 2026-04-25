@@ -283,6 +283,10 @@ def _build_restore_script(filename: str, presigned_url: str, fmt: str) -> str:
     fmt; common Postgres env vars (POSTGRES_HOST/USER/DB/PASSWORD) are
     expected to be in the container's env (provider already wires them
     via secrets).
+
+    Bootstraps a download tool (curl preferred, wget fallback, apt-get
+    install curl as a last resort) since stock postgres:17 doesn't ship
+    curl by default.
     """
     pg_common = (
         "-h ${POSTGRES_HOST:-postgres} "
@@ -290,11 +294,22 @@ def _build_restore_script(filename: str, presigned_url: str, fmt: str) -> str:
         "-U ${POSTGRES_USER:-postgres} "
         "-d ${POSTGRES_DB:-postgres}"
     )
+    bootstrap = (
+        "if command -v curl >/dev/null 2>&1 && [ -f /etc/ssl/certs/ca-certificates.crt ]; then "
+        "    DL='curl -fsSL -o'; "
+        "elif command -v wget >/dev/null 2>&1 && [ -f /etc/ssl/certs/ca-certificates.crt ]; then "
+        "    DL='wget -q -O'; "
+        "else echo '[rc db push] bootstrapping curl + ca-certificates...'; "
+        "    apt-get update >/dev/null 2>&1 && "
+        "    apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1 && "
+        "    DL='curl -fsSL -o'; "
+        "fi; "
+        "[ -z \"$DL\" ] && { echo 'no download tool available'; exit 1; }"
+    )
     if fmt == "tar+pg_restore":
         download = (
             "mkdir -p /tmp/_rcpush; "
-            f'curl -fsSL -o /tmp/_rcpush/{filename} '
-            f'"{presigned_url}"; '
+            f'$DL /tmp/_rcpush/{filename} "{presigned_url}"; '
             f"tar -xzf /tmp/_rcpush/{filename} -C /tmp/_rcpush; "
             "DUMP_DIR=$(find /tmp/_rcpush -maxdepth 1 -type d "
             "! -path /tmp/_rcpush | head -1); "
@@ -303,18 +318,18 @@ def _build_restore_script(filename: str, presigned_url: str, fmt: str) -> str:
         )
     elif fmt == "pg_restore":
         download = (
-            f'curl -fsSL -o /tmp/_rcpush.dump "{presigned_url}"; '
+            f'$DL /tmp/_rcpush.dump "{presigned_url}"; '
             f"PGPASSWORD=$POSTGRES_PASSWORD pg_restore -v "
             f"{pg_common} --no-owner --clean --if-exists /tmp/_rcpush.dump"
         )
     elif fmt == "psql":
         download = (
-            f'curl -fsSL -o /tmp/_rcpush.sql "{presigned_url}"; '
+            f'$DL /tmp/_rcpush.sql "{presigned_url}"; '
             f"PGPASSWORD=$POSTGRES_PASSWORD psql {pg_common} -f /tmp/_rcpush.sql"
         )
     else:
         raise click.exceptions.UsageError(f"unknown format {fmt!r}")
-    return f"set -e; {download}; rc=$?; rm -rf /tmp/_rcpush*; exit $rc"
+    return f"set -e; {bootstrap}; {download}; rc=$?; rm -rf /tmp/_rcpush*; exit $rc"
 
 
 def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
