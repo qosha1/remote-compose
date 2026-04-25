@@ -204,6 +204,77 @@ class TestServiceDomain:
             parse(raw)
 
 
+class TestServiceAliases:
+    """services[*].aliases: extra hostnames for the SAME service. Used
+    when a single fronting service (nginx, traefik) handles multiple
+    hostnames application-side. Aliases get cert SANs + R53 records but
+    no ALB listener rules — the default action catches them."""
+
+    def test_aliases_parses(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "foo.example.com"
+        raw["services"]["web"]["aliases"] = ["api.example.com", "docs.example.com"]
+        cfg = parse(raw)
+        assert cfg.services["web"].aliases == ["api.example.com", "docs.example.com"]
+
+    def test_no_aliases_means_empty_list(self):
+        cfg = parse(_minimal())
+        assert cfg.services["web"].aliases == []
+
+    def test_aliases_on_private_service_rejected(self):
+        raw = _minimal()
+        raw["services"]["worker"] = {
+            "cpu": 256, "memory": 512, "type": "worker",
+            "aliases": ["alt.example.com"],
+        }
+        with pytest.raises(ConfigError, match="aliases.*public=true"):
+            parse(raw)
+
+    def test_alias_overlapping_own_domain_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "foo.example.com"
+        raw["services"]["web"]["aliases"] = ["foo.example.com"]
+        with pytest.raises(ConfigError, match="alias.*own domain"):
+            parse(raw)
+
+    def test_alias_overlapping_other_service_domain_rejected(self):
+        raw = _minimal()
+        raw["services"]["api"] = {
+            "cpu": 256, "memory": 512, "type": "application",
+            "public": True, "port": 8080, "domain": "api.example.com",
+        }
+        raw["services"]["web"]["domain"] = "web.example.com"
+        raw["services"]["web"]["aliases"] = ["api.example.com"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            parse(raw)
+
+    def test_alias_overlapping_other_service_alias_rejected(self):
+        raw = _minimal()
+        raw["services"]["api"] = {
+            "cpu": 256, "memory": 512, "type": "application",
+            "public": True, "port": 8080, "domain": "api.example.com",
+            "aliases": ["shared.example.com"],
+        }
+        raw["services"]["web"]["domain"] = "web.example.com"
+        raw["services"]["web"]["aliases"] = ["shared.example.com"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            parse(raw)
+
+    def test_malformed_alias_rejected(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "foo.example.com"
+        raw["services"]["web"]["aliases"] = ["not a domain"]
+        with pytest.raises(ConfigError, match="alias"):
+            parse(raw)
+
+    def test_aliases_must_be_list(self):
+        raw = _minimal()
+        raw["services"]["web"]["domain"] = "foo.example.com"
+        raw["services"]["web"]["aliases"] = "single.example.com"
+        with pytest.raises(ConfigError, match="aliases.*list"):
+            parse(raw)
+
+
 class TestLifecycle:
     def test_no_lifecycle_block_is_empty_dict(self):
         cfg = parse(_minimal())

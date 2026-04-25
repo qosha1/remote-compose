@@ -101,6 +101,11 @@ class ServiceV2:
     # a per-service target group, ALB listener rule keyed on Host header,
     # R53 alias record, and adds the name to the ACM cert SANs.
     domain: Optional[str] = None
+    # Extra hostnames the SAME service should answer for. Used when a
+    # single fronting service (nginx, traefik) handles internal routing
+    # for multiple hostnames. Each alias adds a cert SAN + R53 record but
+    # NOT a listener rule — the ALB default action catches them.
+    aliases: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -128,6 +133,28 @@ class ServiceV2:
                     f"service {self.name!r}: domain {self.domain!r} is not a "
                     f"valid FQDN"
                 )
+        if self.aliases:
+            if not isinstance(self.aliases, list):
+                raise ConfigError(
+                    f"service {self.name!r}: aliases must be a list of FQDNs, "
+                    f"got {type(self.aliases).__name__}"
+                )
+            if not self.public:
+                raise ConfigError(
+                    f"service {self.name!r}: aliases requires public=true "
+                    f"(private services have no ALB target)"
+                )
+            for alias in self.aliases:
+                if not isinstance(alias, str) or not _looks_like_fqdn(alias):
+                    raise ConfigError(
+                        f"service {self.name!r}: alias {alias!r} is not a "
+                        f"valid FQDN"
+                    )
+                if alias == self.domain:
+                    raise ConfigError(
+                        f"service {self.name!r}: alias {alias!r} duplicates "
+                        f"the service's own domain"
+                    )
 
 
 @dataclass
@@ -302,6 +329,8 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             lifecycle=_parse_lifecycle(name, raw["lifecycle"])
                        if raw.get("lifecycle") else {},
             domain=raw.get("domain"),
+            # Preserve raw shape so validate() can flag non-list values.
+            aliases=raw["aliases"] if "aliases" in raw else [],
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -327,17 +356,26 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
     services_raw = raw.get("services", {}) or {}
     services = {n: _parse_service(n, s) for n, s in services_raw.items()}
 
-    # Cross-service uniqueness: two services can't claim the same domain.
-    seen_domains: dict[str, str] = {}
+    # Per-service validation before cross-service checks so we surface the
+    # most specific error first (e.g. "aliases must be a list" beats
+    # "duplicate hostname" when aliases is mistakenly a string).
     for svc in services.values():
-        if svc.domain:
-            existing = seen_domains.get(svc.domain)
+        svc.validate()
+
+    # Cross-service uniqueness: two services can't claim the same hostname,
+    # whether as a primary domain or as an alias of either.
+    seen_hostnames: dict[str, str] = {}
+    for svc in services.values():
+        candidates = [svc.domain] if svc.domain else []
+        candidates.extend(svc.aliases or [])
+        for host in candidates:
+            existing = seen_hostnames.get(host)
             if existing:
                 raise ConfigError(
-                    f"duplicate domain {svc.domain!r} on services "
-                    f"{existing!r} and {svc.name!r}"
+                    f"duplicate hostname {host!r}: claimed by both "
+                    f"service {existing!r} and {svc.name!r}"
                 )
-            seen_domains[svc.domain] = svc.name
+            seen_hostnames[host] = svc.name
 
     secrets_raw = raw.get("secrets", []) or []
     secrets = [_parse_secret(s) for s in secrets_raw]

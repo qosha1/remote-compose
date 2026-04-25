@@ -175,6 +175,7 @@ def build_deploy_context(
                 for hook_name, h in (svc.lifecycle or {}).items()
             },
             domain=svc.domain,
+            aliases=list(svc.aliases or []),
         )
 
     secrets = [

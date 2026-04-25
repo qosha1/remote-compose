@@ -73,6 +73,11 @@ class ServiceSpec:
     # dedicated target group + ALB listener rule (host_header) + R53 record
     # for this service, and adds the name to the ACM cert SANs.
     domain: Optional[str] = None
+    # Extra hostnames the SAME service should answer for. Each adds a cert
+    # SAN + R53 record but no ALB listener rule — the default action
+    # catches them. Used when a fronting service (nginx) handles internal
+    # routing for multiple hostnames.
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass

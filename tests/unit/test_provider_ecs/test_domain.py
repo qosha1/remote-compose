@@ -361,3 +361,78 @@ class TestPerServiceDomain:
         domain = (out / "domain.tf").read_text()
         assert "aws_acm_certificate" in domain
         assert "legacy.example.com" in domain
+
+
+class TestServiceAliases:
+    """Aliases on a service add ACM cert SANs + R53 records but DO NOT
+    emit ALB listener rules — the default action handles them. This is
+    the nginx-as-front pattern: one fronting service answers to many
+    hostnames; routing happens application-side."""
+
+    def _ctx_with_alias_front(self, tmp_path):
+        return DeployContext(
+            project="front",
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={},
+            provider_config={"ecs": {
+                "region": "us-west-2", "cluster": "front",
+                "vpc_cidr": "10.0.0.0/16",
+                "route53_zone": "example.com",
+            }},
+            tf_backend_config={"type": "local"},
+            working_dir=tmp_path,
+            services={
+                "nginx": ServiceSpec(
+                    name="nginx", cpu=256, memory=512, type="proxy",
+                    public=True, port=80, health_check_path="/health",
+                    domain="example.com",
+                    aliases=["api.example.com", "docs.example.com"],
+                ),
+                "django": ServiceSpec(
+                    name="django", cpu=512, memory=1024, type="application",
+                    # Private — accessed by nginx via service-discovery DNS.
+                ),
+            },
+            secrets=[],
+        )
+
+    def test_aliases_add_to_cert_sans(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_with_alias_front(tmp_path), out)
+        domain = (out / "domain.tf").read_text()
+        assert "subject_alternative_names" in domain
+        for d in ("example.com", "api.example.com", "docs.example.com"):
+            assert f'"{d}"' in domain
+
+    def test_aliases_get_r53_records(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_with_alias_front(tmp_path), out)
+        domain = (out / "domain.tf").read_text()
+        # Three A-records: primary + 2 aliases.
+        import re as _re
+        record_count = len(_re.findall(r'aws_route53_record" "app_\d+"', domain))
+        assert record_count == 3, f"expected 3 app A-records, got {record_count}"
+
+    def test_aliases_do_not_emit_listener_rules(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_with_alias_front(tmp_path), out)
+        alb = (out / "alb.tf").read_text()
+        # Service has aliases but no ALB rule per alias. The single rule
+        # for nginx (its own domain) is also redundant since nginx is
+        # default_target — verify no listener_rule mentions an alias hostname.
+        for alias in ("api.example.com", "docs.example.com"):
+            # The alias name MAY appear in the cert/SAN comment, but no
+            # aws_lb_listener_rule should host_header on it.
+            for rule_block in alb.split('aws_lb_listener_rule"')[1:]:
+                rule_block_short = rule_block.split("resource ")[0]
+                assert alias not in rule_block_short, (
+                    f"alias {alias} should not appear in any listener_rule"
+                )
+
+    def test_aliases_count_toward_default_target_logic(self, tmp_path):
+        # With nginx as the only public service + aliases, nginx's TG IS
+        # the default. No separate aws_lb_target_group.default needed.
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_with_alias_front(tmp_path), out)
+        alb = (out / "alb.tf").read_text()
+        assert "default_target_group_arn = aws_lb_target_group.nginx.arn" in alb

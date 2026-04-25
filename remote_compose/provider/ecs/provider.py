@@ -236,6 +236,10 @@ class ECSProvider(Provider):
                 # ALB hostname, it gets a dedicated target group + listener
                 # rule keyed on Host header.
                 "domain": spec.domain if spec.public else None,
+                # Extra hostnames the same service answers for. No listener
+                # rules; only cert SANs + R53 records. Catch-all default
+                # action carries the traffic.
+                "aliases": list(spec.aliases or []) if spec.public else [],
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
@@ -255,6 +259,13 @@ class ECSProvider(Provider):
             [s for s in services_view if s.get("domain")],
             key=lambda s: s["domain"],
         )
+        # Aliases attach to public services as extra hostnames. They feed
+        # into the cert SAN list + R53 records but do NOT generate listener
+        # rules — the default action catches traffic for them.
+        alias_hostnames: list[str] = []
+        for sv in services_view:
+            for a in sv.get("aliases", []) or []:
+                alias_hostnames.append(a)
         # Listener rules need distinct priorities. Start at 100 and step
         # by 10 so users can hand-write rules in between later.
         for i, dsvc in enumerate(domained_services):
@@ -377,7 +388,8 @@ class ECSProvider(Provider):
         has_managed_backup_bucket = bool(backup_bucket) and backup_managed
 
         domain_info = self._resolve_domain(
-            ctx, ecs_cfg, has_public_service, domained_services,
+            ctx, ecs_cfg, has_public_service,
+            domained_services, alias_hostnames,
         )
 
         environment = "rc-test" if ctx.project.startswith("rc-test-") else None
@@ -872,6 +884,7 @@ class ECSProvider(Provider):
         ecs_cfg: dict,
         has_public_service: bool,
         domained_services: list[dict] | None = None,
+        alias_hostnames: list[str] | None = None,
     ) -> Optional[dict]:
         """Resolve custom domain + TLS from rc.yml v2.
 
@@ -885,10 +898,12 @@ class ECSProvider(Provider):
         union, used to emit one R53 record per hostname.
         """
         domained_services = domained_services or []
+        alias_hostnames = alias_hostnames or []
         legacy_domain = ecs_cfg.get("domain") or (ctx.rc_yml_v2 or {}).get("domain")
         # Collect every distinct hostname that needs a cert + R53 record.
         all_domains: list[str] = sorted({
             *(s["domain"] for s in domained_services),
+            *alias_hostnames,
             *([legacy_domain] if legacy_domain else []),
         })
         if not all_domains:
