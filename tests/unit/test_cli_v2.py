@@ -189,6 +189,103 @@ class TestV2LegacyFlatten:
         assert cfg["cluster"] == "old"
 
 
+class TestComposeAutoImport:
+    """build_deploy_context auto-includes compose services that rc.yml
+    doesn't list, so adding a service in docker-compose.yml deploys
+    automatically. rc.yml services[] becomes overrides on top."""
+
+    def _write_compose(self, tmp_path, services_yaml: str) -> Path:
+        p = tmp_path / "docker-compose.yml"
+        p.write_text("services:\n" + services_yaml)
+        return p
+
+    def _v2(self, **overrides) -> dict:
+        base = {
+            "version": 2, "project": "auto",
+            "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {},
+        }
+        base.update(overrides)
+        return base
+
+    def test_compose_only_service_auto_included(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(tmp_path, "  api:\n    image: busybox\n")
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2())
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert "api" in ctx.services, "compose-only service should auto-deploy"
+
+    def test_rc_yml_service_overrides_compose_defaults(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(tmp_path, "  api:\n    image: busybox\n")
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2(services={
+            "api": {"cpu": 1024, "memory": 4096, "type": "application"},
+        }))
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert ctx.services["api"].cpu == 1024
+        assert ctx.services["api"].memory == 4096
+
+    def test_exclude_skips_compose_services(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(
+            tmp_path,
+            "  api:\n    image: busybox\n  ngrok:\n    image: busybox\n  worker:\n    image: busybox\n",
+        )
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2(compose={"exclude": ["ngrok"]}))
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert "api" in ctx.services
+        assert "worker" in ctx.services
+        assert "ngrok" not in ctx.services
+
+    def test_include_narrows_to_whitelist(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(
+            tmp_path,
+            "  api:\n    image: busybox\n  worker:\n    image: busybox\n  flower:\n    image: busybox\n",
+        )
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2(compose={"include": ["api", "worker"]}))
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert set(ctx.services.keys()) == {"api", "worker"}
+
+    def test_rc_yml_service_not_in_compose_still_deploys(self, tmp_path, monkeypatch):
+        # Sometimes a service has no compose definition (pre-built image
+        # only, no build context). rc.yml should still deploy it.
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(tmp_path, "  api:\n    image: busybox\n")
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2(services={
+            "redis": {"cpu": 256, "memory": 512, "type": "infrastructure"},
+        }))
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        ctx = build_deploy_context(v2, raw, p)
+        assert "api" in ctx.services
+        assert "redis" in ctx.services
+
+    def test_include_unknown_service_rejected(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        self._write_compose(tmp_path, "  api:\n    image: busybox\n")
+        p = tmp_path / "rc.yml"
+        _write(p, self._v2(compose={"include": ["api", "ghost"]}))
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(p)
+        with pytest.raises(Exception, match="ghost"):
+            build_deploy_context(v2, raw, p)
+
+
 class TestSecretsPushV2:
     """rc secrets push for v2 rc.yml: parse each .env file, upload as
     JSON to SM, force redeploy. boto3 mocked end-to-end."""

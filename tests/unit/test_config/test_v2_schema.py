@@ -204,6 +204,53 @@ class TestServiceDomain:
             parse(raw)
 
 
+class TestComposeBlock:
+    """rc.yml v2 'compose' top-level block: include/exclude lists for
+    auto-importing services from the docker-compose file."""
+
+    def test_no_compose_block_means_default(self):
+        cfg = parse(_minimal())
+        assert cfg.compose is None
+
+    def test_exclude_list_parses(self):
+        raw = _minimal()
+        raw["compose"] = {"exclude": ["ngrok", "eval-app"]}
+        cfg = parse(raw)
+        assert cfg.compose.exclude == ["ngrok", "eval-app"]
+        assert cfg.compose.include is None
+
+    def test_include_list_parses(self):
+        raw = _minimal()
+        raw["compose"] = {"include": ["django", "postgres"]}
+        cfg = parse(raw)
+        assert cfg.compose.include == ["django", "postgres"]
+        assert cfg.compose.exclude is None
+
+    def test_both_include_and_exclude_rejected(self):
+        raw = _minimal()
+        raw["compose"] = {"include": ["a"], "exclude": ["b"]}
+        with pytest.raises(ConfigError, match="mutually exclusive"):
+            parse(raw)
+
+    def test_exclude_must_be_list(self):
+        raw = _minimal()
+        raw["compose"] = {"exclude": "not-a-list"}
+        with pytest.raises(ConfigError, match="exclude.*list"):
+            parse(raw)
+
+    def test_include_must_be_list(self):
+        raw = _minimal()
+        raw["compose"] = {"include": "not-a-list"}
+        with pytest.raises(ConfigError, match="include.*list"):
+            parse(raw)
+
+    def test_unknown_compose_keys_rejected(self):
+        raw = _minimal()
+        raw["compose"] = {"exclude": [], "mystery": True}
+        with pytest.raises(ConfigError, match="unknown compose key"):
+            parse(raw)
+
+
 class TestServiceAliases:
     """services[*].aliases: extra hostnames for the SAME service. Used
     when a single fronting service (nginx, traefik) handles multiple

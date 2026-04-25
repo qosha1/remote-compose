@@ -196,6 +196,34 @@ class TerraformConfig:
 
 
 @dataclass
+class ComposeConfig:
+    """How rc.yml v2 relates to the docker-compose file.
+
+    By default the deploy set is the union of compose services + any
+    rc.yml services. include narrows to a whitelist; exclude removes a
+    blacklist. Mutually exclusive.
+    """
+    include: Optional[list[str]] = None
+    exclude: Optional[list[str]] = None
+
+    def validate(self) -> None:
+        if self.include is not None and self.exclude is not None:
+            raise ConfigError(
+                "compose.include and compose.exclude are mutually exclusive"
+            )
+        if self.include is not None and not isinstance(self.include, list):
+            raise ConfigError(
+                f"compose.include must be a list of service names, got "
+                f"{type(self.include).__name__}"
+            )
+        if self.exclude is not None and not isinstance(self.exclude, list):
+            raise ConfigError(
+                f"compose.exclude must be a list of service names, got "
+                f"{type(self.exclude).__name__}"
+            )
+
+
+@dataclass
 class BackupConfig:
     bucket: Optional[str] = None
     service: Optional[str] = None
@@ -235,6 +263,7 @@ class RcConfigV2:
     backup: Optional[BackupConfig] = None
     domain: Optional[str] = None
     tls: Optional[TlsConfig] = None
+    compose: Optional[ComposeConfig] = None
 
     def validate(self) -> None:
         if self.version != 2:
@@ -245,6 +274,8 @@ class RcConfigV2:
             raise ConfigError("compose_file is required")
         if not self.provider:
             raise ConfigError("provider is required")
+        if self.compose is not None:
+            self.compose.validate()
         for svc in self.services.values():
             svc.validate()
         for sec in self.secrets:
@@ -399,6 +430,24 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
             certificate_arn=raw["tls"].get("certificate_arn"),
         )
 
+    compose_cfg = None
+    if raw.get("compose"):
+        cb = raw["compose"]
+        if not isinstance(cb, dict):
+            raise ConfigError(
+                f"compose must be a mapping, got {type(cb).__name__}"
+            )
+        unknown = set(cb.keys()) - {"include", "exclude"}
+        if unknown:
+            raise ConfigError(
+                f"unknown compose keys: {sorted(unknown)} "
+                f"(supported: include, exclude)"
+            )
+        compose_cfg = ComposeConfig(
+            include=cb.get("include"),
+            exclude=cb.get("exclude"),
+        )
+
     cfg = RcConfigV2(
         version=int(raw.get("version", 0)),
         project=raw.get("project", ""),
@@ -411,6 +460,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
         backup=backup,
         domain=raw.get("domain"),
         tls=tls,
+        compose=compose_cfg,
     )
     cfg.validate()
     return cfg

@@ -142,41 +142,80 @@ def build_deploy_context(
         compose_path = (project_dir / compose_path).resolve()
     compose_services = _parse_compose_services(compose_path)
 
+    # Resolve the deploy set: union of compose services + rc.yml services,
+    # filtered through compose.include (whitelist) or compose.exclude
+    # (blacklist).
+    compose_names = set(compose_services.keys())
+    rc_names = set(v2.services.keys())
+    deploy_names = compose_names | rc_names
+    if v2.compose:
+        if v2.compose.include is not None:
+            unknown = set(v2.compose.include) - deploy_names
+            if unknown:
+                raise ValueError(
+                    f"compose.include lists service(s) not present in compose "
+                    f"or rc.yml: {sorted(unknown)}"
+                )
+            deploy_names = set(v2.compose.include)
+        elif v2.compose.exclude is not None:
+            deploy_names = deploy_names - set(v2.compose.exclude)
+
     services: dict[str, ServiceSpec] = {}
-    for name, svc in v2.services.items():
+    for name in sorted(deploy_names):
+        svc = v2.services.get(name)
         svc_compose = compose_services.get(name) or {}
         bc, bargs, dfile, img = _service_build_info(svc_compose, compose_path)
-        services[name] = ServiceSpec(
-            name=name,
-            cpu=svc.cpu,
-            memory=svc.memory,
-            replicas=svc.replicas,
-            type=svc.type,
-            launch_type=svc.launch_type,
-            health_check_path=svc.health_check_path,
-            public=svc.public,
-            port=svc.port,
-            ephemeral_storage=svc.ephemeral_storage,
-            volumes=list(svc.volumes or []),
-            build_context=bc,
-            build_args=bargs,
-            dockerfile=dfile,
-            image=img,
-            env=_service_env(svc_compose),
-            command=_service_command(svc_compose),
-            lifecycle={
-                hook_name: {
-                    "command": list(h.command),
-                    "auto_on_deploy": h.auto_on_deploy,
-                    "run_once": h.run_once,
-                    "interactive": h.interactive,
-                    "probe": list(h.probe) if h.probe else None,
-                }
-                for hook_name, h in (svc.lifecycle or {}).items()
-            },
-            domain=svc.domain,
-            aliases=list(svc.aliases or []),
-        )
+        if svc is not None:
+            # rc.yml-declared service; honor every override.
+            services[name] = ServiceSpec(
+                name=name,
+                cpu=svc.cpu,
+                memory=svc.memory,
+                replicas=svc.replicas,
+                type=svc.type,
+                launch_type=svc.launch_type,
+                health_check_path=svc.health_check_path,
+                public=svc.public,
+                port=svc.port,
+                ephemeral_storage=svc.ephemeral_storage,
+                volumes=list(svc.volumes or []),
+                build_context=bc,
+                build_args=bargs,
+                dockerfile=dfile,
+                image=img,
+                env=_service_env(svc_compose),
+                command=_service_command(svc_compose),
+                lifecycle={
+                    hook_name: {
+                        "command": list(h.command),
+                        "auto_on_deploy": h.auto_on_deploy,
+                        "run_once": h.run_once,
+                        "interactive": h.interactive,
+                        "probe": list(h.probe) if h.probe else None,
+                    }
+                    for hook_name, h in (svc.lifecycle or {}).items()
+                },
+                domain=svc.domain,
+                aliases=list(svc.aliases or []),
+            )
+        else:
+            # Compose-only service: derive sensible defaults. type=worker
+            # when no port (background processes), type=application when
+            # the compose has a ports[] entry, never public by default.
+            ports = svc_compose.get("ports") or []
+            inferred_type = "application" if ports else "worker"
+            services[name] = ServiceSpec(
+                name=name,
+                cpu=256,
+                memory=512,
+                type=inferred_type,
+                build_context=bc,
+                build_args=bargs,
+                dockerfile=dfile,
+                image=img,
+                env=_service_env(svc_compose),
+                command=_service_command(svc_compose),
+            )
 
     secrets = [
         SecretRef(
