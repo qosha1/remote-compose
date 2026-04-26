@@ -23,14 +23,19 @@ def runner():
     return CliRunner()
 
 
-def _make_record(project: str, region: str = "us-west-1", rc_yml_path: str = "/tmp/x.yml") -> EphemeralRecord:
+def _make_record(
+    project: str,
+    region: str = "us-west-1",
+    rc_yml_path: str = "/tmp/x.yml",
+    terraform_dir: str = "/tmp/tf",
+) -> EphemeralRecord:
     return EphemeralRecord(
         project=project,
         region=region,
         aws_profile="default",
         expires_at="2999-01-01T00:00:00Z",  # not expired
         rc_yml_path=rc_yml_path,
-        terraform_dir="/tmp/tf",
+        terraform_dir=terraform_dir,
         created_at="2026-04-25T00:00:00Z",
     )
 
@@ -149,17 +154,84 @@ def test_failure_on_one_does_not_stop_others(runner, tmp_path):
 # Missing rc.yml -> registry entry left in place, error reported
 # ---------------------------------------------------------------------------
 
-def test_missing_rc_yml_reports_warning_keeps_registry_entry(runner, tmp_path):
-    records = [_make_record("proj-a", rc_yml_path=str(tmp_path / "does-not-exist.yml"))]
+def test_missing_rc_yml_AND_missing_terraform_dir_keeps_registry_entry(runner, tmp_path):
+    records = [_make_record(
+        "proj-a",
+        rc_yml_path=str(tmp_path / "does-not-exist.yml"),
+        terraform_dir=str(tmp_path / "also-does-not-exist"),
+    )]
     with patch("remote_compose.ephemeral.list_records", return_value=records), \
          patch("remote_compose.ephemeral.remove_stack") as rm, \
          patch("remote_compose.cli_v2.load_rc_yml") as load:
         result = runner.invoke(cli, ["destroy", "--all-ephemeral", "--yes"])
-    # rc.yml missing → load_rc_yml never called, remove_stack never called
+    # rc.yml AND terraform_dir both missing → load_rc_yml never called, no removal.
     load.assert_not_called()
     rm.assert_not_called()
     assert result.exit_code != 0
-    assert "rc.yml not found" in (result.output + (result.stderr if hasattr(result, 'stderr') else ""))
+    output = result.output + (result.stderr if hasattr(result, 'stderr') else "")
+    assert "rc.yml not found" in output
+
+
+# ---------------------------------------------------------------------------
+# rc-e5u.46.8: rc.yml missing but terraform_dir exists → fallback path
+# ---------------------------------------------------------------------------
+
+def test_rc_yml_missing_falls_back_to_terraform_dir(runner, tmp_path):
+    """When rc.yml is gone but terraform_dir is intact (stale registry +
+    state on disk), fall back to running terraform destroy directly. The
+    AWS resources get cleaned up; the registry entry gets removed."""
+    tf_dir = tmp_path / "terraform-module"
+    tf_dir.mkdir()
+    # No rc.yml file present at the registered path.
+    records = [_make_record(
+        "proj-a",
+        rc_yml_path=str(tmp_path / "deleted.yml"),
+        terraform_dir=str(tf_dir),
+    )]
+    runner_instance = MagicMock()
+    runner_instance.init.return_value = None
+    runner_instance.destroy.return_value = None
+    with patch("remote_compose.ephemeral.list_records", return_value=records), \
+         patch("remote_compose.ephemeral.remove_stack") as rm, \
+         patch("remote_compose.terraform.runner.TerraformRunner",
+               return_value=runner_instance) as tf_cls:
+        result = runner.invoke(cli, ["destroy", "--all-ephemeral", "--yes"])
+
+    # Assert TerraformRunner was constructed for the right dir + destroy ran.
+    assert tf_cls.called, result.output
+    runner_instance.init.assert_called_once()
+    runner_instance.destroy.assert_called_once()
+    # Registry entry removed on success.
+    rm.assert_called_once_with(project="proj-a", region="us-west-1")
+    assert result.exit_code == 0, result.output
+    assert "terraform_dir fallback" in result.output
+
+
+def test_terraform_destroy_fallback_failure_keeps_registry_entry(runner, tmp_path):
+    """If terraform destroy errors during the fallback, leave the registry
+    entry in place + non-zero exit code, like the provider.destroy path."""
+    from remote_compose.terraform.runner import TerraformError
+    tf_dir = tmp_path / "terraform-module"
+    tf_dir.mkdir()
+    records = [_make_record(
+        "proj-a",
+        rc_yml_path=str(tmp_path / "deleted.yml"),
+        terraform_dir=str(tf_dir),
+    )]
+    runner_instance = MagicMock()
+    runner_instance.init.return_value = None
+    runner_instance.destroy.side_effect = TerraformError(
+        cmd=["terraform", "destroy"], returncode=1, stdout="", stderr="aws denied",
+    )
+    with patch("remote_compose.ephemeral.list_records", return_value=records), \
+         patch("remote_compose.ephemeral.remove_stack") as rm, \
+         patch("remote_compose.terraform.runner.TerraformRunner",
+               return_value=runner_instance):
+        result = runner.invoke(cli, ["destroy", "--all-ephemeral", "--yes"])
+
+    rm.assert_not_called()
+    assert result.exit_code != 0
+    assert "FAILED" in result.output
 
 
 # ---------------------------------------------------------------------------

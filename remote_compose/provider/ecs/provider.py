@@ -824,6 +824,21 @@ class ECSProvider(Provider):
                 return
             raise
 
+    def _emit(self, message: str) -> None:
+        """Always-on output sink for reconcile + retry warnings (rc-e5u.46.9).
+
+        Falls back to stderr when self.progress is None so silent-fail paths
+        don't disappear into the void during 'rc up'. Tests inject a
+        progress callback to capture the messages without coupling to
+        sys.stderr; production paths (cli.py + cli_v2.py) inject the
+        click.echo bridge.
+        """
+        if self.progress:
+            self.progress(message)
+            return
+        import sys
+        print(message, file=sys.stderr)
+
     def _reconcile_orphan_log_groups(
         self, ctx: DeployContext, runner: TerraformRunner,
     ) -> None:
@@ -840,8 +855,13 @@ class ECSProvider(Provider):
         is already in state, terraform import errors with "already managed"
         — swallowed.
 
-        Best-effort: any AWS or terraform error is logged via progress and
-        ignored. The user can still recover via the documented manual import.
+        Errors are now surfaced via self._emit (rc-e5u.46.9). Earlier
+        revisions silently returned on the AWS-side describe failure path,
+        which masked a real bug during .46.6 — boto3 raised a
+        NoCredentialsError on the second consecutive run, the orphan-import
+        never fired, and the ensuing terraform apply blew up with
+        ResourceAlreadyExistsException with no breadcrumb pointing at the
+        cause.
         """
         ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
@@ -861,10 +881,16 @@ class ECSProvider(Provider):
             ]
             if not existing:
                 return
-        except Exception:
-            # boto3 unavailable, mocked, or describe failed — let terraform
-            # try normally; if AWS does have an orphan, apply errors and
-            # the user runs the documented manual import.
+        except Exception as exc:
+            # Surface so the user can fix credentials / region / etc.
+            # We still proceed (don't raise) — terraform apply may succeed
+            # if no orphan actually exists; the user gets an actionable
+            # message either way.
+            self._emit(
+                f"warning: orphan log-group reconcile skipped — "
+                f"could not query AWS for {log_group_name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
             return
 
         try:
@@ -872,20 +898,18 @@ class ECSProvider(Provider):
                 "aws_cloudwatch_log_group.container_insights",
                 log_group_name,
             )
-            if self.progress:
-                self.progress(
-                    f"imported orphan log group {log_group_name} into "
-                    f"terraform state"
-                )
+            self._emit(
+                f"imported orphan log group {log_group_name} into "
+                f"terraform state"
+            )
         except TerraformError as exc:
             msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
             if "already managed" in msg or "already exists in state" in msg:
                 return  # already imported on a prior deploy
-            if self.progress:
-                self.progress(
-                    f"warning: failed to import orphan log group "
-                    f"{log_group_name}: {exc}"
-                )
+            self._emit(
+                f"warning: failed to import orphan log group "
+                f"{log_group_name}: {exc}"
+            )
 
     # Service-type rollout priority (rc-e5u.46.5). Force-rolls in this order
     # on first deploys so workers + proxies don't race their dependencies on

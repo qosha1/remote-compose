@@ -2514,14 +2514,52 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
     for r in targets:
         click.echo(f"\n  Destroying {r.project} ({r.region})...")
         rc_path = Path(r.rc_yml_path)
+        tf_dir = Path(r.terraform_dir) if r.terraform_dir else None
+
+        # rc-e5u.46.8: rc.yml-missing fallback. The registry record always
+        # carries terraform_dir; terraform state is local + self-contained,
+        # so 'terraform destroy' from the emitted module reaches the same
+        # AWS resources without going through the provider abstraction.
+        # Without this, a stale registry entry (rc.yml deleted between
+        # deploy + reap) leaves orphan AWS resources and a permanently-
+        # dirty registry.
         if not rc_path.exists():
+            if tf_dir and tf_dir.exists():
+                click.echo(
+                    f"    rc.yml at {rc_path} missing — falling back to "
+                    f"terraform destroy in {tf_dir}."
+                )
+                from remote_compose.terraform.runner import (
+                    TerraformError, TerraformRunner,
+                )
+                try:
+                    runner = TerraformRunner(tf_dir)
+                    runner.init()
+                    runner.destroy()
+                except TerraformError as exc:
+                    click.echo(
+                        f"    FAILED: terraform destroy in {tf_dir}: {exc}",
+                        err=True,
+                    )
+                    failures.append((r.project, f"tf destroy: {exc}"))
+                    continue
+                except Exception as exc:
+                    click.echo(
+                        f"    FAILED: terraform destroy: {exc}", err=True,
+                    )
+                    failures.append((r.project, str(exc)))
+                    continue
+                remove_stack(project=r.project, region=r.region)
+                succeeded += 1
+                click.echo("    done (via terraform_dir fallback).")
+                continue
             click.echo(
-                f"    WARN: rc.yml not found at {rc_path}; "
-                f"cannot run provider.destroy. Leaving registry entry "
-                f"in place — clean up manually or restore the rc.yml.",
+                f"    WARN: rc.yml not found at {rc_path} AND no usable "
+                f"terraform_dir on this record. Leaving registry entry "
+                f"in place — clean up manually.",
                 err=True,
             )
-            failures.append((r.project, "rc.yml missing"))
+            failures.append((r.project, "rc.yml + terraform_dir both missing"))
             continue
         try:
             version, raw, v2 = load_rc_yml(rc_path)
