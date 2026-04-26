@@ -2,6 +2,18 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# rc-e5u.46.9: subnet count exposed as a static local so dependent
+# resources (efs_mount_target, route_table_association, ...) can use it
+# in `count = ...` without forcing terraform to fully resolve the
+# managed aws_subnet.public resource. terraform import validates the
+# whole module before importing; using `length(aws_subnet.public)`
+# previously failed with "Invalid count argument" on a fresh-state
+# machine because the managed resource wasn't yet in state.
+locals {
+  public_subnet_count  = 2
+  private_subnet_count = 2
+}
+
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -17,7 +29,7 @@ resource "aws_internet_gateway" "main" {
 }
 
 resource "aws_subnet" "public" {
-  count                   = 2
+  count                   = local.public_subnet_count
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
@@ -29,7 +41,7 @@ resource "aws_subnet" "public" {
 }
 
 resource "aws_subnet" "private" {
-  count             = 2
+  count             = local.private_subnet_count
   vpc_id            = aws_vpc.main.id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
   availability_zone = data.aws_availability_zones.available.names[count.index]
@@ -49,7 +61,7 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table_association" "public" {
-  count          = length(aws_subnet.public)
+  count          = local.public_subnet_count
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }

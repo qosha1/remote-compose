@@ -184,10 +184,13 @@ echo
 # ---------------------------------------------------------------------------
 # Step 7: registry should now show 0 ephemeral stacks for this project
 # ---------------------------------------------------------------------------
-echo "[7/7] verify ephemeral registry no longer lists rc-test-startsimpli..."
+echo "[7/7] verify ephemeral registry no longer lists this project..."
 list_out="$("$RC" list --ephemeral 2>&1 || true)"
-if grep -q "rc-test-startsimpli" <<<"$list_out"; then
-    echo "FAIL: rc-test-startsimpli still in ephemeral registry post-destroy:" >&2
+# Project name derives from the compose-file directory name; for
+# /Users/.../start-simpli-api/docker-compose.local.yml the project
+# is 'start-simpli-api'.
+if grep -qE "rc-test-startsimpli|start-simpli-api" <<<"$list_out"; then
+    echo "FAIL: project still in ephemeral registry post-destroy:" >&2
     echo "$list_out" >&2
     exit 4
 fi

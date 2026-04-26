@@ -38,7 +38,7 @@ resource "aws_efs_file_system" "pgdata" {
 
 resource "aws_efs_mount_target" "pgdata" {
   # Tasks run in public subnets (rc-e5u.25) so mount targets live there too.
-  count           = length(aws_subnet.public)
+  count           = local.public_subnet_count
   file_system_id  = aws_efs_file_system.pgdata.id
   subnet_id       = aws_subnet.public[count.index].id
   security_groups = [aws_security_group.efs.id]

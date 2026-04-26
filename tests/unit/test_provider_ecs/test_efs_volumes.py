@@ -76,7 +76,10 @@ class TestSingleVolume:
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
         assert 'aws_efs_mount_target" "pgdata"' in efs_tf
-        assert "count           = length(aws_subnet.public)" in efs_tf
+        # rc-e5u.46.9: switched from length(aws_subnet.public) to a static
+        # local so terraform import can validate the module on a fresh-
+        # state machine (length-of-managed-resource isn't known then).
+        assert "count           = local.public_subnet_count" in efs_tf
 
     def test_access_point_per_service_volume_pair(self, tmp_path):
         ctx = _ctx(tmp_path, {
