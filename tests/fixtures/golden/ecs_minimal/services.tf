@@ -152,6 +152,13 @@ resource "aws_ecs_service" "db" {
   # stateful engines (postgres initdb) can wipe each other.
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
+  # Newer ECS APIs default availability_zone_rebalancing=ENABLED, which
+  # actively redistributes tasks across AZs - the OPPOSITE of what a
+  # stateful EFS-mounting workload wants (it deliberately keeps a single
+  # task at a time on the data dir). The combo also gets rejected at
+  # deploy time: "availability_zone_rebalancing does not support
+  # maximumPercent <= 100". Pin it OFF for stateful services.
+  availability_zone_rebalancing = "DISABLED"
   launch_type     = "FARGATE"
 
   network_configuration {

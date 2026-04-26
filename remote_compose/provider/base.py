@@ -85,6 +85,10 @@ class ServiceSpec:
     # catches them. Used when a fronting service (nginx) handles internal
     # routing for multiple hostnames.
     aliases: list[str] = field(default_factory=list)
+    # Hot-reload source mounts (rc-e5u.45.7+). Each entry has name/source/
+    # mount. Provider only materializes these when ctx.dev_mode is True
+    # (see rc-e5u.45.8) — production deploys ignore the field entirely.
+    dev_volumes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -103,6 +107,12 @@ class DeployContext:
     # scan can identify ephemeral resources). ISO 8601 UTC timestamp,
     # e.g. "2026-04-25T18:30:00Z".
     expires_at: Optional[str] = None
+    # When True, the provider materializes services[*].dev_volumes as
+    # EFS-backed bind mounts so `rc dev push` can stream local source
+    # into the live task at the declared mount path. Set by `rc up --dev`
+    # / `rc deploy --dev`. Production deploys leave this False — see
+    # rc-e5u.45.8 for the full gating semantics.
+    dev_mode: bool = False
 
 
 @dataclass
@@ -112,6 +122,23 @@ class ServiceStatus:
     running: int
     health: str
     last_event: Optional[str] = None
+    # Currently-deployed task definition revision (e.g., 3 for "...:3").
+    # When None, provider doesn't track per-revision state. When the
+    # running revision != latest, the service is "stale" — a previous
+    # deploy stuck on it. See rc-e5u.44.24.
+    running_revision: Optional[int] = None
+    latest_revision: Optional[int] = None
+
+    @property
+    def is_stale(self) -> bool:
+        """True when the service is running an OLDER task def revision than
+        the family's latest. Indicates a partial-deploy failure or a manual
+        ECS rollback. ``rc deploy --reconcile`` brings stale services
+        forward.
+        """
+        if self.running_revision is None or self.latest_revision is None:
+            return False
+        return self.running_revision < self.latest_revision
 
 
 @dataclass
@@ -160,8 +187,26 @@ class Provider(ABC):
         """Emit terraform and run ``terraform plan``."""
 
     @abstractmethod
-    def deploy(self, ctx: DeployContext) -> DeployResult:
-        """Idempotent apply: emit tf, terraform apply, build/push images, update services."""
+    def deploy(
+        self,
+        ctx: DeployContext,
+        services_filter: Optional[list[str]] = None,
+        tag: Optional[str] = None,
+    ) -> DeployResult:
+        """Idempotent apply: emit tf, terraform apply, build/push images, update services.
+
+        When ``services_filter`` is set, only those services have their images
+        rebuilt + pushed + force-rolled. Other services keep their existing
+        task-def revision. Terraform apply still runs (idempotent, may be a
+        no-op) so any rc.yml-driven infra changes still take effect. Used by
+        ``rc deploy --services <name>`` for fast iteration on a single service.
+
+        When ``tag`` is set (and not 'latest'), provider-specific shortcut:
+        ECS checks ECR for ``<repo>:<tag>`` first; if present, docker build
+        is skipped and the existing image is re-tagged as ``:latest`` so the
+        task def picks it up. Used by ``rc deploy --tag <known-good>`` for
+        instant rollback / pinned-image deploys. ~2-5s per service.
+        """
 
     @abstractmethod
     def redeploy(self, ctx: DeployContext, services: Optional[list[str]] = None) -> DeployResult:

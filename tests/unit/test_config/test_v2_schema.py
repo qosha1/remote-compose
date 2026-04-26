@@ -421,3 +421,57 @@ class TestLifecycle:
         raw["services"]["web"]["lifecycle"] = ["migrate", "shell"]
         with pytest.raises(ConfigError, match="must be a mapping"):
             parse(raw)
+
+
+class TestServiceEnv:
+    """rc-e5u.46.4: services.<svc>.env carries plaintext env vars merged
+    on top of compose's ``environment:`` / ``env_file:`` at deploy time.
+    Schema validation here covers shape (mapping, scalar values); merging
+    semantics are tested in test_cli_v2.TestServiceV2EnvMerge.
+    """
+
+    def test_env_field_round_trips(self):
+        raw = _minimal()
+        raw["services"]["web"]["env"] = {
+            "DJANGO_ALLOWED_HOSTS": "*",
+            "PORT": "80",
+        }
+        cfg = parse(raw)
+        assert cfg.services["web"].env == {
+            "DJANGO_ALLOWED_HOSTS": "*",
+            "PORT": "80",
+        }
+
+    def test_env_yaml_bool_coerced_to_str(self):
+        # A user typing 'DJANGO_DEBUG: False' in rc.yml gets parsed as a
+        # python bool by yaml; schema converts to "False" so the value can
+        # flow into the task-def environment[] (must be a str).
+        raw = _minimal()
+        raw["services"]["web"]["env"] = {"DJANGO_DEBUG": False, "PORT": 8080}
+        cfg = parse(raw)
+        assert cfg.services["web"].env["DJANGO_DEBUG"] == "False"
+        assert cfg.services["web"].env["PORT"] == "8080"
+
+    def test_env_default_is_empty_dict(self):
+        # A service that doesn't declare env: gets a freshly allocated
+        # empty dict (not None — callers do `if svc.env:` checks).
+        cfg = parse(_minimal())
+        assert cfg.services["web"].env == {}
+
+    def test_env_must_be_mapping(self):
+        raw = _minimal()
+        raw["services"]["web"]["env"] = ["FOO=bar"]
+        with pytest.raises(ConfigError, match="env must be a mapping"):
+            parse(raw)
+
+    def test_env_value_cannot_be_dict(self):
+        raw = _minimal()
+        raw["services"]["web"]["env"] = {"FOO": {"nested": "value"}}
+        with pytest.raises(ConfigError, match=r"env\[.*FOO.*\] must be scalar"):
+            parse(raw)
+
+    def test_env_value_cannot_be_list(self):
+        raw = _minimal()
+        raw["services"]["web"]["env"] = {"FOO": ["a", "b"]}
+        with pytest.raises(ConfigError, match=r"env\[.*FOO.*\] must be scalar"):
+            parse(raw)

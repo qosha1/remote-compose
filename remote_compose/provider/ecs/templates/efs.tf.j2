@@ -74,4 +74,61 @@ resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
   }
 }
 {%- endfor %}
+
+{%- if has_dev_efs %}
+# ------------------------------------------------------------------
+# Dev-mode source mounts (rc-e5u.45.8). One shared EFS file system per
+# project, holding ./<service>__<dev_volume> trees that `rc dev push`
+# streams local source into for hot reload. DevMode=true tag lets out-
+# of-band tag scans / reapers identify these as ephemeral.
+# ------------------------------------------------------------------
+resource "aws_efs_file_system" "{{ dev_efs_volume.tf_name }}" {
+  # Already namespaced by project — the dev volume name IS "<project>-dev".
+  creation_token = "{{ dev_efs_volume.name }}"
+  encrypted      = false
+  performance_mode = "generalPurpose"
+  # Elastic throughput suits intermittent rc-dev-push spikes better than
+  # bursting (which exhausts credits on big seed pushes).
+  throughput_mode  = "elastic"
+
+  tags = {
+    Name    = "{{ dev_efs_volume.name }}"
+    Volume  = "{{ dev_efs_volume.name }}"
+    DevMode = "true"
+  }
+}
+
+resource "aws_efs_mount_target" "{{ dev_efs_volume.tf_name }}" {
+  count           = length(aws_subnet.public)
+  file_system_id  = aws_efs_file_system.{{ dev_efs_volume.tf_name }}.id
+  subnet_id       = aws_subnet.public[count.index].id
+  security_groups = [aws_security_group.efs.id]
+}
+
+{%- for mount in dev_volume_mounts %}
+resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
+  file_system_id = aws_efs_file_system.{{ mount.volume_tf_name }}.id
+
+  posix_user {
+    uid = {{ mount.uid }}
+    gid = {{ mount.gid }}
+  }
+
+  root_directory {
+    path = "{{ mount.ap_root_path }}"
+    creation_info {
+      owner_uid   = {{ mount.uid }}
+      owner_gid   = {{ mount.gid }}
+      permissions = "{{ mount.mode }}"
+    }
+  }
+
+  tags = {
+    Service    = "{{ mount.service }}"
+    DevVolume  = "{{ mount.dev_volume_name }}"
+    DevMode    = "true"
+  }
+}
+{%- endfor %}
+{%- endif %}
 {%- endif %}

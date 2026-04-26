@@ -104,18 +104,36 @@ class FakeProvider(Provider):
             for name, spec in ctx.services.items()
         }
 
-    def deploy(self, ctx: DeployContext) -> DeployResult:
+    def deploy(
+        self,
+        ctx: DeployContext,
+        services_filter: Optional[list[str]] = None,
+        tag: Optional[str] = None,
+    ) -> DeployResult:
         if "mid_deploy" in self._pending_faults:
             self._pending_faults.remove("mid_deploy")
             raise ProviderError("injected fault: mid_deploy")
+
+        if services_filter is not None:
+            unknown = set(services_filter) - set(ctx.services.keys())
+            if unknown:
+                raise ValueError(
+                    f"--services lists service(s) not in this stack: {sorted(unknown)}"
+                )
 
         state = self._state(ctx)
         cfg_hash = _config_hash(ctx)
 
         if state.active is not None and state.active.config_hash == cfg_hash:
+            # Even on a config-unchanged deploy, surface that the user asked
+            # for a single-service rebuild — caller may still want to record it.
+            services_returned = (
+                sorted(services_filter) if services_filter
+                else list(state.active.services.keys())
+            )
             return DeployResult(
                 revision_id=state.active.revision_id,
-                services=list(state.active.services.keys()),
+                services=services_returned,
                 duration_s=0.0,
             )
 
@@ -128,7 +146,10 @@ class FakeProvider(Provider):
         state.active = revision
         return DeployResult(
             revision_id=revision.revision_id,
-            services=list(revision.services.keys()),
+            services=(
+                sorted(services_filter) if services_filter
+                else list(revision.services.keys())
+            ),
             duration_s=0.01,
         )
 

@@ -1,3 +1,39 @@
+{%- if has_build_context_service %}
+# BuildKit registry-backed layer cache (rc-e5u.45.2). One shared repo per
+# project; per-service cache lives at tag <svc>-cache. `docker buildx build
+# --cache-from / --cache-to type=registry` reads/writes here so layer cache
+# survives across machines + CI runs (a fresh laptop or CI runner gets the
+# same cache the previous deploy populated). Untagged manifests expire
+# after 7 days so the repo doesn't grow unbounded.
+resource "aws_ecr_repository" "buildcache" {
+  name                 = "${var.project}/buildcache"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = false
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache" {
+  repository = aws_ecr_repository.buildcache.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Expire untagged BuildKit cache layers after 7 days"
+      selection = {
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 7
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+{%- endif %}
+
 {%- for svc in services %}
 resource "aws_ecr_repository" "{{ svc.tf_name }}" {
   name                 = "${var.project}/{{ svc.name }}"
@@ -115,6 +151,13 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # stateful engines (postgres initdb) can wipe each other.
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
+  # Newer ECS APIs default availability_zone_rebalancing=ENABLED, which
+  # actively redistributes tasks across AZs - the OPPOSITE of what a
+  # stateful EFS-mounting workload wants (it deliberately keeps a single
+  # task at a time on the data dir). The combo also gets rejected at
+  # deploy time: "availability_zone_rebalancing does not support
+  # maximumPercent <= 100". Pin it OFF for stateful services.
+  availability_zone_rebalancing = "DISABLED"
 {%- endif %}
 {%- if svc.launch_type == "EC2" %}
 

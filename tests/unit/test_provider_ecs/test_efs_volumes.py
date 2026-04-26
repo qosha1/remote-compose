@@ -294,3 +294,34 @@ class TestStatefulDeploymentStrategy:
         stateless_block = stateless_block.split("resource ")[0] \
             if "resource " in stateless_block else stateless_block
         assert "deployment_minimum_healthy_percent" not in stateless_block
+
+    def test_stateful_service_disables_availability_zone_rebalancing(self, tmp_path):
+        """rc-e5u.45.11: ECS API rejects deploy_max_pct<=100 combined with
+        availability_zone_rebalancing=ENABLED (the new ECS default). AZ
+        rebalancing actively redistributes tasks across AZs, which is the
+        OPPOSITE of what a stateful EFS-mounting workload wants — so
+        emit availability_zone_rebalancing=DISABLED on stateful services
+        and leave it at the AWS default (ENABLED) on stateless ones."""
+        ctx = _ctx(tmp_path, {
+            "postgres": ServiceSpec(
+                name="postgres", cpu=256, memory=512, type="infrastructure",
+                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
+                          "uid": 70, "gid": 70}],
+            ),
+            "stateless": ServiceSpec(name="stateless", cpu=256, memory=512,
+                                     type="application"),
+        })
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        services = (out / "services.tf").read_text()
+
+        postgres_block = services.split('resource "aws_ecs_service" "postgres"')[1]
+        postgres_block = postgres_block.split("resource ")[0]
+        assert 'availability_zone_rebalancing = "DISABLED"' in postgres_block
+
+        stateless_block = services.split('resource "aws_ecs_service" "stateless"')[1]
+        stateless_block = stateless_block.split("resource ")[0] \
+            if "resource " in stateless_block else stateless_block
+        # Stateless services keep the AWS default (ENABLED) — we don't
+        # emit the field at all so terraform doesn't fight the default.
+        assert "availability_zone_rebalancing" not in stateless_block

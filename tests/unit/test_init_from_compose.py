@@ -348,3 +348,425 @@ class TestGenerate:
         compose.write_text("services: {}")
         with pytest.raises(ValueError, match="no services found"):
             generate_v2_rc_yml(compose)
+
+    def test_header_mentions_buildkit_cache_mount_tip(self, tmp_path):
+        # rc-e5u.45.2: scaffolded rc.yml header points users at how to
+        # add BuildKit `--mount=type=cache,...` directives to their
+        # Dockerfile so pip / apt downloads survive layer invalidation.
+        compose = self._setup(tmp_path)
+        text = generate_v2_rc_yml(compose)
+        # The tip lives inside the leading comment block (yaml-safe).
+        head = "\n".join(text.splitlines()[:25])
+        assert "buildx" in head.lower() or "BuildKit" in head
+        assert "--mount=type=cache" in head
+        assert "/root/.cache/pip" in head
+
+
+# ---------------------------------------------------------------------------
+# rc-e5u.46.3 — auto-emit lifecycle.migrate on Django services
+# ---------------------------------------------------------------------------
+
+class TestLifecycleMigrate:
+    """Verify Django-shaped services get a lifecycle.migrate hook auto-emitted.
+
+    The detection reuses ``compose_warnings._looks_like_django_service``,
+    which scans a service's Dockerfile for Django markers (manage.py,
+    wsgi.py, asgi.py, 'django' as a pip/apt dep). These tests build real
+    Dockerfiles in tmp_path so the heuristic fires.
+    """
+
+    DJANGO_DOCKERFILE = textwrap.dedent("""
+        FROM python:3.11-slim
+        RUN pip install django==4.2
+        COPY manage.py /app/manage.py
+        COPY app/wsgi.py /app/app/wsgi.py
+        WORKDIR /app
+        CMD ["gunicorn", "app.wsgi:application"]
+    """).strip()
+
+    NON_DJANGO_DOCKERFILE = textwrap.dedent("""
+        FROM python:3.11-slim
+        RUN pip install flask
+        COPY app.py /app/app.py
+        WORKDIR /app
+        CMD ["flask", "run"]
+    """).strip()
+
+    def _make_project(self, tmp_path, compose_yaml: str,
+                      dockerfiles: dict[str, str]) -> Path:
+        """Lay out a project at tmp_path/proj with compose + Dockerfiles.
+
+        ``dockerfiles`` keys are subpath relative to the project root
+        (e.g. 'django/Dockerfile' or 'Dockerfile'). The compose yaml
+        body should reference the matching build contexts.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "docker-compose.yml").write_text(compose_yaml)
+        for rel, content in dockerfiles.items():
+            target = proj / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return proj / "docker-compose.yml"
+
+    def _parse(self, text: str) -> dict:
+        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        return yaml.safe_load(body)
+
+    def test_django_service_gets_lifecycle_migrate(self, tmp_path):
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  django:
+                    build:
+                      context: ./django
+                    ports:
+                      - "8000:8000"
+            """),
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        django = cfg["services"]["django"]
+        assert "lifecycle" in django, django
+        migrate = django["lifecycle"]["migrate"]
+        assert migrate["command"] == [
+            "python", "manage.py", "migrate", "--noinput",
+        ]
+        assert migrate["auto_on_deploy"] is True
+
+    def test_non_django_service_has_no_lifecycle(self, tmp_path):
+        # Flask app + a stock postgres image. Neither should get a
+        # lifecycle.migrate hook — postgres has no Dockerfile (image-only,
+        # build context absent → heuristic returns False), and Flask's
+        # Dockerfile lacks Django markers.
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  postgres:
+                    image: postgres:16-alpine
+                  api:
+                    build:
+                      context: ./api
+                    ports:
+                      - "5000:5000"
+            """),
+            {"api/Dockerfile": self.NON_DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        for svc_name, svc in cfg["services"].items():
+            assert "lifecycle" not in svc, (svc_name, svc)
+
+    def test_only_application_typed_django_service_gets_migrate(self, tmp_path):
+        # rc-e5u.46.6 finding: when worker services share the Django Dockerfile
+        # (celery-worker + celery-beat in start-simpli), emitting migrate on
+        # ALL of them causes 3 redundant runs + log noise. Only the
+        # application-typed service should run migrations — workers are
+        # idempotent no-ops at best, racing on lock contention at worst.
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  django-app:
+                    build:
+                      context: ./django
+                    ports:
+                      - "8000:8000"
+                  celery-worker:
+                    build:
+                      context: ./django
+                    command: celery -A app worker
+                  celery-beat:
+                    build:
+                      context: ./django
+                    command: celery -A app beat
+            """),
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        # django-app: application type, Django-shaped → migrate hook
+        assert "lifecycle" in cfg["services"]["django-app"]
+        assert cfg["services"]["django-app"]["type"] == "application"
+        # celery-worker / celery-beat: worker type, Django-shaped → NO hook
+        # (django-app already runs the migrate)
+        for worker in ("celery-worker", "celery-beat"):
+            svc = cfg["services"][worker]
+            assert svc["type"] == "worker"
+            assert "lifecycle" not in svc, (worker, svc)
+
+    def test_worker_only_django_stack_gets_one_migrate_hook(self, tmp_path):
+        # Edge case: NO application-typed Django service (uncommon — e.g.,
+        # an admin-CLI-only stack). The migrate hook still needs SOMEONE
+        # to run on. Pick the alpha-first Django-shaped worker so the
+        # behavior is deterministic.
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  zeta-worker:
+                    build:
+                      context: ./django
+                    command: celery -A app worker
+                  alpha-worker:
+                    build:
+                      context: ./django
+                    command: celery -A app beat
+            """),
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        assert "lifecycle" in cfg["services"]["alpha-worker"]
+        assert "lifecycle" not in cfg["services"]["zeta-worker"]
+
+    def test_generated_yml_validates_against_lifecycle_schema(self, tmp_path):
+        # End-to-end: the emitted yml must round-trip through the v2
+        # parser without errors AND the LifecycleHookV2 must validate.
+        from remote_compose.config.v2_schema import (
+            LifecycleHookV2,
+            _parse_lifecycle,
+        )
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  django:
+                    build:
+                      context: ./django
+                    ports:
+                      - "8000:8000"
+            """),
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        raw_lifecycle = cfg["services"]["django"]["lifecycle"]
+        parsed = _parse_lifecycle("django", raw_lifecycle)
+        assert "migrate" in parsed
+        hook = parsed["migrate"]
+        assert isinstance(hook, LifecycleHookV2)
+        assert hook.command == ["python", "manage.py", "migrate", "--noinput"]
+        assert hook.auto_on_deploy is True
+        assert hook.run_once is False
+        assert hook.interactive is False
+        # validate() should not raise — auto_on_deploy + non-interactive +
+        # non-empty list[str] command satisfies every rule.
+        hook.validate()
+
+    def test_image_only_service_without_dockerfile_gets_no_hook(self, tmp_path):
+        # A service that uses ``image:`` (no build context) cannot be
+        # Django-detected because the heuristic reads the Dockerfile.
+        # Even if the user names the service 'django', no hook is emitted
+        # (matches the underlying _looks_like_django_service contract).
+        compose = self._make_project(
+            tmp_path,
+            textwrap.dedent("""
+                services:
+                  django:
+                    image: my-prebuilt-django:latest
+                    ports:
+                      - "8000:8000"
+            """),
+            {},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        assert "lifecycle" not in cfg["services"]["django"]
+
+    def test_django_service_in_synthetic_fixture(self, tmp_path):
+        # The SYNTHETIC_COMPOSE used in TestGenerate doesn't ship a
+        # Dockerfile, so its 'django' service should NOT get a hook
+        # (heuristic needs a real Dockerfile to inspect). This locks in
+        # that behavior so future fixture changes are intentional.
+        proj = tmp_path / "synth-app"
+        proj.mkdir()
+        compose = proj / "docker-compose.local.yml"
+        compose.write_text(SYNTHETIC_COMPOSE)
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        # No Dockerfile present → heuristic returns False → no hook.
+        assert "lifecycle" not in cfg["services"]["django"]
+
+
+# ---------------------------------------------------------------------------
+# rc-e5u.46.4 — testing_defaults injection (DJANGO_ALLOWED_HOSTS=*, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestTestingDefaults:
+    """Auto-injection of star-host env vars on Django services for ephemeral
+    test stacks. Goal: plain `curl http://<ALB>/` returns 200 against an
+    rc-test-* deploy without nginx Host: rewrites or hand-edited .envs/
+    files. Unsafe for prod — gated on rc-test-* prefix or explicit opt-in.
+    """
+
+    DJANGO_DOCKERFILE = textwrap.dedent("""
+        FROM python:3.11-slim
+        RUN pip install django==4.2
+        COPY manage.py /app/manage.py
+        WORKDIR /app
+    """).strip()
+
+    NON_DJANGO_DOCKERFILE = textwrap.dedent("""
+        FROM python:3.11-slim
+        RUN pip install flask
+        COPY app.py /app/app.py
+    """).strip()
+
+    def _make(self, tmp_path, project_name: str, compose_yaml: str,
+              dockerfiles: dict[str, str]) -> Path:
+        proj = tmp_path / project_name
+        proj.mkdir()
+        (proj / "docker-compose.yml").write_text(compose_yaml)
+        for rel, content in dockerfiles.items():
+            target = proj / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return proj / "docker-compose.yml"
+
+    def _parse(self, text: str) -> dict:
+        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        return yaml.safe_load(body)
+
+    DJANGO_COMPOSE = textwrap.dedent("""
+        services:
+          django:
+            build:
+              context: ./django
+            ports:
+              - "8000:8000"
+    """)
+
+    def test_auto_on_for_rc_test_project(self, tmp_path):
+        # Project name 'rc-test-foo' → testing_defaults defaults to True →
+        # Django service gets an env: block with star-host knobs.
+        compose = self._make(
+            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        env = cfg["services"]["django"].get("env") or {}
+        assert env.get("DJANGO_ALLOWED_HOSTS") == "*"
+        assert env.get("CSRF_TRUSTED_ORIGINS") == "*"
+        assert env.get("DJANGO_DEBUG") == "False"
+
+    def test_auto_off_for_non_rc_test_project(self, tmp_path):
+        # Plain 'myapp' project → testing_defaults stays False → no env: block.
+        compose = self._make(
+            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        assert "env" not in cfg["services"]["django"]
+
+    def test_explicit_true_overrides_auto_off(self, tmp_path):
+        # Non-rc-test project but user passed --testing-defaults: opt in.
+        compose = self._make(
+            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=True))
+        env = cfg["services"]["django"].get("env") or {}
+        assert env["DJANGO_ALLOWED_HOSTS"] == "*"
+
+    def test_explicit_false_overrides_auto_on(self, tmp_path):
+        # rc-test project but user passed --no-testing-defaults: opt out.
+        compose = self._make(
+            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=False))
+        assert "env" not in cfg["services"]["django"]
+
+    def test_skipped_when_compose_already_pins_allowed_hosts_dict(self, tmp_path):
+        # Compose already declares DJANGO_ALLOWED_HOSTS in environment: dict
+        # form → user is aware → don't shadow with the star-host fallback.
+        compose_yaml = textwrap.dedent("""
+            services:
+              django:
+                build:
+                  context: ./django
+                ports:
+                  - "8000:8000"
+                environment:
+                  DJANGO_ALLOWED_HOSTS: mydomain.com
+        """)
+        compose = self._make(
+            tmp_path, "rc-test-foo", compose_yaml,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        assert "env" not in cfg["services"]["django"]
+
+    def test_skipped_when_compose_already_pins_allowed_hosts_list(self, tmp_path):
+        # Compose environment list-form: 'KEY=VALUE' string entries.
+        compose_yaml = textwrap.dedent("""
+            services:
+              django:
+                build:
+                  context: ./django
+                ports:
+                  - "8000:8000"
+                environment:
+                  - DJANGO_ALLOWED_HOSTS=app.example.com
+        """)
+        compose = self._make(
+            tmp_path, "rc-test-foo", compose_yaml,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose))
+        assert "env" not in cfg["services"]["django"]
+
+    def test_non_django_service_never_gets_env(self, tmp_path):
+        # Even with testing_defaults=True, non-Django services stay clean.
+        compose_yaml = textwrap.dedent("""
+            services:
+              postgres:
+                image: postgres:16-alpine
+              api:
+                build:
+                  context: ./api
+                ports:
+                  - "5000:5000"
+        """)
+        compose = self._make(
+            tmp_path, "rc-test-foo", compose_yaml,
+            {"api/Dockerfile": self.NON_DJANGO_DOCKERFILE},
+        )
+        cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=True))
+        assert "env" not in cfg["services"]["postgres"]
+        assert "env" not in cfg["services"]["api"]
+
+    def test_header_mentions_testing_defaults_when_active(self, tmp_path):
+        compose = self._make(
+            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        text = generate_v2_rc_yml(compose)
+        head = "\n".join(text.splitlines()[:20])
+        assert "Testing defaults: ON" in head
+        assert "DJANGO_ALLOWED_HOSTS" in head
+        # Header steers users toward the off-switch.
+        assert "--no-testing-defaults" in head
+
+    def test_header_silent_when_inactive(self, tmp_path):
+        compose = self._make(
+            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        text = generate_v2_rc_yml(compose)
+        assert "Testing defaults: ON" not in text
+
+    def test_generated_env_round_trips_through_v2_parser(self, tmp_path):
+        # The emitted services.<svc>.env must parse back into ServiceV2.env
+        # without ConfigError — schema field has to actually exist.
+        from remote_compose.config.v2_schema import parse as parse_v2
+        compose = self._make(
+            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            {"django/Dockerfile": self.DJANGO_DOCKERFILE},
+        )
+        text = generate_v2_rc_yml(compose)
+        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        cfg = parse_v2(yaml.safe_load(body))
+        django_env = cfg.services["django"].env
+        assert django_env["DJANGO_ALLOWED_HOSTS"] == "*"
+        assert django_env["CSRF_TRUSTED_ORIGINS"] == "*"
+        # YAML parses 'False' as the bool False; parser coerces to str.
+        assert django_env["DJANGO_DEBUG"] == "False"

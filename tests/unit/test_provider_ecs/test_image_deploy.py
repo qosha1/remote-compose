@@ -213,3 +213,169 @@ class TestECRAuthenticator:
         auth = ECRAuthenticator(session=sess)
         with pytest.raises(ECRAuthError, match="no authorization data"):
             auth("x")
+
+
+# ---------------------------------------------------------------------------
+# rc-e5u.45.2 — BuildKit registry cache wiring
+# ---------------------------------------------------------------------------
+
+class TestBuildcacheRepoWired:
+    """When terraform emits buildcache_repository, the provider feeds
+    --cache-from / --cache-to into ImageBuildSpec for every service it
+    builds. Cache tag pattern: <buildcache>:<svc>-cache.
+    """
+
+    def _ctx_with_builds(self, tmp_path):
+        api_ctx = tmp_path / "api"
+        api_ctx.mkdir()
+        (api_ctx / "Dockerfile").write_text("FROM alpine\n")
+        return _ctx(tmp_path, {
+            "api": ServiceSpec(
+                name="api", cpu=256, memory=512, type="application",
+                build_context=api_ctx,
+            ),
+        })
+
+    def _runner_with_buildcache(self, tmp_path, *, buildcache: bool):
+        runner = mock.MagicMock()
+        outputs = {
+            "ecr_repositories": {"value": {
+                "api": "111.dkr.ecr.us-east-1.amazonaws.com/img-test/api",
+            }},
+        }
+        if buildcache:
+            outputs["buildcache_repository"] = {
+                "value": "111.dkr.ecr.us-east-1.amazonaws.com/img-test/buildcache",
+            }
+        runner.output.return_value = outputs
+        return runner
+
+    def test_cache_args_emitted_when_buildcache_present(
+        self, tmp_path, mock_session,
+    ):
+        ctx = self._ctx_with_builds(tmp_path)
+        runner = self._runner_with_buildcache(tmp_path, buildcache=True)
+        provider = ECSProvider(
+            runner_factory=lambda d: runner,
+            session_factory=lambda c: mock_session,
+        )
+        token = base64.b64encode(b"AWS:pw").decode()
+        mock_session.client.return_value.get_authorization_token.return_value = {
+            "authorizationData": [{
+                "authorizationToken": token,
+                "proxyEndpoint": "https://111.dkr.ecr.us-east-1.amazonaws.com",
+            }],
+        }
+        with mock.patch("subprocess.run") as sub_run:
+            sub_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            provider.deploy(ctx)
+
+        cmds = [c.args[0] for c in sub_run.call_args_list]
+
+        def _is_buildx(cmd):
+            return (
+                len(cmd) >= 3
+                and cmd[0].rsplit("/", 1)[-1] == "docker"
+                and cmd[1] == "buildx"
+                and cmd[2] == "build"
+            )
+
+        buildx_cmds = [c for c in cmds if _is_buildx(c)]
+        assert len(buildx_cmds) == 1, (
+            f"expected one `docker buildx build` invocation, got {buildx_cmds!r}"
+        )
+        cmd = buildx_cmds[0]
+        cache_ref = (
+            "111.dkr.ecr.us-east-1.amazonaws.com/img-test/buildcache:api-cache"
+        )
+        cf_idx = cmd.index("--cache-from")
+        ct_idx = cmd.index("--cache-to")
+        assert cmd[cf_idx + 1] == f"type=registry,ref={cache_ref}"
+        assert cmd[ct_idx + 1] == f"type=registry,ref={cache_ref},mode=max"
+
+    def test_cache_args_absent_when_buildcache_missing(
+        self, tmp_path, mock_session,
+    ):
+        # Older terraform state predates the buildcache resource.
+        # Provider degrades gracefully to classic `docker build`.
+        ctx = self._ctx_with_builds(tmp_path)
+        runner = self._runner_with_buildcache(tmp_path, buildcache=False)
+        provider = ECSProvider(
+            runner_factory=lambda d: runner,
+            session_factory=lambda c: mock_session,
+        )
+        token = base64.b64encode(b"AWS:pw").decode()
+        mock_session.client.return_value.get_authorization_token.return_value = {
+            "authorizationData": [{
+                "authorizationToken": token,
+                "proxyEndpoint": "https://111.dkr.ecr.us-east-1.amazonaws.com",
+            }],
+        }
+        with mock.patch("subprocess.run") as sub_run:
+            sub_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            provider.deploy(ctx)
+
+        cmds = [c.args[0] for c in sub_run.call_args_list]
+        # No buildx invocation, no cache flags anywhere.
+        assert not any("buildx" in c for c in cmds)
+        for c in cmds:
+            assert not any(arg.startswith("--cache-") for arg in c)
+
+
+class TestBuildcacheTerraformEmitted:
+    """The terraform template gates the buildcache repo on
+    has_build_context_service. Stacks with at least one compose `build:`
+    get the repo + lifecycle policy + output; pure-image stacks don't.
+    """
+
+    def test_buildcache_repo_emitted_when_a_service_has_build_context(
+        self, tmp_path,
+    ):
+        from remote_compose.terraform.runner import RecordingTerraformRunner
+
+        api_ctx = tmp_path / "api"
+        api_ctx.mkdir()
+        (api_ctx / "Dockerfile").write_text("FROM alpine\n")
+        ctx = _ctx(tmp_path, {
+            "api": ServiceSpec(
+                name="api", cpu=256, memory=512, type="application",
+                build_context=api_ctx,
+            ),
+        })
+        out = tmp_path / "tf"
+        provider = ECSProvider(
+            runner_factory=lambda d: RecordingTerraformRunner(d),
+            session_factory=lambda c: mock.MagicMock(),
+        )
+        provider.emit_terraform(ctx, out)
+        services_tf = (out / "services.tf").read_text()
+        outputs_tf = (out / "outputs.tf").read_text()
+
+        assert 'aws_ecr_repository" "buildcache"' in services_tf
+        assert "${var.project}/buildcache" in services_tf
+        # 7-day lifecycle expiry on untagged manifests
+        assert "aws_ecr_lifecycle_policy" in services_tf
+        assert "countNumber = 7" in services_tf
+        # Output exposes the repo URL so the provider can derive cache tags
+        assert 'output "buildcache_repository"' in outputs_tf
+
+    def test_buildcache_skipped_for_pure_image_stack(self, tmp_path):
+        from remote_compose.terraform.runner import RecordingTerraformRunner
+
+        ctx = _ctx(tmp_path, {
+            "proxy": ServiceSpec(
+                name="proxy", cpu=256, memory=512, type="proxy",
+                image="nginx:alpine",
+            ),
+        })
+        out = tmp_path / "tf"
+        provider = ECSProvider(
+            runner_factory=lambda d: RecordingTerraformRunner(d),
+            session_factory=lambda c: mock.MagicMock(),
+        )
+        provider.emit_terraform(ctx, out)
+        services_tf = (out / "services.tf").read_text()
+        outputs_tf = (out / "outputs.tf").read_text()
+
+        assert "buildcache" not in services_tf
+        assert "buildcache_repository" not in outputs_tf

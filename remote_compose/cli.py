@@ -134,6 +134,48 @@ services:
 """
 
 
+def _detect_empty_file_secrets(v2, region: str, aws_profile: Optional[str],
+                                file_secrets: list) -> list[str]:
+    """Return SM secret names that exist but have empty / zero-key blobs.
+
+    Used by `rc deploy` (rc-e5u.44.20) to catch the silent-fail-cascade where
+    terraform created a secret resource (placeholder blob) but `rc secrets
+    push` never populated it — every task on the new task def then fails
+    with 'retrieved secret from Secrets Manager did not contain json key X'.
+    Returns names that need a push; empty list when everything is populated.
+    Missing secrets (NotFoundException) are NOT treated as empty — terraform
+    hasn't applied yet and the deploy will create them.
+    """
+    import json
+    import boto3
+    from botocore.exceptions import ClientError
+
+    session = boto3.Session(region_name=region, profile_name=aws_profile)
+    sm = session.client("secretsmanager")
+    empty: list[str] = []
+    for sec in file_secrets:
+        sm_name = f"{v2.project}/{sec.name}"
+        try:
+            resp = sm.get_secret_value(SecretId=sm_name)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"ResourceNotFoundException", "InvalidRequestException"}:
+                # terraform hasn't applied yet, OR the secret is in a
+                # PendingDeletion state — neither qualifies as 'empty +
+                # populatable'. Caller's deploy will create / recreate it.
+                continue
+            raise
+        body = resp.get("SecretString") or ""
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            # Non-JSON SM blob (manually-set raw value) — out of scope here.
+            continue
+        if isinstance(parsed, dict) and not parsed:
+            empty.append(sec.name)
+    return empty
+
+
 def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     """If rc.yml is v2, push file-sourced secrets and return True.
 
@@ -913,7 +955,15 @@ def cli(ctx, config_path):
               help='AWS region in the generated rc.yml (used with --from-compose).')
 @click.option('--aws-profile', 'aws_profile', default=None,
               help='aws_profile in the generated rc.yml (used with --from-compose).')
-def init(use_v1, from_compose, output_path, public_service, region, aws_profile):
+@click.option('--testing-defaults/--no-testing-defaults', 'testing_defaults',
+              default=None,
+              help='Inject DJANGO_ALLOWED_HOSTS=* / CSRF_TRUSTED_ORIGINS=* / '
+                   'DJANGO_DEBUG=False on Django services (used with '
+                   '--from-compose). Default: auto-enabled when project '
+                   'starts with rc-test-, off otherwise. UNSAFE for '
+                   'production stacks. See rc-e5u.46.4.')
+def init(use_v1, from_compose, output_path, public_service, region, aws_profile,
+         testing_defaults):
     """Generate an rc.yml template in the current directory.
 
     With --from-compose, read an existing docker-compose.yml and scaffold
@@ -937,6 +987,7 @@ def init(use_v1, from_compose, output_path, public_service, region, aws_profile)
                 public_service=public_service,
                 region=region,
                 aws_profile=aws_profile,
+                testing_defaults=testing_defaults,
             )
         except Exception as exc:
             raise click.ClickException(f"failed to scaffold from {from_compose}: {exc}")
@@ -1046,7 +1097,11 @@ def provision(ctx, dry_run):
 @cli.command()
 @click.option('--no-build', is_flag=True, help='Deploy without rebuilding images')
 @click.option('--dry-run', is_flag=True, help='Preview what would happen')
-@click.option('--tag', default='latest', help='Image tag (default: latest)')
+@click.option('--tag', default=None,
+              help='Image tag. When set + the tag already exists in ECR, '
+                   'rc skips docker build and re-tags the existing image as '
+                   ':latest (instant rollback / pinned-image deploy). When '
+                   'unset, builds with :latest as today.')
 @click.option('--code-only', is_flag=True, help='Deploy only code services (skip infrastructure)')
 @click.option('--services', 'selected_services', default=None, help='Comma-separated services to deploy')
 @click.option(
@@ -1054,11 +1109,73 @@ def provision(ctx, dry_run):
     help='Mark deployment ephemeral; auto-reapable via `rc reap` after this '
          'duration (e.g. 5m, 2h, 1d, 4h30m). v2 rc.yml only.',
 )
+@click.option(
+    '--dev', 'dev_mode', is_flag=True,
+    help='Dev-mode deploy (rc-e5u.45.8): provisions an EFS file system + '
+         'access points for any service declaring dev_volumes, mounted '
+         'into the task at the declared paths so `rc dev push` can stream '
+         'local source for sub-second iteration. v2 rc.yml only.',
+)
+@click.option(
+    '--reconcile', 'reconcile', is_flag=True,
+    help='Auto-detect services running on stale task def revisions and '
+         'force-roll only those. Useful after a partial-failure deploy '
+         'left some services stuck on older code. v2 rc.yml only. '
+         'Mutually exclusive with --services / --tag. (rc-e5u.44.24)',
+)
 @click.pass_context
-def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl):
+def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, dev_mode, reconcile):
     """Build images, push to ECR, and deploy all services."""
+    services_list = None
+    if selected_services:
+        services_list = [s.strip() for s in selected_services.split(',') if s.strip()]
+    if reconcile:
+        if services_list or tag:
+            click.echo(
+                "Error: --reconcile is mutually exclusive with --services / --tag.",
+                err=True,
+            )
+            sys.exit(1)
+        # Discover stale services via provider.status, populate
+        # services_list with their names. Empty list → nothing to do.
+        from remote_compose.cli_v2 import (
+            build_deploy_context, load_rc_yml, resolve_provider,
+        )
+        from pathlib import Path as _Path
+        rc_path = _Path(ctx.obj.get('config_path') or RC_CONFIG_FILE)
+        if not rc_path.exists():
+            click.echo(f"Error: {rc_path} not found.", err=True)
+            sys.exit(1)
+        try:
+            version, raw, v2 = load_rc_yml(rc_path)
+        except Exception as exc:
+            click.echo(f"rc.yml parse failed: {exc}", err=True)
+            sys.exit(1)
+        if version != 2 or v2 is None:
+            click.echo(
+                "Error: --reconcile requires rc.yml v2 (provider-based deploy).",
+                err=True,
+            )
+            sys.exit(1)
+        d_ctx = build_deploy_context(v2, raw, rc_path)
+        report = resolve_provider(v2).status(d_ctx)
+        stale = [s.name for s in report.services if getattr(s, "is_stale", False)]
+        if not stale:
+            click.echo(
+                "  No stale services detected — every running revision "
+                "matches its family's latest task def. Nothing to reconcile."
+            )
+            return
+        click.echo(
+            f"  Reconciling {len(stale)} stale service(s): "
+            f"{', '.join(sorted(stale))}"
+        )
+        services_list = stale
     from remote_compose.cli_v2 import dispatch_if_v2
-    if dispatch_if_v2(ctx.obj.get('config_path'), 'deploy', ttl=ttl):
+    if dispatch_if_v2(
+        ctx.obj.get('config_path'), 'deploy',
+        ttl=ttl, services=services_list, tag=tag, dev=dev_mode,
+    ):
         return
     if ttl:
         click.echo(
@@ -1072,9 +1189,7 @@ def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl):
         click.echo("Error: --code-only and --services are mutually exclusive", err=True)
         sys.exit(1)
 
-    services_list = None
-    if selected_services:
-        services_list = [s.strip() for s in selected_services.split(',') if s.strip()]
+    # services_list already computed above for the v2 dispatcher; reused here.
 
     config = _load_config(ctx.obj.get('config_path'))
     _bootstrap_django(config)
@@ -1208,12 +1323,24 @@ def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl):
               help='AWS region used when scaffolding rc.yml (ignored if rc.yml exists).')
 @click.option('--aws-profile', 'aws_profile', default=None,
               help='aws_profile used when scaffolding rc.yml (ignored if rc.yml exists).')
+@click.option('--testing-defaults/--no-testing-defaults', 'testing_defaults',
+              default=None,
+              help='Inject DJANGO_ALLOWED_HOSTS=* / CSRF_TRUSTED_ORIGINS=* '
+                   'on Django services when scaffolding rc.yml (ignored if '
+                   'rc.yml exists). Default auto-on for rc-test-* projects. '
+                   'See rc-e5u.46.4.')
 @click.option('--ttl', 'ttl', default=None,
               help='Mark this stack ephemeral with the given TTL '
                    '(e.g. 30m, 4h, 2h30m). Tags resources Ephemeral=true + '
                    'ExpiresAt=<iso>; `rc reap` later destroys past-due stacks.')
+@click.option('--dev', 'dev_mode', is_flag=True,
+              help='Dev-mode deploy: provision EFS-backed bind mounts for '
+                   'every services[*].dev_volumes entry so `rc dev push` can '
+                   'stream local source into the running task for sub-second '
+                   'iteration. See rc-e5u.45.8.')
 @click.pass_context
-def up(ctx, from_compose, public_service, region, aws_profile, ttl):
+def up(ctx, from_compose, public_service, region, aws_profile,
+       testing_defaults, ttl, dev_mode):
     """One-shot: scaffold rc.yml (if missing), deploy, push secrets, print ALB URL.
 
     The "I have a docker-compose.yml — get me a running stack" command. With
@@ -1239,14 +1366,71 @@ def up(ctx, from_compose, public_service, region, aws_profile, ttl):
             public_service=public_service,
             region=region,
             aws_profile=aws_profile,
+            testing_defaults=testing_defaults,
         )
         target.write_text(text)
         click.echo(f"  written ({len(text)} bytes).\n")
 
+    # --- Step 1.5: auto-fix nginx for ECS when compose trips .44.18 + Django ---
+    # rc-e5u.46.2: when the user's nginx.conf has 'upstream { server X:Y; }'
+    # without a resolver directive AND one of the upstreams looks like Django,
+    # silently chain `rc fix nginx-conf` so the deploy below builds the
+    # ECS-aware image instead of the stale-DNS local one. Without this the
+    # user has to read the .44.18 warning, hand-run rc fix, wire the
+    # dockerfile override (.46.1), and re-run rc up — five steps for what
+    # is a deterministic fix.
+    compose_path_for_autofix: Optional[Path] = None
+    if from_compose:
+        compose_path_for_autofix = Path(from_compose).resolve()
+    elif target.exists():
+        try:
+            rc_raw_existing = yaml.safe_load(target.read_text()) or {}
+        except yaml.YAMLError:
+            rc_raw_existing = {}
+        compose_field = rc_raw_existing.get("compose_file") if isinstance(
+            rc_raw_existing, dict) else None
+        if compose_field:
+            cp = Path(compose_field)
+            if not cp.is_absolute():
+                cp = (target.parent / cp).resolve()
+            if cp.exists():
+                compose_path_for_autofix = cp
+    if compose_path_for_autofix is not None:
+        try:
+            from remote_compose.init_from_compose import auto_fix_nginx_if_needed
+            result = auto_fix_nginx_if_needed(target, compose_path_for_autofix)
+        except Exception as exc:
+            click.echo(f"  WARN: nginx auto-fix skipped: {exc}", err=True)
+            result = None
+        if result:
+            project_dir = target.parent.resolve()
+            try:
+                nginx_rel = result["nginx_path"].relative_to(project_dir)
+                df_rel = result["dockerfile_path"].relative_to(project_dir)
+            except ValueError:
+                nginx_rel = result["nginx_path"]
+                df_rel = result["dockerfile_path"]
+            ups = ", ".join(
+                f"{u.name}:{u.port}{' (django)' if u.django else ''}"
+                for u in result["upstreams"]
+            )
+            click.echo(
+                f"  auto-fixed nginx config for ECS — see "
+                f"./{result['output_subdir']}/ "
+                f"(rc-e5u.46.2; rc-e5u.44.18 detector fired)."
+            )
+            click.echo(f"    upstreams:  {ups}")
+            click.echo(f"    wrote:      {nginx_rel}")
+            click.echo(f"                {df_rel}")
+            click.echo(
+                f"    rc.yml:     services.{result['nginx_service']}."
+                f"dockerfile = {result['dockerfile_rel']}\n"
+            )
+
     # --- Step 2: deploy via the v2 dispatcher ---
     # ttl=None is fine; dispatcher only acts when truthy.
     from remote_compose.cli_v2 import dispatch_if_v2
-    if not dispatch_if_v2(str(target), 'deploy', ttl=ttl):
+    if not dispatch_if_v2(str(target), 'deploy', ttl=ttl, dev=dev_mode):
         raise click.ClickException(
             f"{target} is not a v2 rc.yml. `rc up` only supports v2 — "
             f"migrate with `rc migrate` or use `rc deploy` for v1."
@@ -2061,9 +2245,44 @@ cli.add_command(db_group)
 @cli.command()
 @click.option('--infra', is_flag=True, help='Also destroy VPC, ALB, etc.')
 @click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt')
+@click.option(
+    '--all-ephemeral', 'all_ephemeral', is_flag=True,
+    help='Destroy every stack in the ephemeral registry (deployed via '
+         'rc deploy --ttl / rc up --ttl), regardless of TTL expiry. '
+         'Single confirmation prompt covers all stacks.',
+)
 @click.pass_context
-def destroy(ctx, infra, yes):
+def destroy(ctx, infra, yes, all_ephemeral):
     """Tear down all services (prompts for confirmation)."""
+    if all_ephemeral:
+        # Reuse the reap pipeline — same registry, same provider.destroy
+        # plumbing, same per-stack failure isolation. Diff vs `rc reap --all`:
+        # rc destroy --all-ephemeral is the right verb when you're saying "I
+        # want this gone NOW", regardless of whether you set a TTL.
+        from remote_compose.ephemeral import (
+            DEFAULT_REGISTRY_PATH, list_records,
+        )
+        targets = list_records()
+        if not targets:
+            click.echo(
+                f"  No ephemeral stacks in registry "
+                f"({DEFAULT_REGISTRY_PATH})."
+            )
+            return
+        click.echo(
+            f"\nrc destroy --all-ephemeral — {len(targets)} stack(s) "
+            f"in registry:"
+        )
+        for r in targets:
+            prof = f" profile={r.aws_profile}" if r.aws_profile else ""
+            click.echo(
+                f"  - {r.project} (region={r.region}{prof}) "
+                f"expires_at={r.expires_at}"
+            )
+        _destroy_ephemeral_targets(targets, yes=yes,
+                                    command_name="destroy --all-ephemeral")
+        return
+
     from remote_compose.cli_v2 import dispatch_if_v2
     if dispatch_if_v2(ctx.obj.get('config_path'), 'destroy', yes=yes):
         return
@@ -2269,52 +2488,19 @@ def _teardown_infrastructure(cluster):
 # =============================================================================
 
 
-@cli.command()
-@click.option('--dry-run', is_flag=True, help='List past-due stacks without destroying.')
-@click.option(
-    '--all', 'reap_all', is_flag=True,
-    help='Destroy every ephemeral stack regardless of TTL.',
-)
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt.')
-def reap(dry_run, reap_all, yes):
-    """Destroy ephemeral stacks past their TTL.
+def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
+    """Sequentially destroy each ephemeral stack via provider.destroy.
 
-    Reads the local registry (~/.config/remote-compose/ephemeral.json)
-    written by `rc deploy --ttl ...`, finds entries whose expires_at is
-    in the past, and runs `provider.destroy(ctx)` for each. A failure
-    on one stack does not stop the rest. Successfully destroyed stacks
-    are removed from the registry.
+    Shared by ``rc reap`` and ``rc destroy --all-ephemeral`` (rc-e5u.44.15)
+    so both code paths handle missing rc.yml, v1 entries, and provider
+    failures identically. A failure on one stack does NOT stop the rest;
+    succeeded stacks are removed from the local registry; the function
+    exits the process non-zero if any failures occurred.
     """
-    from remote_compose.ephemeral import (
-        DEFAULT_REGISTRY_PATH, list_records, find_expired, remove_stack,
+    from remote_compose.ephemeral import remove_stack
+    from remote_compose.cli_v2 import (
+        build_deploy_context, load_rc_yml, resolve_provider,
     )
-    from remote_compose.cli_v2 import build_deploy_context, load_rc_yml, resolve_provider
-
-    if reap_all:
-        targets = list_records()
-        scope = "all ephemeral"
-    else:
-        targets = find_expired()
-        scope = "past-due"
-
-    if not targets:
-        click.echo(
-            f"  No {scope} stacks in registry "
-            f"({DEFAULT_REGISTRY_PATH})."
-        )
-        return
-
-    click.echo(f"\nrc reap — {len(targets)} {scope} stack(s):")
-    for r in targets:
-        prof = f" profile={r.aws_profile}" if r.aws_profile else ""
-        click.echo(
-            f"  - {r.project} (region={r.region}{prof}) "
-            f"expires_at={r.expires_at}"
-        )
-
-    if dry_run:
-        click.echo("\n  --dry-run: nothing destroyed.")
-        return
 
     if not yes:
         if not click.confirm(
@@ -2363,12 +2549,188 @@ def reap(dry_run, reap_all, yes):
         click.echo("    done.")
 
     click.echo(
-        f"\n  Reap complete: {succeeded} destroyed, {len(failures)} failed."
+        f"\n  {command_name} complete: {succeeded} destroyed, "
+        f"{len(failures)} failed."
     )
     if failures:
         for proj, why in failures:
             click.echo(f"    {proj}: {why}", err=True)
         sys.exit(1)
+
+
+@cli.command()
+@click.option('--dry-run', is_flag=True, help='List past-due stacks without destroying.')
+@click.option(
+    '--all', 'reap_all', is_flag=True,
+    help='Destroy every ephemeral stack regardless of TTL.',
+)
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt.')
+def reap(dry_run, reap_all, yes):
+    """Destroy ephemeral stacks past their TTL.
+
+    Reads the local registry (~/.config/remote-compose/ephemeral.json)
+    written by `rc deploy --ttl ...`, finds entries whose expires_at is
+    in the past, and runs `provider.destroy(ctx)` for each. A failure
+    on one stack does not stop the rest. Successfully destroyed stacks
+    are removed from the registry.
+    """
+    from remote_compose.ephemeral import (
+        DEFAULT_REGISTRY_PATH, list_records, find_expired,
+    )
+
+    if reap_all:
+        targets = list_records()
+        scope = "all ephemeral"
+    else:
+        targets = find_expired()
+        scope = "past-due"
+
+    if not targets:
+        click.echo(
+            f"  No {scope} stacks in registry "
+            f"({DEFAULT_REGISTRY_PATH})."
+        )
+        return
+
+    click.echo(f"\nrc reap — {len(targets)} {scope} stack(s):")
+    for r in targets:
+        prof = f" profile={r.aws_profile}" if r.aws_profile else ""
+        click.echo(
+            f"  - {r.project} (region={r.region}{prof}) "
+            f"expires_at={r.expires_at}"
+        )
+
+    if dry_run:
+        click.echo("\n  --dry-run: nothing destroyed.")
+        return
+
+    _destroy_ephemeral_targets(targets, yes=yes, command_name="Reap")
+
+
+# =============================================================================
+# rc list — inventory of ephemeral stacks (rc-e5u.44.16)
+# =============================================================================
+
+
+def _format_relative_time(iso_ts: str, now: Optional[Any] = None) -> str:
+    """Render an ISO timestamp as a short relative offset (e.g. '2h 14m').
+
+    Past timestamps render '<delta> ago'; future timestamps render
+    'in <delta>'. Used for both 'created' and 'ttl-remaining' columns
+    in `rc list --ephemeral`. Granularity: days/hours/minutes only —
+    seconds aren't useful at the deploy lifecycle scale.
+    """
+    from datetime import datetime, timezone
+    from remote_compose.ephemeral import from_iso_utc
+    try:
+        target = from_iso_utc(iso_ts)
+    except Exception:  # noqa: BLE001
+        return "(invalid)"
+    when = now or datetime.now(timezone.utc)
+    delta = target - when
+    secs = int(delta.total_seconds())
+    suffix = "ago" if secs < 0 else ""
+    prefix = "in " if secs >= 0 else ""
+    secs = abs(secs)
+    if secs < 60:
+        body = f"{secs}s"
+    else:
+        days, rem = divmod(secs, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes and not days:  # don't bother with mins past a day
+            parts.append(f"{minutes}m")
+        body = " ".join(parts) or f"{secs}s"
+    return f"{prefix}{body}{(' ' + suffix) if suffix else ''}".strip()
+
+
+@cli.command(name="list")
+@click.option(
+    '--ephemeral', 'ephemeral_only', is_flag=True,
+    help='List ephemeral stacks from the local registry (created via '
+         'rc deploy --ttl / rc up --ttl).',
+)
+@click.option('--json', 'as_json', is_flag=True,
+              help='Emit machine-parseable JSON instead of a table.')
+def list_cmd(ephemeral_only, as_json):
+    """List rc-managed stacks (today: ephemeral only — see --ephemeral).
+
+    Reads ~/.config/remote-compose/ephemeral.json and prints one row per
+    stack: project | region | profile | created | ttl-remaining | rc.yml.
+    Pairs with `rc reap` (destroys past-due) and
+    `rc destroy --all-ephemeral` (destroys every entry on confirmation).
+    """
+    if not ephemeral_only:
+        # Until we have non-ephemeral inventory (e.g., scan-aws-by-tag),
+        # default to the same behavior as --ephemeral so the command does
+        # something useful without the flag.
+        ephemeral_only = True
+
+    from remote_compose.ephemeral import DEFAULT_REGISTRY_PATH, list_records
+    records = list_records()
+
+    if as_json:
+        import json as _json
+        from datetime import datetime, timezone
+        from remote_compose.ephemeral import from_iso_utc
+        now = datetime.now(timezone.utc)
+        out = []
+        for r in records:
+            try:
+                expires_dt = from_iso_utc(r.expires_at)
+                ttl_seconds = int((expires_dt - now).total_seconds())
+            except Exception:  # noqa: BLE001
+                ttl_seconds = None
+            out.append({
+                "project": r.project,
+                "region": r.region,
+                "aws_profile": r.aws_profile,
+                "created_at": r.created_at,
+                "expires_at": r.expires_at,
+                "ttl_remaining_seconds": ttl_seconds,
+                "expired": r.is_expired(now),
+                "rc_yml_path": r.rc_yml_path,
+                "terraform_dir": r.terraform_dir,
+            })
+        click.echo(_json.dumps(out, indent=2))
+        return
+
+    if not records:
+        click.echo(
+            f"  No ephemeral stacks in registry "
+            f"({DEFAULT_REGISTRY_PATH})."
+        )
+        return
+
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for r in records:
+        ttl = _format_relative_time(r.expires_at)
+        if r.is_expired():
+            ttl = f"EXPIRED ({ttl})"
+        rows.append((
+            r.project,
+            r.region,
+            r.aws_profile or "-",
+            _format_relative_time(r.created_at),
+            ttl,
+            r.rc_yml_path,
+        ))
+
+    headers = ("PROJECT", "REGION", "PROFILE", "CREATED", "TTL", "RC.YML")
+    widths = [
+        max(len(h), max((len(r[i]) for r in rows), default=0))
+        for i, h in enumerate(headers)
+    ]
+    fmt = "  " + "  ".join(f"{{:<{w}}}" for w in widths)
+    click.echo(fmt.format(*headers))
+    click.echo("  " + "  ".join("-" * w for w in widths))
+    for row in rows:
+        click.echo(fmt.format(*row))
 
 
 # =============================================================================
@@ -2801,6 +3163,207 @@ def audit_cmd(ctx, project_name, region_name, profile_name, delete):
     click.echo("\n  --delete is dry-run today. Per-resource deletion will land "
                "in the next iteration; for now use the listed identifiers with "
                "the matching `aws <svc> delete-...` commands.", err=True)
+
+
+# =============================================================================
+# rc dev — hot-reload iteration (rc-e5u.45.9)
+# =============================================================================
+
+@cli.group(name='dev')
+def dev_group():
+    """Hot-reload iteration on a deployed dev-mode stack.
+
+    \b
+    Workflow:
+      1. Add `dev_volumes:` entries to services in rc.yml.
+      2. `rc up --dev` — deploys with EFS-backed bind mounts at the
+         declared paths. The container will start empty until you push.
+      3. `rc dev push <service>` — streams local source into the EFS
+         mount via `aws ecs execute-command`. Django runserver et al.
+         auto-reload on file change.
+      4. `rc dev push --watch <service>` — keeps streaming on every
+         local edit (debounced ~250ms).
+    """
+
+
+@dev_group.command(name='push')
+@click.argument('service', required=False)
+@click.option('--watch', 'watch', is_flag=True,
+              help='Watch local sources and re-push on every change '
+                   '(debounced ~250ms). Requires fswatch (macOS) or '
+                   'inotifywait (Linux).')
+@click.pass_context
+def dev_push_cmd(ctx, service, watch):
+    """Push local dev_volume source(s) to a running task via EFS.
+
+    With no SERVICE arg, pushes EVERY service that declares dev_volumes.
+    With --watch, runs forever, re-pushing on every local edit.
+    """
+    from pathlib import Path as _Path
+    from remote_compose.dev_push import (
+        DevPushError, push_all, watch_and_push,
+    )
+
+    config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
+    rc_path = _Path(config_path)
+    if not rc_path.exists():
+        click.echo(f"Error: {rc_path} not found.", err=True)
+        sys.exit(1)
+
+    def _progress(msg: str) -> None:
+        click.echo(msg)
+
+    try:
+        if watch:
+            watch_and_push(rc_path, service, progress=_progress)
+        else:
+            results = push_all(rc_path, service, progress=_progress)
+            total = sum(r["elapsed_s"] for r in results)
+            click.echo(
+                f"\n  pushed {len(results)} dev_volume(s) in {total:.1f}s."
+            )
+    except DevPushError as exc:
+        click.echo(f"\n  rc dev push: {exc}", err=True)
+        sys.exit(1)
+
+
+# =============================================================================
+# rc fix — one-shot scaffolders for the most common ECS gotchas
+# =============================================================================
+
+
+@cli.group(name='fix')
+def fix_group():
+    """One-shot scaffolders for common ECS deploy gotchas.
+
+    \b
+    Subcommands:
+      rc fix nginx-conf   Emit an ECS-ready nginx.conf + Dockerfile
+                          (rc-e5u.44.21).
+    """
+
+
+@fix_group.command(name='nginx-conf')
+@click.option('--upstream', 'upstream_specs', multiple=True,
+              help='Upstream service to proxy, in NAME:PORT form. Repeat '
+                   'for multi-upstream configs. The first --upstream is '
+                   'wired into the catch-all default_server block.')
+@click.option('--django', 'django_names', multiple=True,
+              help='Mark the named upstream(s) as Django so the generator '
+                   "injects 'proxy_set_header Host localhost;' (works around "
+                   "ALLOWED_HOSTS rejection of ALB DNS Host headers). "
+                   "Use --django=NAME or just --django to mark every "
+                   "upstream.")
+@click.option('--out', 'out_dir', default='compose/ecs/nginx', show_default=True,
+              type=click.Path(file_okay=False),
+              help='Subdir under the project to write nginx.conf + '
+                   'Dockerfile into. The default mirrors the convention '
+                   "verified against rc-test-startsimpli.")
+@click.option('--force', is_flag=True,
+              help='Overwrite existing nginx.conf / Dockerfile in --out.')
+@click.pass_context
+def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
+    """Emit an ECS-ready nginx.conf + Dockerfile (rc-e5u.44.21).
+
+    \b
+    Generates a SIBLING nginx config (under compose/ecs/nginx/) that proxies
+    one or more upstream compose services using the variable-based
+    proxy_pass pattern that survives Cloud Map task replacements.
+    Three pieces matter and must stay in sync:
+      1. resolver <vpc_cidr_base+2> — the only DNS reachable from a Fargate
+         task ENI. NOT 169.254.169.253.
+      2. NO 'upstream { server X:Y; }' blocks (stock nginx caches the lookup
+         at config-load time → dies on task replacement).
+      3. 'set $u "<svc>.<project>.local:<port>"; proxy_pass http://$u;' —
+         per-request resolution, FQDN form (nginx's resolver doesn't
+         honour /etc/resolv.conf search domains).
+
+    \b
+    For Django upstreams add --django=NAME so the generator also injects
+    'proxy_set_header Host localhost;' — Django's ALLOWED_HOSTS check
+    rejects the ALB DNS Host header otherwise (returns 400).
+
+    \b
+    Examples:
+      rc fix nginx-conf --upstream django:8000 --django=django
+      rc fix nginx-conf --upstream web:3000 --upstream api:5000 --django=api
+      rc fix nginx-conf  # reads upstreams from rc.yml services with port:
+    """
+    from pathlib import Path as _Path
+    from remote_compose.fix_nginx_conf import (
+        Upstream, parse_upstream_arg, upstreams_from_rc_v2, write_ecs_nginx,
+    )
+
+    config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
+    rc_path = _Path(config_path)
+    if not rc_path.exists():
+        click.echo(f"Error: {rc_path} not found.", err=True)
+        sys.exit(1)
+
+    raw = yaml.safe_load(rc_path.read_text()) or {}
+    project = str(raw.get('project') or '')
+    ecs_cfg = ((raw.get('provider_config') or {}).get('ecs') or {})
+    vpc_cidr = ecs_cfg.get('vpc_cidr')
+
+    # If --django was passed without an explicit value (just the bare flag,
+    # not supported by click multiple), treat each --django=NAME as a name.
+    django_set = {str(d) for d in (django_names or ())}
+
+    upstreams: list[Upstream] = []
+    if upstream_specs:
+        for spec in upstream_specs:
+            try:
+                upstreams.append(parse_upstream_arg(spec, django_set))
+            except ValueError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                sys.exit(1)
+    else:
+        # Fall back to rc.yml services with port:.
+        upstreams = upstreams_from_rc_v2(raw, django_services=django_set)
+        if not upstreams:
+            click.echo(
+                "Error: no --upstream specs and rc.yml has no services "
+                "with a numeric `port:` to derive upstreams from.",
+                err=True,
+            )
+            sys.exit(1)
+
+    project_dir = rc_path.parent.resolve()
+    try:
+        nginx_path, dockerfile_path = write_ecs_nginx(
+            project_dir=project_dir,
+            upstreams=upstreams,
+            project=project,
+            vpc_cidr=vpc_cidr,
+            force=force,
+            output_subdir=out_dir,
+        )
+    except FileExistsError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"\nrc fix nginx-conf")
+    click.echo(f"  project:    {project or '<unset>'}")
+    click.echo(f"  vpc_cidr:   {vpc_cidr or '10.0.0.0/16 (default)'}")
+    click.echo(f"  upstreams:  " + ", ".join(
+        f"{u.name}:{u.port}{' (django)' if u.django else ''}"
+        for u in upstreams
+    ))
+    click.echo(f"  wrote:      {nginx_path.relative_to(project_dir)}")
+    click.echo(f"              {dockerfile_path.relative_to(project_dir)}")
+    click.echo(
+        f"\n  Wire it into your compose ECS variant (build context = "
+        f"project root):"
+    )
+    click.echo(f"\n    services:")
+    click.echo(f"      nginx:")
+    click.echo(f"        build:")
+    click.echo(f"          context: .")
+    click.echo(f"          dockerfile: {out_dir}/Dockerfile")
+    click.echo(
+        "\n  Then `rc deploy --services nginx` should produce a healthy "
+        "ALB target on first attempt — no resolver/FQDN/Host iteration loop."
+    )
 
 
 if __name__ == '__main__':

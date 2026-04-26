@@ -770,3 +770,108 @@ class TestDbPushRestoreScript:
                           ("tar+pg_restore", "x.tar.gz")]:
             s = _build_restore_script(name, "https://signed", fmt)
             assert "rm -rf /tmp/_rcpush*" in s
+
+
+class TestServiceV2EnvMerge:
+    """rc-e5u.46.4: services.<svc>.env in rc.yml merges ON TOP of compose's
+    environment / env_file. rc.yml wins on collision so the
+    scaffolder-injected DJANGO_ALLOWED_HOSTS=* can override an inherited
+    value from a long-lived env_file (e.g. a prod-leaning .envs/.local/.django
+    that pins ALLOWED_HOSTS to a specific domain).
+    """
+
+    def test_rc_yml_env_merges_on_top_of_compose_env(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  api:\n    image: busybox\n"
+            "    environment:\n      FOO: from_compose\n      KEEP: original\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "api": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "env": {"FOO": "from_rc_yml", "EXTRA": "added"},
+                },
+            },
+        })
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["FOO"] == "from_rc_yml"  # rc.yml wins
+        assert ctx.services["api"].env["KEEP"] == "original"   # compose pass-through
+        assert ctx.services["api"].env["EXTRA"] == "added"     # rc.yml adds
+
+    def test_rc_yml_env_overrides_env_file(self, tmp_path, monkeypatch):
+        # The .46.4 use case: env_file pins DJANGO_ALLOWED_HOSTS=mydomain
+        # but rc.yml's testing-defaults injection wants '*'. rc.yml wins.
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        ef = tmp_path / ".env"
+        ef.write_text("DJANGO_ALLOWED_HOSTS=mydomain.com\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            f"services:\n  django:\n    image: busybox\n    env_file: [{ef}]\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "django": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "env": {"DJANGO_ALLOWED_HOSTS": "*"},
+                },
+            },
+        })
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["django"].env["DJANGO_ALLOWED_HOSTS"] == "*"
+
+    def test_empty_rc_env_is_a_noop(self, tmp_path, monkeypatch):
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  api:\n    image: busybox\n"
+            "    environment:\n      FOO: bar\n"
+        )
+        rc = tmp_path / "rc.yml"
+        _write(rc, {
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "api": {"cpu": 256, "memory": 512, "type": "application"},
+            },
+        })
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env == {"FOO": "bar"}
+
+    def test_rc_yml_env_coerces_yaml_bool_to_str(self, tmp_path, monkeypatch):
+        # YAML 'False' parses as bool False — schema coerces to "False" so
+        # the value can flow into the task-def environment[] (env values
+        # must be strings).
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services:\n  api:\n    image: busybox\n")
+        rc = tmp_path / "rc.yml"
+        rc.write_text(yaml.safe_dump({
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "api": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "env": {"DJANGO_DEBUG": False, "PORT": 8080},
+                },
+            },
+        }))
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["api"].env["DJANGO_DEBUG"] == "False"
+        assert ctx.services["api"].env["PORT"] == "8080"
+

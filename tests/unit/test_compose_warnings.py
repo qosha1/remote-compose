@@ -15,8 +15,10 @@ from remote_compose.compose_warnings import (
     collect_compose_warnings,
     detect_bad_hosts,
     detect_bind_mounts,
+    detect_django_allowed_hosts,
     detect_external_volumes,
     detect_multi_port_alb,
+    detect_nginx_upstream_resolver,
 )
 
 
@@ -268,6 +270,364 @@ class TestMultiPortDetector:
 
 
 # ---------------------------------------------------------------------------
+# rc-e5u.44.18 — nginx upstream-resolver detector
+# ---------------------------------------------------------------------------
+
+
+class TestNginxUpstreamResolverDetector:
+    def _setup(self, tmp_path, nginx_conf_text, services=None):
+        services = services or {
+            "nginx": {"build": {"context": "./build"}},
+            "django": {"image": "django:latest"},
+        }
+        ctx_dir = tmp_path / "build"
+        ctx_dir.mkdir()
+        (ctx_dir / "nginx.conf").write_text(nginx_conf_text)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {"services": services})
+        return compose_path
+
+    def test_warns_when_upstream_uses_compose_service_no_resolver(self, tmp_path):
+        compose_path = self._setup(tmp_path, """\
+http {
+  upstream django {
+    server django:8000;
+  }
+  server {
+    listen 80;
+    location / { proxy_pass http://django; }
+  }
+}
+""")
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_nginx_upstream_resolver(compose, compose_path)
+        assert len(warns) == 1
+        w = warns[0]
+        # The warning must name the offending file + the service + recommend
+        # resolver + set $var pattern (per bead acceptance).
+        assert "nginx.conf" in w
+        assert "resolver" in w
+        # No rc.yml passed → falls back to default vpc 10.0.0.0/16 → .2
+        assert "resolver 10.0.0.2 valid=10s ipv6=off" in w
+        assert "set $u" in w
+        assert "proxy_pass http://$u" in w
+
+    def test_suppressed_when_resolver_directive_present(self, tmp_path):
+        compose_path = self._setup(tmp_path, """\
+http {
+  resolver 169.254.169.253 valid=10s;
+  upstream django { server django:8000; }
+}
+""")
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_nginx_upstream_resolver(compose, compose_path) == []
+
+    def test_external_hostname_not_flagged(self, tmp_path):
+        # api.example.com is NOT a compose service — out of scope.
+        compose_path = self._setup(tmp_path, """\
+upstream api { server api.example.com:443; }
+""")
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_nginx_upstream_resolver(compose, compose_path) == []
+
+    def test_localhost_and_127_not_flagged(self, tmp_path):
+        compose_path = self._setup(tmp_path, """\
+upstream local1 { server localhost:8080; }
+upstream local2 { server 127.0.0.1:9090; }
+""")
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_nginx_upstream_resolver(compose, compose_path) == []
+
+    def test_multiple_upstreams_each_warn_once(self, tmp_path):
+        # Multiple services in compose, multiple upstream blocks
+        compose_path = self._setup(
+            tmp_path,
+            """\
+upstream django { server django:8000; }
+upstream worker { server celery:5555; }
+""",
+            services={
+                "nginx": {"build": {"context": "./build"}},
+                "django": {"image": "x"},
+                "celery": {"image": "x"},
+            },
+        )
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_nginx_upstream_resolver(compose, compose_path)
+        assert len(warns) == 2
+
+    # ----- rc-e5u.44.19: vpc-derived resolver, FQDN, Django Host hint -----
+
+    def test_resolver_ip_derived_from_rc_yml_vpc_cidr(self, tmp_path):
+        # vpc_cidr 10.42.0.0/16 → resolver 10.42.0.2 (network base + 2).
+        compose_path = self._setup(tmp_path, "upstream django { server django:8000; }")
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "myapp", "provider_config": {"ecs": {"vpc_cidr": "10.42.0.0/16"}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert len(warns) == 1
+        assert "resolver 10.42.0.2" in warns[0]
+        assert "10.0.0.2" not in warns[0]  # not the default fallback
+
+    def test_resolver_ip_handles_other_cidrs(self, tmp_path):
+        compose_path = self._setup(tmp_path, "upstream django { server django:8000; }")
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "x", "provider_config": {"ecs": {"vpc_cidr": "172.31.0.0/16"}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert "resolver 172.31.0.2" in warns[0]
+
+    def test_malformed_cidr_falls_back_to_default(self, tmp_path):
+        compose_path = self._setup(tmp_path, "upstream django { server django:8000; }")
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "x", "provider_config": {"ecs": {"vpc_cidr": "not-a-cidr"}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert "resolver 10.0.0.2" in warns[0]
+
+    def test_uses_fqdn_in_recommended_set_u_directive(self, tmp_path):
+        # set $u must use <host>.<project>.local:<port> — bare host returns
+        # NXDOMAIN through nginx's resolver (doesn't follow search domain).
+        compose_path = self._setup(tmp_path, "upstream django { server django:8000; }")
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "myapp", "provider_config": {"ecs": {}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert 'set $u "django.myapp.local:8000"' in warns[0]
+        # Must NOT recommend the bare form (the bug we just fixed)
+        assert 'set $u "django:8000"' not in warns[0]
+
+    def test_django_upstream_includes_allowed_hosts_hint(self, tmp_path):
+        # Heuristic: Dockerfile has manage.py / wsgi.py / django dep → mention
+        # ALLOWED_HOSTS + the Host header rewrite.
+        ctx = tmp_path / "build"
+        ctx.mkdir()
+        django_ctx = tmp_path / "djbuild"
+        django_ctx.mkdir()
+        (django_ctx / "Dockerfile").write_text(
+            "FROM python:3.12\nCOPY manage.py /app/\nRUN pip install django>=4.2\n"
+        )
+        (ctx / "nginx.conf").write_text("upstream django { server django:8000; }")
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "nginx": {"build": {"context": "./build"}},
+                "django": {"build": {"context": "./djbuild"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "myapp", "provider_config": {"ecs": {}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert len(warns) == 1
+        w = warns[0]
+        assert "Django" in w
+        assert "ALLOWED_HOSTS" in w
+        assert 'proxy_set_header Host localhost' in w
+
+    def test_non_django_upstream_no_django_hint(self, tmp_path):
+        # nginx in front of a stock redis / postgres / non-Python upstream
+        # shouldn't get the Django ALLOWED_HOSTS noise.
+        compose_path = self._setup(
+            tmp_path,
+            "upstream cache { server redis:6379; }",
+            services={
+                "nginx": {"build": {"context": "./build"}},
+                "redis": {"image": "redis:7-alpine"},  # no build/Dockerfile
+            },
+        )
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"project": "myapp", "provider_config": {"ecs": {}}}
+        warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
+        assert len(warns) == 1
+        assert "Django" not in warns[0]
+        assert "ALLOWED_HOSTS" not in warns[0]
+
+    def test_dedupe_when_same_pattern_appears_twice(self, tmp_path):
+        # Same `server django:8000;` line twice in different upstream blocks
+        # but identical (svc, file, upstream:host:port) triple — dedupes.
+        compose_path = self._setup(tmp_path, """\
+upstream a { server django:8000; }
+upstream b { server django:8000; }
+""")
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_nginx_upstream_resolver(compose, compose_path)
+        # Two distinct upstream names → two warnings.
+        assert len(warns) == 2
+        # But re-running the detector doesn't produce more.
+        warns2 = detect_nginx_upstream_resolver(compose, compose_path)
+        assert warns2 == warns
+
+    def test_no_build_context_no_warning(self, tmp_path):
+        # nginx uses an image: ref (no build context) — nothing to scan.
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "nginx": {"image": "nginx:alpine"},
+                "django": {"image": "django:latest"},
+            }
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_nginx_upstream_resolver(compose, compose_path) == []
+
+
+# ---------------------------------------------------------------------------
+# rc-e5u.44.23 — Django ALLOWED_HOSTS proactive detector
+# ---------------------------------------------------------------------------
+
+
+class TestDjangoAllowedHostsDetector:
+    """One warning per Django-shaped service deployed via ALB.
+
+    The nginx detector (.44.19) already includes a Django hint when it
+    finds an nginx upstream pointing at a Django service. THIS detector
+    fires even when there's no nginx — the bare Django-on-ECS case hits
+    the same ALLOWED_HOSTS rejection.
+    """
+
+    def _write_django_dockerfile(self, ctx: Path) -> None:
+        ctx.mkdir(parents=True, exist_ok=True)
+        (ctx / "Dockerfile").write_text(
+            "FROM python:3.12\n"
+            "COPY manage.py /app/\n"
+            "RUN pip install django>=4.2\n"
+            "CMD python manage.py runserver 0.0.0.0:8000\n"
+        )
+
+    def test_django_service_warns(self, tmp_path):
+        ctx = tmp_path / "djbuild"
+        self._write_django_dockerfile(ctx)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {"build": {"context": "./djbuild"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_django_allowed_hosts(compose, compose_path, {})
+        assert len(warns) == 1
+        w = warns[0]
+        assert "'django'" in w
+        assert "ALLOWED_HOSTS" in w
+        assert "DJANGO_ALLOWED_HOSTS=*" in w
+        assert "rc fix nginx-conf" in w
+        assert "proxy_set_header Host localhost" in w
+
+    def test_non_django_python_service_no_warning(self, tmp_path):
+        # FastAPI / Flask / arbitrary Python — no Django markers, no warning.
+        ctx = tmp_path / "fastbuild"
+        ctx.mkdir()
+        (ctx / "Dockerfile").write_text(
+            "FROM python:3.12\n"
+            "RUN pip install fastapi uvicorn\n"
+            "CMD uvicorn app:app --host 0.0.0.0\n"
+        )
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "api": {"build": {"context": "./fastbuild"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_django_allowed_hosts(compose, compose_path, {}) == []
+
+    def test_one_warning_per_service_not_per_upstream(self, tmp_path):
+        # nginx + django + a second random service. Only one Django warning,
+        # not "one per upstream".
+        ctx = tmp_path / "djbuild"
+        self._write_django_dockerfile(ctx)
+        nginx_ctx = tmp_path / "nginx"
+        nginx_ctx.mkdir()
+        (nginx_ctx / "nginx.conf").write_text(
+            "upstream a { server django:8000; }\n"
+            "upstream b { server django:8000; }\n"
+        )
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {"build": {"context": "./djbuild"}},
+                "nginx": {"build": {"context": "./nginx"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_django_allowed_hosts(compose, compose_path, {})
+        assert len(warns) == 1
+
+    def test_image_only_service_not_flagged(self, tmp_path):
+        # A compose 'image: django:latest' service has no Dockerfile to scan
+        # — heuristic rightly skips it (we'd produce a false positive on
+        # any tagged 'django' image otherwise).
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {"image": "django:latest"},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_django_allowed_hosts(compose, compose_path, {}) == []
+
+    def test_django_allowed_hosts_env_suppresses(self, tmp_path):
+        # User already set DJANGO_ALLOWED_HOSTS in compose env — they're aware.
+        ctx = tmp_path / "djbuild"
+        self._write_django_dockerfile(ctx)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {
+                    "build": {"context": "./djbuild"},
+                    "environment": {"DJANGO_ALLOWED_HOSTS": "*"},
+                },
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_django_allowed_hosts(compose, compose_path, {}) == []
+
+    def test_django_allowed_hosts_env_list_form_suppresses(self, tmp_path):
+        # compose accepts `environment:` as a list of KEY=VALUE strings too.
+        ctx = tmp_path / "djbuild"
+        self._write_django_dockerfile(ctx)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {
+                    "build": {"context": "./djbuild"},
+                    "environment": ["DJANGO_ALLOWED_HOSTS=mydomain.com"],
+                },
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        assert detect_django_allowed_hosts(compose, compose_path, {}) == []
+
+    def test_rc_yml_env_override_suppresses(self, tmp_path):
+        # rc.yml services.<svc>.env override also counts as "user is aware".
+        ctx = tmp_path / "djbuild"
+        self._write_django_dockerfile(ctx)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "django": {"build": {"context": "./djbuild"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        rc = {"services": {"django": {"env": {"DJANGO_ALLOWED_HOSTS": "*"}}}}
+        assert detect_django_allowed_hosts(compose, compose_path, rc) == []
+
+    def test_two_django_services_two_warnings(self, tmp_path):
+        ctx1 = tmp_path / "dj1"
+        ctx2 = tmp_path / "dj2"
+        self._write_django_dockerfile(ctx1)
+        self._write_django_dockerfile(ctx2)
+        compose_path = tmp_path / "docker-compose.yml"
+        _write_compose(compose_path, {
+            "services": {
+                "web": {"build": {"context": "./dj1"}},
+                "celery": {"build": {"context": "./dj2"}},
+            },
+        })
+        compose = yaml.safe_load(compose_path.read_text())
+        warns = detect_django_allowed_hosts(compose, compose_path, {})
+        assert len(warns) == 2
+        # Each warning quotes the service name with single quotes.
+        assert any("'web'" in w for w in warns)
+        assert any("'celery'" in w for w in warns)
+
+
+# ---------------------------------------------------------------------------
 # Aggregator + integration with rc plan output
 # ---------------------------------------------------------------------------
 
@@ -406,3 +766,25 @@ class TestRcPlanRendersWarnings:
         assert "'db'" in out
         assert "'foo'" in out
         assert "data will NOT persist" in out
+
+    def test_django_allowed_hosts_warning_appears_in_plan(self, tmp_path, capsys):
+        # rc-e5u.44.23: even without an nginx front, a Django-shaped service
+        # gets a proactive ALLOWED_HOSTS heads-up during `rc plan`.
+        from remote_compose.cli_v2 import dispatch_if_v2
+        ctx_dir = tmp_path / "djbuild"
+        ctx_dir.mkdir()
+        (ctx_dir / "Dockerfile").write_text(
+            "FROM python:3.12\nCOPY manage.py /app/\nRUN pip install django\n"
+        )
+        rc = self._setup(tmp_path, {
+            "services": {
+                "django": {"build": {"context": "./djbuild"}},
+            },
+        })
+        ok = dispatch_if_v2(rc, "plan")
+        assert ok is True
+        out = capsys.readouterr().out
+        assert "Warnings:" in out
+        assert "ALLOWED_HOSTS" in out
+        assert "DJANGO_ALLOWED_HOSTS=*" in out
+        assert "rc fix nginx-conf" in out

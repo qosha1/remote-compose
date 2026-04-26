@@ -144,6 +144,131 @@ class TestExpand:
 
 
 # ---------------------------------------------------------------------------
+# rc-e5u.44.22 — secret name when env_file lives OUTSIDE the compose dir
+# ---------------------------------------------------------------------------
+
+class TestSecretNamingOutsideComposeDir:
+    """The previous implementation fell back to the bare basename when
+    `env_file_path.relative_to(compose_dir)` raised ValueError. Two failure
+    modes that .44.22 fixes:
+      1. Same basename across env scopes (.envs/.local/.django vs
+         .envs/.staging/.django) collapsed to ONE secret named 'django'.
+      2. Renaming compose_file from in-tree to /tmp silently rebranded
+         every secret (e.g., 'local-django' became 'django'), orphaning
+         the populated SM blob.
+    """
+
+    def _setup_with_external_env_files(self, tmp_path, env_paths_and_bodies):
+        """Create env files in tmp_path/source/.envs/... and a compose at
+        tmp_path/sub/compose.yml that references them via absolute path."""
+        proj_root = tmp_path / "source"
+        proj_root.mkdir()
+        for rel, body in env_paths_and_bodies.items():
+            ep = proj_root / rel
+            ep.parent.mkdir(parents=True, exist_ok=True)
+            ep.write_text(body)
+        # Compose lives in a SIBLING directory so env files are outside
+        # compose_dir relative_to() will raise.
+        compose_dir = tmp_path / "sub"
+        compose_dir.mkdir()
+        compose_path = compose_dir / "docker-compose.yml"
+        compose_path.write_text("services: {api: {image: x}}")
+        return proj_root, compose_path
+
+    def test_external_env_file_preserves_path_context_in_name(self, tmp_path):
+        # /<root>/source/.envs/.local/.django + compose at /<root>/sub/
+        # Compose dir is /<root>/sub; env_file is outside.
+        # Old behavior: name = 'django' (basename only).
+        # New behavior (.44.22): name = 'local-django' (last 3 segments slug).
+        proj_root, compose_path = self._setup_with_external_env_files(
+            tmp_path, {".envs/.local/.django": "K=v\n"},
+        )
+        compose_services = {
+            "api": {"env_file": str(proj_root / ".envs/.local/.django")},
+        }
+        secrets = [SecretRefV2(name="env", source="env_file_auto")]
+        out, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
+        names = sorted(s.name for s in out)
+        assert names == ["local-django"]
+
+    def test_external_env_files_with_same_basename_get_distinct_names(self, tmp_path):
+        # The collision case: two env files at /.envs/.local/.django and
+        # /.envs/.staging/.django, both outside compose dir. Old: BOTH
+        # collapse to 'django'. New: distinct 'local-django' / 'staging-django'.
+        proj_root, compose_path = self._setup_with_external_env_files(
+            tmp_path, {
+                ".envs/.local/.django": "L=local\n",
+                ".envs/.staging/.django": "S=staging\n",
+            },
+        )
+        compose_services = {
+            "api": {"env_file": [
+                str(proj_root / ".envs/.local/.django"),
+                str(proj_root / ".envs/.staging/.django"),
+            ]},
+        }
+        secrets = [SecretRefV2(name="env", source="env_file_auto")]
+        out, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
+        names = sorted(s.name for s in out)
+        assert names == ["local-django", "staging-django"]
+        # No collisions
+        assert len(set(names)) == 2
+
+    def test_compose_file_relocation_does_not_rename_secret(self, tmp_path):
+        # The CRUX of .44.22: same env_file, different compose_file location.
+        # Old behavior: in-tree compose → 'local-django'; /tmp compose → 'django'.
+        # New behavior: BOTH produce 'local-django'.
+        proj_root, _ = self._setup_with_external_env_files(
+            tmp_path, {".envs/.local/.django": "K=v\n"},
+        )
+        env_abs = str((proj_root / ".envs/.local/.django").resolve())
+
+        # Scenario A: compose lives inside proj_root (env_file relative).
+        compose_a = proj_root / "docker-compose.yml"
+        compose_a.write_text("services: {api: {image: x}}")
+        services_a = {"api": {"env_file": ".envs/.local/.django"}}
+        out_a, _ = _expand_env_file_auto(
+            [SecretRefV2(name="env", source="env_file_auto")],
+            services_a, compose_a,
+        )
+
+        # Scenario B: compose lives in a sibling /tmp-style dir; env_file
+        # referenced via absolute path (outside compose dir).
+        compose_b = tmp_path / "elsewhere" / "docker-compose.yml"
+        compose_b.parent.mkdir()
+        compose_b.write_text("services: {api: {image: x}}")
+        services_b = {"api": {"env_file": env_abs}}
+        out_b, _ = _expand_env_file_auto(
+            [SecretRefV2(name="env", source="env_file_auto")],
+            services_b, compose_b,
+        )
+
+        names_a = sorted(s.name for s in out_a)
+        names_b = sorted(s.name for s in out_b)
+        # Same env_file, two compose locations → SAME secret name
+        assert names_a == names_b == ["local-django"]
+
+    def test_external_env_file_with_short_path_still_works(self, tmp_path):
+        # Edge case: env_file has only a basename (e.g. /tmp/.django).
+        # Last-N-segments slicing with N=3 still produces something sensible.
+        ep = tmp_path / ".django"
+        ep.write_text("K=v\n")
+        compose = tmp_path / "sub" / "docker-compose.yml"
+        compose.parent.mkdir()
+        compose.write_text("services: {api: {image: x}}")
+        services = {"api": {"env_file": str(ep)}}
+        out, _ = _expand_env_file_auto(
+            [SecretRefV2(name="env", source="env_file_auto")],
+            services, compose,
+        )
+        # Name comes from path segments (likely 'tmp-django' or similar
+        # depending on tmp_path layout) — just assert it's non-empty + valid.
+        assert len(out) == 1
+        assert out[0].name
+        assert out[0].name != "secret"  # not the empty fallback
+
+
+# ---------------------------------------------------------------------------
 # End-to-end via build_deploy_context — env keys in the file disappear from
 # the per-service env dict (the bead's whole point)
 # ---------------------------------------------------------------------------

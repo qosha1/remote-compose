@@ -19,3 +19,13 @@ output "ecr_repositories" {
 {%- endfor %}
   }
 }
+
+{%- if has_build_context_service %}
+
+# Shared BuildKit registry-cache repo (rc-e5u.45.2). The provider derives
+# per-service cache tags (<svc>-cache) and feeds them to
+# `docker buildx build --cache-from / --cache-to`.
+output "buildcache_repository" {
+  value = aws_ecr_repository.buildcache.repository_url
+}
+{%- endif %}

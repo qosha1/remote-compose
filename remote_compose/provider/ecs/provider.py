@@ -78,6 +78,34 @@ def _default_runner_factory(out_dir: Path) -> TerraformRunner:
     return TerraformRunner(out_dir)
 
 
+_SINGLETON_NAME_SUFFIXES = ("-beat", "-scheduler", "-cron")
+_SINGLETON_COMMAND_RE = re.compile(
+    r"\b(celery\s+(?:-A\s+\S+\s+)?beat\b|celerybeat\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_singleton_scheduler(name: str, command: list[str]) -> bool:
+    """True when this service looks like a singleton scheduler that breaks
+    under default rolling deploy semantics.
+
+    Two signals:
+      1. Service name suffix: '-beat', '-scheduler', '-cron'.
+      2. Command-line markers: 'celery ... beat' / 'celerybeat'.
+
+    Both heuristics are conservative — better to apply stop-then-start
+    semantics to a service that didn't strictly need it (small deploy
+    delay) than to leave a flap loop. See rc-e5u.46.10.
+    """
+    lname = name.lower()
+    if any(lname.endswith(suf) for suf in _SINGLETON_NAME_SUFFIXES):
+        return True
+    if not command:
+        return False
+    cmd_str = " ".join(str(c) for c in command)
+    return bool(_SINGLETON_COMMAND_RE.search(cmd_str))
+
+
 def _default_session_factory(ctx: DeployContext) -> Any:
     """Return a boto3 Session configured from ctx.provider_config.ecs.
 
@@ -136,6 +164,14 @@ class ECSProvider(Provider):
         ec2_demands: list[EC2TaskDemand] = []
         efs_volumes: dict[str, dict[str, Any]] = {}
         service_volume_mounts: list[dict[str, Any]] = []
+        # Dev-mode source mounts (rc-e5u.45.8). Only populated when
+        # ctx.dev_mode is True AND at least one service declares
+        # dev_volumes. ALL dev mounts share ONE EFS file system per
+        # project (cheaper, simpler) named '<project>-dev'; each entry
+        # gets its own access point rooted at /<service>__<name>.
+        dev_mode_active = bool(getattr(ctx, "dev_mode", False))
+        dev_efs_volume: Optional[dict[str, Any]] = None
+        dev_volume_mounts: list[dict[str, Any]] = []
 
         for name, spec in sorted(ctx.services.items()):
             launch_type = spec.launch_type or default_launch_type
@@ -206,12 +242,89 @@ class ECSProvider(Provider):
                 svc_mounts.append(mount_view)
                 service_volume_mounts.append(mount_view)
 
+            # ---- dev_volumes (rc-e5u.45.8) ----
+            # Only materialized when the deploy is in dev mode. Skipped
+            # entirely otherwise so production stacks are unaffected by
+            # the field being present in rc.yml.
+            if dev_mode_active and spec.dev_volumes:
+                for dv_entry in spec.dev_volumes:
+                    dv_name = dv_entry.get("name")
+                    dv_mount = dv_entry.get("mount")
+                    # Schema validator already enforces these; defensive
+                    # so a hand-crafted DeployContext can't crash the
+                    # template render with a KeyError.
+                    if not dv_name or not dv_mount:
+                        raise ProviderConfigError(
+                            f"service {name!r}: dev_volumes entry missing "
+                            f"name/mount: {dv_entry!r}"
+                        )
+                    # One shared EFS file system per project — cheaper
+                    # and matches the "dev iteration" framing (no point
+                    # in per-service file systems for code that's owned
+                    # by one developer's laptop).
+                    if dev_efs_volume is None:
+                        dev_efs_volume = {
+                            "name": f"{ctx.project}-dev",
+                            "tf_name": "dev",
+                        }
+                    dv_tf = _tf_name(dv_name)
+                    dv_ap_tf = f"{_tf_name(name)}__dev_{dv_tf}"
+                    # Each AP needs its own ECS volume entry on the
+                    # task def — duplicates of the same `volume name=`
+                    # are rejected at register-task-definition time.
+                    # Dev mounts share one EFS *file system* but each
+                    # gets a per-(service, dev_volume) sourceVolume
+                    # name so the task def stays valid.
+                    dv_volume_name = f"dev-{_tf_name(name)}-{dv_tf}"
+                    # Generic dev defaults: 1000:1000 / 0755 covers the
+                    # python:slim, node:alpine, etc. images most users
+                    # iterate on. Containers running as a non-standard
+                    # uid in dev mode are rare; if it comes up, we'll
+                    # add uid/gid to the dev_volumes schema then.
+                    dv_mount_view = {
+                        "volume": dv_volume_name,
+                        # All dev mounts reference the same shared EFS
+                        # file system (cheaper than per-mount FS).
+                        "volume_tf_name": dev_efs_volume["tf_name"],
+                        "mount_path": dv_mount,
+                        "uid": 1000,
+                        "gid": 1000,
+                        "mode": "0755",
+                        "service": name,
+                        "access_point_tf_name": dv_ap_tf,
+                        # Used by the efs.tf template to build the AP's
+                        # root_directory.path. Each entry is rooted in
+                        # its own dir on the shared FS so two services
+                        # mounting different sources don't see each
+                        # other's files.
+                        "ap_root_path": f"/{_tf_name(name)}__{dv_tf}",
+                        "dev": True,
+                        "dev_volume_name": dv_name,
+                    }
+                    svc_mounts.append(dv_mount_view)
+                    dev_volume_mounts.append(dv_mount_view)
+
             # Stateful services that mount EFS cannot safely run two task
             # copies against the same mount (the replacement's entrypoint
             # can race the live primary — postgres initdb will wipe the
             # data dir before the old task realizes it's being replaced).
             # Force stop-then-start for any service with EFS volumes.
-            stateful = len(svc_mounts) > 0
+            # Dev-mode source mounts are stateless from the engine's POV
+            # (just bytes) but still need stop-then-start because two
+            # tasks editing the same code dir on EFS = recipe for half-
+            # written .pyc files and weird import errors.
+            #
+            # rc-e5u.46.10: ALSO treat singleton schedulers as stateful
+            # even without EFS. Verified .46.6 run #7 against start-simpli
+            # — celery-beat in a 5-task flap loop because default
+            # min=100/max=200 rolling deploy briefly runs two beat
+            # instances → contend for celerybeat-schedule lock → both die.
+            # Heuristics: command matches 'celery .* beat' / 'celerybeat',
+            # or service name ends in -beat / -scheduler. False-positive
+            # cost: a stateless service goes through stop-then-start
+            # rolling deploy (slower) instead of overlap. Acceptable.
+            singleton = _looks_like_singleton_scheduler(name, spec.command)
+            stateful = len(svc_mounts) > 0 or singleton
             svc_view = {
                 "name": name,
                 "tf_name": _tf_name(name),
@@ -254,6 +367,12 @@ class ECSProvider(Provider):
                 default_public = svc_view
 
         has_public_service = default_public is not None
+        # Any service with a compose `build:` context drives BuildKit cache
+        # repo creation (rc-e5u.45.2). Pure-image stacks (e.g., a postgres-
+        # only side stack) skip the buildcache repo entirely.
+        has_build_context_service = any(
+            spec.build_context for spec in ctx.services.values()
+        )
         # Per-service domain routing. Each service with public=true and
         # domain set gets a dedicated target group + ALB listener rule
         # (host_header) + R53 alias record + ACM cert SAN. The default
@@ -275,7 +394,11 @@ class ECSProvider(Provider):
             dsvc["listener_rule_priority"] = 100 + i * 10
         has_domained_services = len(domained_services) > 0
         has_ec2_service = len(ec2_demands) > 0
-        has_efs = len(efs_volumes) > 0
+        # has_efs drives the EFS template (security group, file system,
+        # mount targets, access points). True for either persistent OR
+        # dev-mode source mounts since both need the same EFS plumbing.
+        has_efs = len(efs_volumes) > 0 or dev_efs_volume is not None
+        has_dev_efs = dev_efs_volume is not None
         # Service discovery is cheap (one Cloud Map namespace + one entry per
         # service) and turns multi-service compose into ECS that actually
         # talks to itself. Enable whenever there is more than one service.
@@ -410,12 +533,23 @@ class ECSProvider(Provider):
             "expires_at": ctx.expires_at,
             "services": services_view,
             "has_public_service": has_public_service,
+            "has_build_context_service": has_build_context_service,
             "has_ec2_service": has_ec2_service,
             "has_service_discovery": has_service_discovery,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
             "efs_volumes": sorted(efs_volumes.values(), key=lambda v: v["name"]),
             "service_volume_mounts": service_volume_mounts,
+            # Dev-mode source mounts (rc-e5u.45.8). When dev_mode is on
+            # and any service declares dev_volumes, we provision ONE
+            # extra EFS file system tagged DevMode=true (so out-of-band
+            # tag scans + reapers can identify it) plus an access point
+            # per dev_volumes entry. Production deploys: both are empty
+            # and the template emits nothing extra.
+            "has_dev_efs": has_dev_efs,
+            "dev_efs_volume": dev_efs_volume,
+            "dev_volume_mounts": dev_volume_mounts,
+            "dev_mode": dev_mode_active,
             "has_secrets": has_secrets,
             "has_file_secrets": has_file_secrets,
             "file_secrets": file_secrets,
@@ -474,7 +608,12 @@ class ECSProvider(Provider):
             warnings=warnings,
         )
 
-    def deploy(self, ctx: DeployContext) -> DeployResult:
+    def deploy(
+        self,
+        ctx: DeployContext,
+        services_filter: Optional[list[str]] = None,
+        tag: Optional[str] = None,
+    ) -> DeployResult:
         start = time.monotonic()
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
@@ -485,14 +624,25 @@ class ECSProvider(Provider):
         outputs = runner.output()
 
         warnings: list[str] = []
-        pushed = self._build_and_push_images(ctx, outputs, warnings)
+        # Validate the filter early so a typo doesn't quietly skip all builds.
+        if services_filter is not None:
+            unknown = set(services_filter) - set(ctx.services.keys())
+            if unknown:
+                raise ValueError(
+                    f"--services lists service(s) not in this stack: {sorted(unknown)}. "
+                    f"Known: {sorted(ctx.services.keys())}"
+                )
+        pushed = self._build_and_push_images(
+            ctx, outputs, warnings,
+            services_filter=services_filter, requested_tag=tag,
+        )
         if pushed:
             # ECS won't pull a new :latest automatically — force it.
             self._force_new_deployments(ctx, pushed)
 
         return DeployResult(
             revision_id=_revision_id_from_dir(out_dir),
-            services=sorted(ctx.services.keys()),
+            services=sorted(services_filter) if services_filter else sorted(ctx.services.keys()),
             duration_s=time.monotonic() - start,
             terraform_outputs=outputs,
             warnings=warnings,
@@ -503,13 +653,27 @@ class ECSProvider(Provider):
         ctx: DeployContext,
         outputs: dict,
         warnings: list,
+        services_filter: Optional[list[str]] = None,
+        requested_tag: Optional[str] = None,
     ) -> list[str]:
         """Build each service that has a compose build: context, push to its ECR repo.
 
-        Returns the list of service names that were pushed (caller forces
-        new deployments for exactly these).
+        Returns the list of service names that were pushed/rolled (caller forces
+        new deployments for exactly these). When ``services_filter`` is set,
+        only those services are built; others retain their existing image.
+
+        When ``requested_tag`` is set (and not 'latest'), check ECR first:
+          - If <repo>:<tag> already exists, skip docker build entirely and
+            re-tag the existing image to :latest in ECR (so the task def's
+            :latest reference picks it up). Pure ECR API call, ~2-5s.
+          - Otherwise build with [<repo>:<tag>, <repo>:latest] tags + push both.
+        Used by ``rc deploy --services X --tag v1.2`` for instant rollback /
+        deploy of known-good images. See rc-e5u.45.3.
         """
         to_build = [s for s in ctx.services.values() if s.build_context]
+        if services_filter is not None:
+            allowed = set(services_filter)
+            to_build = [s for s in to_build if s.name in allowed]
         if not to_build:
             return []
 
@@ -520,6 +684,13 @@ class ECSProvider(Provider):
             )
             return []
 
+        # Shared BuildKit cache repo (rc-e5u.45.2). Optional — older stacks
+        # whose terraform predates the buildcache resource won't have this
+        # output and we just degrade to no-cache builds.
+        buildcache_repo = (
+            (outputs.get("buildcache_repository") or {}).get("value")
+        )
+
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
         from .ecr_auth import ECRAuthenticator
 
@@ -527,6 +698,27 @@ class ECSProvider(Provider):
         session = self.session_factory(ctx)
         auth = ECRAuthenticator(session=session)
         pusher = ImagePusher(authenticator=auth, progress=self.progress)
+
+        # Pre-authenticate the cache registry so buildx can pull/push cache
+        # layers. The pusher will re-auth the per-service registry (same
+        # ECR account/region in practice; ECRAuthenticator caches by host).
+        if buildcache_repo:
+            cache_host = buildcache_repo.split("/", 1)[0]
+            try:
+                auth(cache_host)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    f"buildcache auth failed ({cache_host}): {exc!s} — "
+                    f"falling back to no-cache builds"
+                )
+                buildcache_repo = None
+
+        # When user passed --tag X (and X != latest), see if X already
+        # exists in ECR and short-circuit to "re-tag existing → latest".
+        ecr_client = None
+        skip_when_tag_exists = (
+            requested_tag is not None and requested_tag != "latest"
+        )
 
         pushed: list[str] = []
         for spec in to_build:
@@ -536,20 +728,101 @@ class ECSProvider(Provider):
                     f"service {spec.name!r}: no ECR repo in terraform outputs"
                 )
                 continue
-            tag = f"{repo_url}:latest"
+            # ECR repo URL: <account>.dkr.ecr.<region>.amazonaws.com/<repo_path>
+            # repo_path can include slashes (e.g., 'test-proj/django') so strip
+            # only the registry host, not the last segment.
+            repo_name = repo_url.split("/", 1)[1] if "/" in repo_url else repo_url
+            latest_tag = f"{repo_url}:latest"
+
+            if skip_when_tag_exists:
+                if ecr_client is None:
+                    ecr_client = session.client("ecr")
+                manifest = self._ecr_image_manifest(
+                    ecr_client, repo_name, requested_tag,
+                )
+                if manifest is not None:
+                    # Image exists in ECR — skip docker build entirely.
+                    self._ecr_retag(ecr_client, repo_name, manifest, "latest")
+                    pushed.append(spec.name)
+                    if self.progress:
+                        self.progress(
+                            f"  {spec.name}: re-tagged ECR "
+                            f"{repo_name}:{requested_tag} → :latest "
+                            f"(skipped docker build)"
+                        )
+                    continue
+                # Tag wasn't in ECR — fall through to a normal build, but
+                # tag the resulting image with BOTH the requested tag AND
+                # :latest so a re-run of the same command takes the fast path.
+
+            cache_from: list[str] = []
+            cache_to: list[str] = []
+            if buildcache_repo:
+                cache_ref = f"{buildcache_repo}:{spec.name}-cache"
+                cache_from = [cache_ref]
+                cache_to = [cache_ref]
+            build_tags = [latest_tag]
+            if requested_tag and requested_tag != "latest":
+                build_tags.insert(0, f"{repo_url}:{requested_tag}")
             build = ImageBuildSpec(
                 service=spec.name,
                 context=spec.build_context,
                 dockerfile=Path(spec.dockerfile) if spec.dockerfile else None,
                 target=spec.target,
                 build_args=dict(spec.build_args or {}),
-                tags=[tag],
+                tags=build_tags,
                 platform="linux/amd64",
+                cache_from=cache_from,
+                cache_to=cache_to,
             )
             tags = builder.build(build)
             pusher.push(tags)
             pushed.append(spec.name)
         return pushed
+
+    @staticmethod
+    def _ecr_image_manifest(
+        ecr_client: Any, repo_name: str, tag: str,
+    ) -> Optional[str]:
+        """Return the image manifest JSON for ``<repo>:<tag>`` or None if the
+        tag doesn't exist. Other ECR errors propagate so the caller sees them
+        rather than silently rebuilding (which would mask perms problems)."""
+        try:
+            resp = ecr_client.batch_get_image(
+                repositoryName=repo_name,
+                imageIds=[{"imageTag": tag}],
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Permission / throttling / network. Surface clearly + skip
+            # the fast path; caller will fall through to a normal build.
+            if "ImageNotFoundException" in repr(exc):
+                return None
+            raise
+        images = resp.get("images") or []
+        if not images:
+            return None
+        return images[0].get("imageManifest")
+
+    @staticmethod
+    def _ecr_retag(
+        ecr_client: Any, repo_name: str, manifest: str, new_tag: str,
+    ) -> None:
+        """Apply ``new_tag`` to the image identified by ``manifest`` in
+        ``repo_name``. Idempotent — ECR's put_image with an existing manifest
+        + an existing tag is a no-op."""
+        try:
+            ecr_client.put_image(
+                repositoryName=repo_name,
+                imageManifest=manifest,
+                imageTag=new_tag,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # ImageAlreadyExistsException happens when the same manifest is
+            # already tagged this way (i.e., the previous deploy used the
+            # same image). That's the desired end-state — succeed silently.
+            if "ImageAlreadyExistsException" in repr(exc):
+                return
+            raise
 
     def _reconcile_orphan_log_groups(
         self, ctx: DeployContext, runner: TerraformRunner,
@@ -614,12 +887,41 @@ class ECSProvider(Provider):
                     f"{log_group_name}: {exc}"
                 )
 
+    # Service-type rollout priority (rc-e5u.46.5). Force-rolls in this order
+    # on first deploys so workers + proxies don't race their dependencies on
+    # cold start. infrastructure (postgres/redis) → application (django)
+    # → worker (celery-*) → proxy (nginx). On steady-state redeploys the
+    # ordering is irrelevant (old tasks keep serving while new come up) but
+    # is harmless.
+    _DEPLOY_ORDER = {
+        "infrastructure": 0,
+        "application": 1,
+        "worker": 2,
+        "proxy": 3,
+    }
+
     def _force_new_deployments(self, ctx: DeployContext, services: list[str]) -> None:
+        """Force-roll the named ECS services in dependency order (.46.5).
+
+        Cold-start failure mode: when ALL services force-roll simultaneously,
+        celery workers race against postgres/redis being healthy + django
+        having migrations applied. Workers crash on broker connection,
+        ECS exponential backoff stalls them. Ordering by type primes the
+        infrastructure first; default ECS deploymentConfiguration (min=100,
+        max=200) handles the rest of the convergence naturally.
+        """
         ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)
         client = session.client("ecs")
-        for svc in services:
+
+        def priority(svc_name: str) -> tuple[int, str]:
+            spec = ctx.services.get(svc_name)
+            type_ = spec.type if spec else "application"
+            return (self._DEPLOY_ORDER.get(type_, 1), svc_name)
+
+        ordered = sorted(services, key=priority)
+        for svc in ordered:
             client.update_service(
                 cluster=cluster,
                 service=svc,
@@ -681,6 +983,23 @@ class ECSProvider(Provider):
         resp = client.describe_services(cluster=cluster, services=service_names)
         reported = {s["serviceName"]: s for s in resp.get("services", [])}
 
+        # rc-e5u.44.24: query the latest revision in each task definition
+        # family so we can flag services running on an older revision (i.e.,
+        # a previous deploy stuck on it). One ECS API call per family — N+1
+        # in service count, acceptable at single-digit-services scale.
+        family_latest: dict[str, int] = {}
+        for name in service_names:
+            family = f"{ctx.project}-{name}"
+            try:
+                resp_td = client.describe_task_definition(taskDefinition=family)
+                family_latest[name] = int(
+                    resp_td.get("taskDefinition", {}).get("revision") or 0
+                )
+            except Exception:  # noqa: BLE001
+                # Family doesn't exist (first-deploy) or perms missing —
+                # silently skip; the service entry will lack revision data.
+                family_latest[name] = 0
+
         statuses: list[ServiceStatus] = []
         for name in service_names:
             s = reported.get(name)
@@ -692,12 +1011,33 @@ class ECSProvider(Provider):
                 continue
             running = int(s.get("runningCount", 0))
             desired = int(s.get("desiredCount", 0))
-            health = "healthy" if running == desired and desired > 0 else "degraded"
+            # Pull the running revision from the service's taskDefinition ARN.
+            # Format: arn:aws:ecs:REGION:ACCT:task-definition/FAMILY:REVISION
+            running_rev: Optional[int] = None
+            td_arn = s.get("taskDefinition") or ""
+            if ":" in td_arn:
+                try:
+                    running_rev = int(td_arn.rsplit(":", 1)[-1])
+                except ValueError:
+                    pass
+            latest_rev = family_latest.get(name) or None
+            base_health = (
+                "healthy" if running == desired and desired > 0 else "degraded"
+            )
+            # Flag stale revisions even when the count side looks healthy —
+            # the celery-worker case from .45.8 had running=1 desired=1 but
+            # was on a revision behind. See .44.24.
+            if running_rev and latest_rev and running_rev < latest_rev:
+                health = "stale"
+            else:
+                health = base_health
             events = s.get("events") or []
             last_event = events[0]["message"] if events else None
             statuses.append(ServiceStatus(
                 name=name, desired=desired, running=running,
                 health=health, last_event=last_event,
+                running_revision=running_rev,
+                latest_revision=latest_rev,
             ))
 
         cluster_health = (
@@ -815,15 +1155,93 @@ class ECSProvider(Provider):
 
         boto = self.session_factory(ctx)
         ecs_client = boto.client("ecs")
-        tasks = ecs_client.list_tasks(
-            cluster=cluster, serviceName=service, desiredStatus="RUNNING"
-        ).get("taskArns") or []
-        if not tasks:
-            return ExecResult(
-                exit_code=1, stdout="",
-                stderr=f"no running tasks for service {service!r}",
-            )
-        task_arn = tasks[0]
+
+        # rc-e5u.46.6: wait for a task that's both RUNNING and has its
+        # ExecuteCommandAgent in RUNNING state. Lifecycle auto-hooks fire
+        # right after a force-roll; old failing tasks may still be present
+        # while new ones are launching, and exec-command requires the new
+        # task's SSM agent to be active. Poll for up to 5 minutes — past
+        # the typical ~60s startup + agent-registration window. Tests
+        # override via RC_EXEC_WAIT_TIMEOUT_S env var to keep mocked
+        # ecs_client.list_tasks=[] from looping for 5 min.
+        import os as _os_env
+        wait_budget = int(_os_env.environ.get("RC_EXEC_WAIT_TIMEOUT_S", "300"))
+        wait_interval = float(_os_env.environ.get("RC_EXEC_WAIT_INTERVAL_S", "5"))
+        deadline = time.monotonic() + wait_budget
+        task_arn: Optional[str] = None
+        last_diag = "no running tasks"
+        while True:
+            tasks = ecs_client.list_tasks(
+                cluster=cluster, serviceName=service, desiredStatus="RUNNING"
+            ).get("taskArns") or []
+            if tasks:
+                # Prefer a task whose ExecuteCommandAgent is RUNNING. ECS
+                # describe-tasks returns managedAgents per container.
+                # Fall through to the bare list_tasks ARN if describe_tasks
+                # is unhelpful (mocked test, network blip, missing perms,
+                # very fresh task that hasn't reported agents yet) — that
+                # matches pre-46.6 behavior. Only DEFER on the explicit
+                # "agent reported as not RUNNING" case which is the actual
+                # race we're guarding against.
+                exec_blocked_tasks: set[str] = set()
+                preferred: Optional[str] = None
+                try:
+                    desc = ecs_client.describe_tasks(cluster=cluster, tasks=tasks)
+                    desc_tasks = desc.get("tasks") or []
+                except Exception:  # noqa: BLE001
+                    desc_tasks = []
+                for t in desc_tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    if t.get("lastStatus") != "RUNNING":
+                        continue
+                    agents_ready = True
+                    seen_exec_agent = False
+                    containers = t.get("containers") or []
+                    if not isinstance(containers, list):
+                        containers = []
+                    for c in containers:
+                        if not isinstance(c, dict):
+                            continue
+                        for ag in (c.get("managedAgents") or []):
+                            if not isinstance(ag, dict):
+                                continue
+                            if ag.get("name") == "ExecuteCommandAgent":
+                                seen_exec_agent = True
+                                if ag.get("lastStatus") != "RUNNING":
+                                    agents_ready = False
+                                break
+                    if seen_exec_agent and not agents_ready:
+                        exec_blocked_tasks.add(t.get("taskArn") or "")
+                        continue
+                    preferred = t.get("taskArn")
+                    break
+                if preferred:
+                    task_arn = preferred
+                    break
+                # describe_tasks didn't give us an agent-ready candidate.
+                # If NO task we saw was explicitly blocked, fall through
+                # to the first task ARN from list_tasks (pre-46.6 behavior).
+                fallback = next(
+                    (a for a in tasks if a not in exec_blocked_tasks), None,
+                )
+                if fallback:
+                    task_arn = fallback
+                    break
+                last_diag = (
+                    f"{len(tasks)} task(s) running but exec agent reported "
+                    f"as not RUNNING"
+                )
+            if time.monotonic() > deadline:
+                return ExecResult(
+                    exit_code=1, stdout="",
+                    stderr=(
+                        f"timed out ({wait_budget}s) waiting for service "
+                        f"{service!r}: {last_diag}. Recent tasks may be stuck "
+                        f"on startup; check `rc status` and recent log streams."
+                    ),
+                )
+            time.sleep(wait_interval)
 
         env = _os.environ.copy()
         if profile:

@@ -115,6 +115,32 @@ class ServiceV2:
     # for multiple hostnames. Each alias adds a cert SAN + R53 record but
     # NOT a listener rule — the ALB default action catches them.
     aliases: list[str] = field(default_factory=list)
+    # Override the Dockerfile path used during 'rc deploy' for this service.
+    # Path is interpreted RELATIVE TO THE BUILD CONTEXT (matching compose's
+    # ``build.dockerfile`` semantics — ImageBuilder joins this to
+    # ServiceSpec.build_context before invoking docker buildx). When set,
+    # rc uses this instead of compose's ``services.<svc>.build.dockerfile``,
+    # letting users keep their docker-compose.yml untouched while pointing
+    # rc at an ECS-aware variant (e.g., the one emitted by `rc fix
+    # nginx-conf`). See .46.1.
+    dockerfile: Optional[str] = None
+    # Hot-reload mounts for `rc up --dev` (rc-e5u.45.7+). Each entry maps a
+    # local source dir into a mount path inside the container; the provider
+    # backs them with EFS in dev mode and mounts the EFS access point at the
+    # declared path. PRODUCTION DEPLOYS IGNORE THIS FIELD — see .45.8 for
+    # the dev-mode gating. Distinct from `volumes` (which is for persistent
+    # state like postgres data, EFS-backed in any mode).
+    dev_volumes: list[dict[str, Any]] = field(default_factory=list)
+    # rc-e5u.46.4: extra plaintext env vars merged ON TOP of compose's
+    # ``environment:`` / ``env_file:`` at deploy time. rc.yml wins on key
+    # collision. Values flow into the task-def containerDefinitions
+    # environment[] verbatim — these are NOT secrets (use the top-level
+    # ``secrets:`` block for those). Primary use: scaffolder-injected
+    # DJANGO_ALLOWED_HOSTS=* / CSRF_TRUSTED_ORIGINS=* for ephemeral
+    # ``rc-test-*`` projects so plain ``curl http://<ALB>/`` works without
+    # nginx Host: rewrites. Hand-editable for any non-secret toggle a user
+    # wants applied at the rc.yml layer rather than touching compose.
+    env: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -164,6 +190,81 @@ class ServiceV2:
                         f"service {self.name!r}: alias {alias!r} duplicates "
                         f"the service's own domain"
                     )
+        # rc-e5u.46.4: env must be a flat mapping[str, str|int|bool]. Coerce
+        # to str at parse time (yaml booleans/ints are common — DJANGO_DEBUG:
+        # False round-trips through this path). Reject lists / nested dicts
+        # so the error surfaces here, not deep inside ECS provisioning.
+        if self.env:
+            if not isinstance(self.env, dict):
+                raise ConfigError(
+                    f"service {self.name!r}: env must be a mapping of "
+                    f"VAR: value, got {type(self.env).__name__}"
+                )
+            for k, v in self.env.items():
+                if not isinstance(k, str) or not k:
+                    raise ConfigError(
+                        f"service {self.name!r}: env keys must be non-empty "
+                        f"strings, got {k!r}"
+                    )
+                if isinstance(v, (dict, list)):
+                    raise ConfigError(
+                        f"service {self.name!r}: env[{k!r}] must be scalar "
+                        f"(str/int/bool), got {type(v).__name__}"
+                    )
+        # dev_volumes shape check: each entry must be a dict with a 'name',
+        # a relative 'source' path, and an absolute 'mount' path. Caught
+        # here (not at parse time) so the error message is consistent with
+        # other ServiceV2 validation failures.
+        if self.dev_volumes:
+            if not isinstance(self.dev_volumes, list):
+                raise ConfigError(
+                    f"service {self.name!r}: dev_volumes must be a list, got "
+                    f"{type(self.dev_volumes).__name__}"
+                )
+            seen_names: set[str] = set()
+            seen_mounts: set[str] = set()
+            for i, entry in enumerate(self.dev_volumes):
+                if not isinstance(entry, dict):
+                    raise ConfigError(
+                        f"service {self.name!r}: dev_volumes[{i}] must be a "
+                        f"mapping with name/source/mount, got "
+                        f"{type(entry).__name__}"
+                    )
+                for key in ("name", "source", "mount"):
+                    if not entry.get(key):
+                        raise ConfigError(
+                            f"service {self.name!r}: dev_volumes[{i}] missing "
+                            f"required field {key!r} (need name + source + mount)"
+                        )
+                name = str(entry["name"])
+                source = str(entry["source"])
+                mount = str(entry["mount"])
+                if Path(source).is_absolute():
+                    raise ConfigError(
+                        f"service {self.name!r}: dev_volumes[{i}].source "
+                        f"({source!r}) must be a relative path "
+                        f"(resolved against the compose file's directory). "
+                        f"Absolute paths defeat portability across machines."
+                    )
+                if not mount.startswith("/"):
+                    raise ConfigError(
+                        f"service {self.name!r}: dev_volumes[{i}].mount "
+                        f"({mount!r}) must be an absolute path inside the "
+                        f"container (e.g. '/app')."
+                    )
+                if name in seen_names:
+                    raise ConfigError(
+                        f"service {self.name!r}: dev_volumes name {name!r} "
+                        f"declared twice"
+                    )
+                if mount in seen_mounts:
+                    raise ConfigError(
+                        f"service {self.name!r}: dev_volumes mount {mount!r} "
+                        f"declared on two entries — each container path can "
+                        f"only mount one source"
+                    )
+                seen_names.add(name)
+                seen_mounts.add(mount)
 
 
 @dataclass
@@ -375,6 +476,20 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             domain=raw.get("domain"),
             # Preserve raw shape so validate() can flag non-list values.
             aliases=raw["aliases"] if "aliases" in raw else [],
+            # rc-e5u.46.1: optional Dockerfile override.
+            dockerfile=raw.get("dockerfile"),
+            # Same — preserve raw shape for validate() to inspect.
+            dev_volumes=raw["dev_volumes"] if "dev_volumes" in raw else [],
+            # rc-e5u.46.4: extra env vars merged into the task def alongside
+            # compose's ``environment:``. Coerce scalars to str so YAML
+            # booleans (DJANGO_DEBUG: False) and ints become valid env
+            # values. Non-scalar values are caught by ServiceV2.validate.
+            env=(
+                {str(k): (str(v) if not isinstance(v, (dict, list)) else v)
+                 for k, v in raw["env"].items()}
+                if isinstance(raw.get("env"), dict)
+                else (raw["env"] if "env" in raw else {})
+            ),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
