@@ -60,3 +60,5 @@ issue-prefix: "rc"
 # - linear.api-key
 # - github.org
 # - github.repo
+
+sync.remote: "git+https://github.com/qosha1/remote-compose.git"

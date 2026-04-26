@@ -20,6 +20,10 @@ provider "aws" {
 {%- if environment %}
       Environment = "{{ environment }}"
 {%- endif %}
+{%- if expires_at %}
+      Ephemeral   = "true"
+      ExpiresAt   = "{{ expires_at }}"
+{%- endif %}
     }
   }
 }

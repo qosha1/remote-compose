@@ -97,6 +97,12 @@ class DeployContext:
     working_dir: Path
     services: dict[str, ServiceSpec] = field(default_factory=dict)
     secrets: list[SecretRef] = field(default_factory=list)
+    # When set, this stack was deployed with a TTL. The provider should
+    # add Ephemeral=true + ExpiresAt=<this> to its default tags so that
+    # ``rc reap`` can locate past-due stacks (and so any out-of-band tag
+    # scan can identify ephemeral resources). ISO 8601 UTC timestamp,
+    # e.g. "2026-04-25T18:30:00Z".
+    expires_at: Optional[str] = None
 
 
 @dataclass
@@ -130,6 +136,7 @@ class PlanResult:
     update: int
     destroy: int
     raw_plan: str
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass

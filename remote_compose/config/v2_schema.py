@@ -22,7 +22,7 @@ class ConfigError(ValueError):
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
 VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
 VALID_CAPACITY_TYPES = {"ON_DEMAND", "SPOT", "MIXED"}
-VALID_SECRET_SOURCES = {"file", "aws_sm", "k8s_secret", "gcp_sm"}
+VALID_SECRET_SOURCES = {"file", "env_file_auto", "aws_sm", "k8s_secret", "gcp_sm"}
 VALID_TLS_MODES = {"acm", "cert-manager", "manual"}
 
 

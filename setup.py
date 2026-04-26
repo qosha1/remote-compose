@@ -17,9 +17,19 @@ setup(
         'cryptography>=41.0.0',
         'boto3>=1.26.0',
         'pyyaml>=6.0',
+        'click>=8.0',
     ],
+    entry_points={
+        'console_scripts': [
+            'rc=remote_compose.cli:cli',
+        ],
+    },
     extras_require={
         'celery': ['celery>=5.3.0', 'redis>=5.0.0'],
+        'ecs': [
+            'python-hcl2>=4.3',
+            'jinja2>=3.1',
+        ],
         'dev': [
             'pytest>=7.4.0',
             'pytest-django>=4.5.0',

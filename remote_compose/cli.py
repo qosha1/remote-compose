@@ -20,9 +20,78 @@ import yaml
 
 RC_CONFIG_FILE = 'rc.yml'
 
-RC_TEMPLATE = """\
-# rc.yml — Remote Compose configuration
-# Docs: https://github.com/yourusername/django-remote-compose
+RC_TEMPLATE_V2 = """\
+# rc.yml — Remote Compose configuration (v2 schema)
+
+version: 2
+project: my-project
+compose_file: docker-compose.yml
+
+provider: ecs
+
+provider_config:
+  ecs:
+    region: us-west-2
+    cluster: my-project-cluster
+    # aws_profile: default
+    vpc_cidr: 10.42.0.0/16
+    default_launch_type: FARGATE
+
+terraform:
+  output_dir: ./terraform/${provider}
+  backend:
+    type: local
+    # For shared state across machines, use s3:
+    # type: s3
+    # bucket: my-project-tf-state
+    # key: ecs.tfstate
+    # region: us-west-2
+
+# domain: api.example.com               # custom domain — auto-provisions ACM cert + HTTPS
+# certificate_arn: arn:aws:acm:...      # or supply an existing cert
+
+# Compose-driven deploy set. Every compose service deploys with defaults
+# unless overridden under `services:` below or filtered here.
+# compose:
+#   exclude:
+#     - dev-only-sidecar
+
+services:
+  web:
+    cpu: 512
+    memory: 1024
+    type: application
+    public: true
+    port: 80
+    health_check_path: /health/
+    default_target: true
+  # worker:
+  #   cpu: 1024
+  #   memory: 2048
+  #   type: worker
+  # postgres:
+  #   cpu: 512
+  #   memory: 1024
+  #   type: infrastructure
+
+# Env files become Secrets Manager JSON blobs; the task def gets one
+# secrets[] entry per KEY using arn:KEY:: selectors.
+# secrets:
+#   - name: app
+#     source: file
+#     path: .envs/.production/.app
+
+# Database backup — rc db backup / rc db restore / rc db list
+# backup:
+#   bucket: my-project-db-dumps
+#   service: postgres
+#   retention_days: 14
+"""
+
+
+RC_TEMPLATE_V1 = """\
+# rc.yml — Remote Compose configuration (legacy v1 schema)
+# For new projects prefer the v2 schema (omit --v1).
 
 cluster: my-cluster
 region: us-west-2
@@ -96,7 +165,18 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
         click.echo("rc.yml v2: provider_config.ecs.region is required.", err=True)
         raise click.exceptions.Exit(1)
 
-    file_secrets = [s for s in (v2.secrets or []) if s.source == "file"]
+    # Expand env_file_auto -> per-file SecretRefs first so the upload step
+    # sees the same shape regardless of how the user declared them. Mirrors
+    # cli_v2.build_deploy_context so deploy and secrets-push stay in sync.
+    from remote_compose.cli_v2 import _expand_env_file_auto, _parse_compose_services
+    compose_path = _Path(v2.compose_file)
+    if not compose_path.is_absolute():
+        compose_path = (path.parent / compose_path).resolve()
+    compose_services = _parse_compose_services(compose_path) if compose_path.exists() else {}
+    expanded_secrets, _ = _expand_env_file_auto(
+        list(v2.secrets or []), compose_services, compose_path,
+    )
+    file_secrets = [s for s in expanded_secrets if s.source == "file"]
     if not file_secrets:
         click.echo("No file-sourced secrets in rc.yml.")
         return True
@@ -819,17 +899,59 @@ def cli(ctx, config_path):
 # =============================================================================
 
 @cli.command()
-def init():
-    """Generate an rc.yml template in the current directory."""
-    target = Path.cwd() / RC_CONFIG_FILE
+@click.option('--v1', 'use_v1', is_flag=True,
+              help='Emit the legacy v1 schema (top-level cluster/region/compose_file). Default is v2.')
+@click.option('--from-compose', 'from_compose', type=click.Path(exists=True, dir_okay=False),
+              default=None,
+              help='Read a docker-compose.yml and scaffold a v2 rc.yml from it.')
+@click.option('-o', '--output', 'output_path', type=click.Path(dir_okay=False),
+              default=None,
+              help=f'Write to this path instead of ./{RC_CONFIG_FILE}.')
+@click.option('--public-service', 'public_service', default=None,
+              help='Override the auto-detected ALB-fronted service (used with --from-compose).')
+@click.option('--region', default='us-west-2',
+              help='AWS region in the generated rc.yml (used with --from-compose).')
+@click.option('--aws-profile', 'aws_profile', default=None,
+              help='aws_profile in the generated rc.yml (used with --from-compose).')
+def init(use_v1, from_compose, output_path, public_service, region, aws_profile):
+    """Generate an rc.yml template in the current directory.
+
+    With --from-compose, read an existing docker-compose.yml and scaffold
+    a v2 rc.yml with per-service entries inferred from images / commands /
+    ports. Edit the result before deploying.
+    """
+    target = Path(output_path) if output_path else Path.cwd() / RC_CONFIG_FILE
     if target.exists():
-        click.echo(f"{RC_CONFIG_FILE} already exists in {Path.cwd()}")
+        click.echo(f"{target} already exists")
         if not click.confirm("Overwrite?", default=False):
             return
 
-    target.write_text(RC_TEMPLATE)
-    click.echo(f"Created {RC_CONFIG_FILE}")
-    click.echo("Edit it with your cluster, region, and service configuration.")
+    if from_compose:
+        if use_v1:
+            raise click.UsageError("--from-compose only generates v2 schema; drop --v1")
+        from remote_compose.init_from_compose import generate_v2_rc_yml
+        try:
+            text = generate_v2_rc_yml(
+                Path(from_compose),
+                output_path=target,
+                public_service=public_service,
+                region=region,
+                aws_profile=aws_profile,
+            )
+        except Exception as exc:
+            raise click.ClickException(f"failed to scaffold from {from_compose}: {exc}")
+        target.write_text(text)
+        click.echo(f"Created {target} from {from_compose}")
+        click.echo("Review the generated file, then run `rc plan`.")
+        return
+
+    template = RC_TEMPLATE_V1 if use_v1 else RC_TEMPLATE_V2
+    target.write_text(template)
+    click.echo(f"Created {target}")
+    if use_v1:
+        click.echo("Legacy v1 schema. Edit cluster/region/services and run `rc deploy`.")
+    else:
+        click.echo("v2 schema. Edit project/region/services and run `rc plan`.")
 
 
 # =============================================================================
@@ -927,12 +1049,24 @@ def provision(ctx, dry_run):
 @click.option('--tag', default='latest', help='Image tag (default: latest)')
 @click.option('--code-only', is_flag=True, help='Deploy only code services (skip infrastructure)')
 @click.option('--services', 'selected_services', default=None, help='Comma-separated services to deploy')
+@click.option(
+    '--ttl', 'ttl', default=None,
+    help='Mark deployment ephemeral; auto-reapable via `rc reap` after this '
+         'duration (e.g. 5m, 2h, 1d, 4h30m). v2 rc.yml only.',
+)
 @click.pass_context
-def deploy(ctx, no_build, dry_run, tag, code_only, selected_services):
+def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl):
     """Build images, push to ECR, and deploy all services."""
     from remote_compose.cli_v2 import dispatch_if_v2
-    if dispatch_if_v2(ctx.obj.get('config_path'), 'deploy'):
+    if dispatch_if_v2(ctx.obj.get('config_path'), 'deploy', ttl=ttl):
         return
+    if ttl:
+        click.echo(
+            "Error: --ttl requires an rc.yml v2 config (provider-based "
+            "deploy). Legacy v1 deploys cannot be tagged ephemeral.",
+            err=True,
+        )
+        sys.exit(1)
 
     if code_only and selected_services:
         click.echo("Error: --code-only and --services are mutually exclusive", err=True)
@@ -1058,6 +1192,86 @@ def deploy(ctx, no_build, dry_run, tag, code_only, selected_services):
     else:
         click.echo(f"  Deployment failed at '{result.failed_step}': {result.error}", err=True)
         sys.exit(1)
+
+
+# =============================================================================
+# rc up — one-shot: scaffold (if missing) + deploy + push secrets
+# =============================================================================
+
+@cli.command()
+@click.option('--from-compose', 'from_compose',
+              type=click.Path(exists=True, dir_okay=False), default=None,
+              help='If rc.yml is missing, scaffold one from this docker-compose.yml first.')
+@click.option('--public-service', 'public_service', default=None,
+              help='Override the auto-detected ALB-fronted service when scaffolding.')
+@click.option('--region', default='us-west-2',
+              help='AWS region used when scaffolding rc.yml (ignored if rc.yml exists).')
+@click.option('--aws-profile', 'aws_profile', default=None,
+              help='aws_profile used when scaffolding rc.yml (ignored if rc.yml exists).')
+@click.option('--ttl', 'ttl', default=None,
+              help='Mark this stack ephemeral with the given TTL '
+                   '(e.g. 30m, 4h, 2h30m). Tags resources Ephemeral=true + '
+                   'ExpiresAt=<iso>; `rc reap` later destroys past-due stacks.')
+@click.pass_context
+def up(ctx, from_compose, public_service, region, aws_profile, ttl):
+    """One-shot: scaffold rc.yml (if missing), deploy, push secrets, print ALB URL.
+
+    The "I have a docker-compose.yml — get me a running stack" command. With
+    --from-compose, rc generates a v2 rc.yml on the fly when none exists,
+    then runs the deploy and secrets-push pipeline. Idempotent: rerun on an
+    unchanged config does the no-op terraform apply and a forced rollout.
+    """
+    config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
+    target = Path(config_path)
+
+    # --- Step 1: scaffold rc.yml if missing ---
+    if not target.exists():
+        if not from_compose:
+            raise click.ClickException(
+                f"{target} not found. Pass --from-compose <docker-compose.yml> to "
+                f"scaffold inline, or run `rc init --from-compose <path>` first."
+            )
+        from remote_compose.init_from_compose import generate_v2_rc_yml
+        click.echo(f"Scaffolding {target} from {from_compose}...")
+        text = generate_v2_rc_yml(
+            Path(from_compose),
+            output_path=target,
+            public_service=public_service,
+            region=region,
+            aws_profile=aws_profile,
+        )
+        target.write_text(text)
+        click.echo(f"  written ({len(text)} bytes).\n")
+
+    # --- Step 2: deploy via the v2 dispatcher ---
+    # ttl=None is fine; dispatcher only acts when truthy.
+    from remote_compose.cli_v2 import dispatch_if_v2
+    if not dispatch_if_v2(str(target), 'deploy', ttl=ttl):
+        raise click.ClickException(
+            f"{target} is not a v2 rc.yml. `rc up` only supports v2 — "
+            f"migrate with `rc migrate` or use `rc deploy` for v1."
+        )
+
+    # --- Step 3: push file-sourced secrets and force a rollout ---
+    # First-deploy task definitions reference SM secrets that don't exist
+    # yet; push fills them in and force-rolls so the next task boots green.
+    try:
+        _secrets_push_v2(str(target), rollout=True)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        click.echo(f"\n  WARN: secrets push failed: {exc}", err=True)
+        click.echo("  Run `rc secrets push` after fixing the issue above.")
+
+    if ttl:
+        click.echo(
+            f"\n  Stack is up (TTL {ttl}). `rc reap` tears it down once expired, "
+            f"or `rc destroy --yes` to teardown now."
+        )
+    else:
+        click.echo(
+            "\n  Stack is up. Use `rc status` to inspect and `rc destroy` to tear down."
+        )
 
 
 # =============================================================================
@@ -2048,6 +2262,113 @@ def _teardown_infrastructure(cluster):
             except Exception:
                 pass
         click.echo(" removed")
+
+
+# =============================================================================
+# rc reap — destroy ephemeral stacks past their TTL
+# =============================================================================
+
+
+@cli.command()
+@click.option('--dry-run', is_flag=True, help='List past-due stacks without destroying.')
+@click.option(
+    '--all', 'reap_all', is_flag=True,
+    help='Destroy every ephemeral stack regardless of TTL.',
+)
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt.')
+def reap(dry_run, reap_all, yes):
+    """Destroy ephemeral stacks past their TTL.
+
+    Reads the local registry (~/.config/remote-compose/ephemeral.json)
+    written by `rc deploy --ttl ...`, finds entries whose expires_at is
+    in the past, and runs `provider.destroy(ctx)` for each. A failure
+    on one stack does not stop the rest. Successfully destroyed stacks
+    are removed from the registry.
+    """
+    from remote_compose.ephemeral import (
+        DEFAULT_REGISTRY_PATH, list_records, find_expired, remove_stack,
+    )
+    from remote_compose.cli_v2 import build_deploy_context, load_rc_yml, resolve_provider
+
+    if reap_all:
+        targets = list_records()
+        scope = "all ephemeral"
+    else:
+        targets = find_expired()
+        scope = "past-due"
+
+    if not targets:
+        click.echo(
+            f"  No {scope} stacks in registry "
+            f"({DEFAULT_REGISTRY_PATH})."
+        )
+        return
+
+    click.echo(f"\nrc reap — {len(targets)} {scope} stack(s):")
+    for r in targets:
+        prof = f" profile={r.aws_profile}" if r.aws_profile else ""
+        click.echo(
+            f"  - {r.project} (region={r.region}{prof}) "
+            f"expires_at={r.expires_at}"
+        )
+
+    if dry_run:
+        click.echo("\n  --dry-run: nothing destroyed.")
+        return
+
+    if not yes:
+        if not click.confirm(
+            f"\n  Destroy these {len(targets)} stack(s)?", default=False,
+        ):
+            click.echo("  aborted.")
+            return
+
+    failures: list[tuple[str, str]] = []
+    succeeded = 0
+    for r in targets:
+        click.echo(f"\n  Destroying {r.project} ({r.region})...")
+        rc_path = Path(r.rc_yml_path)
+        if not rc_path.exists():
+            click.echo(
+                f"    WARN: rc.yml not found at {rc_path}; "
+                f"cannot run provider.destroy. Leaving registry entry "
+                f"in place — clean up manually or restore the rc.yml.",
+                err=True,
+            )
+            failures.append((r.project, "rc.yml missing"))
+            continue
+        try:
+            version, raw, v2 = load_rc_yml(rc_path)
+        except Exception as exc:
+            click.echo(f"    FAILED: rc.yml parse: {exc}", err=True)
+            failures.append((r.project, f"rc.yml parse: {exc}"))
+            continue
+        if version != 2 or v2 is None:
+            click.echo(
+                f"    FAILED: rc.yml at {rc_path} is not v2 "
+                f"(only v2 stacks can be ephemeral).", err=True,
+            )
+            failures.append((r.project, "not v2"))
+            continue
+        try:
+            ctx = build_deploy_context(v2, raw, rc_path)
+            provider = resolve_provider(v2)
+            provider.destroy(ctx)
+        except Exception as exc:
+            click.echo(f"    FAILED: provider.destroy: {exc}", err=True)
+            failures.append((r.project, str(exc)))
+            continue
+        remove_stack(project=r.project, region=r.region)
+        succeeded += 1
+        click.echo("    done.")
+
+    click.echo(
+        f"\n  Reap complete: {succeeded} destroyed, {len(failures)} failed."
+    )
+    if failures:
+        for proj, why in failures:
+            click.echo(f"    {proj}: {why}", err=True)
+        sys.exit(1)
 
 
 # =============================================================================

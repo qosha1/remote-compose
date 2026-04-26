@@ -193,6 +193,90 @@ def _service_command(svc_compose: dict) -> list[str]:
     return []
 
 
+def _auto_secret_name_for(env_file_path: Path, compose_dir: Path) -> str:
+    """Derive a stable, AWS-safe secret name from an env_file path.
+
+    Names are slugged from the env_file path RELATIVE to the compose dir so
+    `/big/abs/path/proj/.envs/.local/.django` and `.envs/.local/.django`
+    (declared from the proj/ dir) produce the same `local-django` slug.
+    Mirrors init_from_compose.secret_name_from_path so a hand-written rc.yml
+    using `source: file` produces the same secret name an env_file_auto'd
+    rc.yml would.
+    """
+    from .init_from_compose import secret_name_from_path
+    try:
+        rel = env_file_path.resolve().relative_to(compose_dir.resolve())
+    except ValueError:
+        # env_file lives outside compose dir (e.g., absolute path elsewhere) —
+        # fall back to the basename so we don't leak host paths into AWS.
+        rel = Path(env_file_path.name)
+    return secret_name_from_path(str(rel))
+
+
+def _expand_env_file_auto(
+    secrets: list,
+    compose_services: dict[str, dict],
+    compose_path: Path,
+) -> tuple[list, set[str]]:
+    """Expand `source: env_file_auto` SecretRefV2 entries.
+
+    For each env_file_auto entry, walks every compose service's `env_file:`
+    list, resolves paths against the compose file's dir, and produces one
+    `source: file` SecretRef per unique env_file. The original auto entry
+    is dropped from the returned list.
+
+    Returns: (new_secrets_list, set_of_env_keys_now_in_sm). The keys set
+    is used by build_deploy_context to strip env_file values from each
+    service's task-def `environment[]` so the same value isn't shipped as
+    both plaintext env and an SM secret reference.
+    """
+    from .config.v2_schema import SecretRefV2 as _SecRefV2
+    from .envfile import EnvFileError, keys as _env_keys
+
+    has_auto = any(getattr(s, "source", None) == "env_file_auto" for s in secrets)
+    if not has_auto:
+        return list(secrets), set()
+
+    compose_dir = compose_path.parent
+    discovered: dict[str, Path] = {}  # secret-name -> absolute env_file path
+    for svc_compose in compose_services.values():
+        env_files_raw = svc_compose.get("env_file")
+        if env_files_raw is None:
+            continue
+        entries = (
+            [env_files_raw] if isinstance(env_files_raw, str) else list(env_files_raw)
+        )
+        for ref in entries:
+            ref_path = Path(ref)
+            if not ref_path.is_absolute():
+                ref_path = (compose_dir / ref_path).resolve()
+            name = _auto_secret_name_for(ref_path, compose_dir)
+            # First-seen wins. Two compose services that share an env_file
+            # collapse to one secret.
+            discovered.setdefault(name, ref_path)
+
+    suppressed_keys: set[str] = set()
+    expanded: list = []
+    for sec in secrets:
+        if getattr(sec, "source", None) == "env_file_auto":
+            continue  # drop; replaced by per-file entries below
+        expanded.append(sec)
+    for name, abs_path in discovered.items():
+        expanded.append(_SecRefV2(
+            name=name, source="file", path=str(abs_path),
+        ))
+        try:
+            for k in _env_keys(abs_path):
+                suppressed_keys.add(k)
+        except EnvFileError:
+            # Same lenience as _service_env: a missing env_file still
+            # produces a secret entry (for terraform), but we skip key
+            # suppression so we don't mask a typo by deleting nothing.
+            pass
+
+    return expanded, suppressed_keys
+
+
 def build_deploy_context(
     v2: RcConfigV2,
     raw: dict,
@@ -205,6 +289,14 @@ def build_deploy_context(
     if not compose_path.is_absolute():
         compose_path = (project_dir / compose_path).resolve()
     compose_services = _parse_compose_services(compose_path)
+
+    # Expand env_file_auto BEFORE building service envs so the suppression
+    # set is available — without this, env_file values land in the task-def
+    # environment[] AND in secrets[], duplicating the data and defeating
+    # the point of using SM.
+    v2_secrets_expanded, suppressed_env_keys = _expand_env_file_auto(
+        list(v2.secrets), compose_services, compose_path,
+    )
 
     # Resolve the deploy set: union of compose services + rc.yml services,
     # filtered through compose.include (whitelist) or compose.exclude
@@ -231,6 +323,10 @@ def build_deploy_context(
         bc, bargs, dfile, img, target = _service_build_info(svc_compose, compose_path)
         all_compose_ports = _service_compose_ports(svc_compose)
         env = _service_env(svc_compose, compose_path)
+        if suppressed_env_keys:
+            # env_file_auto: drop any key now sourced from SM so the task def
+            # doesn't leak the same value via plaintext environment[].
+            env = {k: v for k, v in env.items() if k not in suppressed_env_keys}
         cmd = _service_command(svc_compose)
         if svc is not None:
             # rc.yml-declared service; honor every override.
@@ -297,7 +393,7 @@ def build_deploy_context(
             name=s.name, source=s.source,
             path=s.path, arn=s.arn, ref=s.ref,
         )
-        for s in v2.secrets
+        for s in v2_secrets_expanded
     ]
 
     tf_backend = dataclasses.asdict(v2.terraform.backend)
@@ -364,6 +460,14 @@ def render_plan(result) -> str:
     ]
     if result.create == 0 and result.update == 0 and result.destroy == 0:
         lines.append("    (no changes — infrastructure matches config)")
+    # Warnings come from compose-file detectors (rc-e5u.44.6/.7/.8/.9):
+    # surface them right under the diff so the user reads them before
+    # running rc deploy.
+    if getattr(result, "warnings", None):
+        lines.append("")
+        lines.append("  Warnings:")
+        for w in result.warnings:
+            lines.append(f"    - {w}")
     return "\n".join(lines)
 
 
@@ -449,10 +553,47 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
 
     if command == "plan":
         result = provider.plan(ctx)
+        # Compose-file detectors run independently of the provider so they
+        # work even when the provider's own plan() doesn't populate
+        # warnings (fake / k8s today). Merge & dedupe.
+        from .compose_warnings import collect_compose_warnings
+        compose_warns = collect_compose_warnings(ctx.compose_path, raw)
+        existing = list(getattr(result, "warnings", []) or [])
+        for w in compose_warns:
+            if w not in existing:
+                existing.append(w)
+        result.warnings = existing
         click.echo(render_plan(result))
         return True
 
     if command == "deploy":
+        ttl = kwargs.get("ttl")
+        if ttl:
+            from datetime import datetime, timezone
+            from .ephemeral import (
+                parse_duration, register_stack, to_iso_utc,
+            )
+            try:
+                delta = parse_duration(ttl)
+            except ValueError as exc:
+                click.echo(f"--ttl: {exc}", err=True)
+                raise click.exceptions.Exit(1)
+            expires_dt = datetime.now(timezone.utc) + delta
+            ctx.expires_at = to_iso_utc(expires_dt)
+            ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+            tf_dir = Path(ctx.working_dir) / "terraform"
+            register_stack(
+                project=v2.project,
+                region=ecs_cfg.get("region") or "",
+                expires_at=ctx.expires_at,
+                rc_yml_path=str(path.resolve()),
+                terraform_dir=str(tf_dir.resolve()),
+                aws_profile=ecs_cfg.get("aws_profile"),
+            )
+            click.echo(
+                f"  Ephemeral: stack expires at {ctx.expires_at} "
+                f"(in {ttl}); reap with `rc reap`."
+            )
         result = provider.deploy(ctx)
         click.echo(render_deploy(result))
         _run_auto_on_deploy_hooks(provider, ctx, v2)

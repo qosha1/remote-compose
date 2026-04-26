@@ -47,18 +47,27 @@ you fully own.
 
 ## Quick start
 
+> **Bootstrapping a fresh machine?** Run
+> `bash scripts/bootstrap-from-zero.sh` instead of step 1 — it installs
+> terraform via the platform package manager (brew/apt/dnf), creates a
+> `.venv`, runs `pip install -e ".[ecs]"`, and verifies `rc doctor` is
+> all-green. Idempotent — safe to re-run.
+
 ```bash
-# 1. Install
-pip install -e ".[ecs]"            # or [k8s], or [all]
+# 1. Install (only ECS provider ships today — k8s is roadmap)
+pip install -e ".[ecs]"
 
 # 2. In your app repo (alongside docker-compose.yml)
-rc init                            # scaffold a v2 rc.yml
-$EDITOR rc.yml                     # set project, provider, domain
+rc init --from-compose docker-compose.yml   # scaffold a v2 rc.yml from your compose
+$EDITOR rc.yml                              # tweak cpu/memory/health checks
 
 # 3. Configure cloud creds (ECS example)
 export AWS_PROFILE=myprofile
 
-# 4. Preview → deploy → operate
+# 4. One-shot: scaffold (if missing) → deploy → push secrets → ALB URL
+rc up --from-compose docker-compose.yml     # the lazy path, idempotent
+
+# 4b. Or step through it manually
 rc plan                            # show what terraform would create
 rc deploy                          # build images, terraform apply, force-rolls
 rc secrets push                    # upload .env files into AWS Secrets Manager
@@ -68,6 +77,10 @@ rc exec django -- /bin/bash        # interactive shell
 rc db push /tmp/local-dump.dump    # seed the deployed db from a local dump
 rc destroy --yes                   # tear it all down
 ```
+
+To verify the documented commands exist as advertised, run
+`bash scripts/test-readme-quickstart.sh` — it audits `rc --help` against
+this section without touching AWS.
 
 Every command is **declarative + idempotent**. Re-running `rc deploy` after
 no changes prints `no changes — infrastructure matches config`.

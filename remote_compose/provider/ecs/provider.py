@@ -404,6 +404,10 @@ class ECSProvider(Provider):
             "cluster_name": cluster_name,
             "aws_profile": aws_profile,
             "environment": environment,
+            # When set, providers.tf default_tags adds Ephemeral=true +
+            # ExpiresAt=<iso>. Drives `rc reap` discovery and any
+            # out-of-band tag-scan reaper.
+            "expires_at": ctx.expires_at,
             "services": services_view,
             "has_public_service": has_public_service,
             "has_ec2_service": has_ec2_service,
@@ -456,11 +460,18 @@ class ECSProvider(Provider):
         runner = self.runner_factory(out_dir)
         runner.init()
         summary = runner.plan()
+        # Compose-file detectors (rc-e5u.44.6/.7/.8/.9) flag silently-
+        # dropped bind mounts, ephemeral data, dev-only DNS, and
+        # unreachable secondary ports. Run here so any caller of
+        # provider.plan(ctx) — not only the CLI dispatcher — gets them.
+        from ...compose_warnings import collect_compose_warnings
+        warnings = collect_compose_warnings(ctx.compose_path, ctx.rc_yml_v2)
         return PlanResult(
             create=summary.create,
             update=summary.update,
             destroy=summary.destroy,
             raw_plan=summary.raw,
+            warnings=warnings,
         )
 
     def deploy(self, ctx: DeployContext) -> DeployResult:
