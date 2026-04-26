@@ -2283,8 +2283,27 @@ def destroy(ctx, infra, yes, all_ephemeral):
                                     command_name="destroy --all-ephemeral")
         return
 
-    from remote_compose.cli_v2 import dispatch_if_v2
+    from remote_compose.cli_v2 import dispatch_if_v2, load_rc_yml
     if dispatch_if_v2(ctx.obj.get('config_path'), 'destroy', yes=yes):
+        # rc-e5u.46.6 followup: a single-stack `rc destroy` should also
+        # unregister the project from the ephemeral registry if it was
+        # ever recorded there (`rc deploy --ttl` / `rc up --ttl`).
+        # Otherwise stale entries pile up and `rc list --ephemeral`
+        # reports phantom stacks. Best-effort: registry mutations are
+        # purely local-disk JSON; failure here doesn't matter to the
+        # user since AWS resources are already destroyed.
+        try:
+            from remote_compose.ephemeral import remove_stack
+            cfg_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
+            _, raw, v2 = load_rc_yml(cfg_path)
+            if v2 is not None:
+                ecs_cfg = ((raw.get('provider_config') or {}).get('ecs')
+                           or {}) if isinstance(raw, dict) else {}
+                region = ecs_cfg.get('region')
+                if region:
+                    remove_stack(project=v2.project, region=region)
+        except Exception:
+            pass
         return
 
     config = _load_config(ctx.obj.get('config_path'))
