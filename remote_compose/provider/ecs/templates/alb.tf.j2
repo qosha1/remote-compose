@@ -17,7 +17,7 @@ resource "aws_lb_target_group" "default" {
 
   health_check {
     path                = "{{ default_health_check_path }}"
-    matcher             = "200-399"
+    matcher             = "200-499"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     interval            = 30
@@ -83,7 +83,7 @@ resource "aws_lb_target_group" "{{ dsvc.tf_name }}" {
 
   health_check {
     path                = "{{ dsvc.health_check_path or '/' }}"
-    matcher             = "200-399"
+    matcher             = "200-499"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     interval            = 30
