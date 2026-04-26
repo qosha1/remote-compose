@@ -143,12 +143,30 @@ echo
 # Step 4: plain curl (no Host: header rewrite) returns 200
 # ---------------------------------------------------------------------------
 echo "[4/7] plain curl ${ALB_URL}/api/v1/health/ (no Host header rewrite)..."
-body="$(curl -sS -m 30 "${ALB_URL}/api/v1/health/" || true)"
-status="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' "${ALB_URL}/api/v1/health/" || true)"
-if [[ "$status" != "200" ]]; then
-    echo "FAIL: expected HTTP 200, got $status. Body: $body" >&2
-    exit 3
-fi
+# ECS service-health convergence is necessary but not sufficient: when
+# Django launches under /start, the TCP listener comes up BEFORE
+# `python manage.py migrate` + collectstatic + runserver finish. nginx
+# resolver also needs ~10-30s to refresh once Cloud Map registers the
+# new django ENI. Retry for up to TIMEOUT_HTTP seconds before giving
+# up — 502 + connection-refused are expected in this window.
+TIMEOUT_HTTP="${TIMEOUT_HTTP:-300}"
+http_deadline=$(( $(date +%s) + TIMEOUT_HTTP ))
+status=""
+body=""
+while true; do
+    body="$(curl -sS -m 30 "${ALB_URL}/api/v1/health/" || true)"
+    status="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' "${ALB_URL}/api/v1/health/" || true)"
+    if [[ "$status" == "200" ]]; then
+        break
+    fi
+    if [[ $(date +%s) -gt $http_deadline ]]; then
+        echo "FAIL: ALB never returned 200 within ${TIMEOUT_HTTP}s." >&2
+        echo "      last status=$status, body=$body" >&2
+        exit 3
+    fi
+    echo "      ALB returned $status; waiting 10s for django to converge..."
+    sleep 10
+done
 echo "      HTTP 200, body: $body"
 echo
 
