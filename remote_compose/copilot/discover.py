@@ -171,10 +171,13 @@ def _discover_addons(addons_dir: Path) -> list[CopilotAddon]:
     for f in sorted(addons_dir.iterdir()):
         if f.is_file() and f.suffix in {".yml", ".yaml"}:
             try:
-                raw = _load_yaml(f)
+                raw = _load_yaml_cfn(f)
             except DiscoveryError:
-                # Addons may be CFN templates with non-strict yaml shape;
-                # don't fail discovery just because we can't parse one.
+                # Last-resort fallback: CFN template that PyYAML cannot
+                # represent even with the lenient loader. Empty dict means
+                # the import summary's "no parseable Resources block"
+                # bucket. Better than failing the whole discovery for one
+                # bad file.
                 raw = {}
             out.append(CopilotAddon(name=f.stem, path=f, raw=raw))
     return out
@@ -184,6 +187,51 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         with path.open() as f:
             data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise DiscoveryError(f"{path}: malformed YAML — {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise DiscoveryError(
+            f"{path}: expected a mapping at the document root, got "
+            f"{type(data).__name__}"
+        )
+    return data
+
+
+# rc-e5u.43.8: CFN intrinsic tag tolerance for addon YAML parsing.
+# AWS Copilot addons are CFN templates that use !Ref / !Sub / !GetAtt /
+# !Join / !FindInMap / !If / !Select / !Split / !ImportValue / !Equals.
+# safe_load chokes on these. We register a generic constructor on a
+# subclass of SafeLoader so the resource-type extraction still works
+# without writing manifests like RDS / S3 / DynamoDB to a "no parseable
+# Resources" bucket and missing the per-type guidance.
+class _CfnTolerantLoader(yaml.SafeLoader):
+    """A SafeLoader that treats unknown ``!Tag`` constructors as opaque
+    scalars/sequences/mappings instead of erroring."""
+
+
+def _cfn_tag_constructor(loader, tag_suffix, node):
+    """multi_constructor signature: (loader, tag_suffix, node) — tag_suffix is
+    the part after the prefix the constructor was registered for. We treat
+    every ``!Foo`` as the underlying scalar/sequence/mapping value."""
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return None
+
+
+_CfnTolerantLoader.add_multi_constructor("!", _cfn_tag_constructor)
+
+
+def _load_yaml_cfn(path: Path) -> dict[str, Any]:
+    """Like _load_yaml but tolerant of CFN ``!Ref`` / ``!Sub`` / etc."""
+    try:
+        with path.open() as f:
+            data = yaml.load(f, Loader=_CfnTolerantLoader)
     except yaml.YAMLError as exc:
         raise DiscoveryError(f"{path}: malformed YAML — {exc}") from exc
     if data is None:

@@ -3165,6 +3165,14 @@ def copilot_import(from_dir, out_dir, env_name, project_name, force):
     click.echo(f"  services:  {len(result.rc_yml['services'])}")
     if result.warnings:
         click.echo(f"  warnings:  {len(result.warnings)} (see IMPORT_SUMMARY.md)")
+    # rc-e5u.43.8: surface untranslated addon CFN templates so the user can
+    # decide what to do (RDS, S3, DynamoDB etc. need manual replacement).
+    addon_count = sum(len(s.addons or []) for s in app.services)
+    if addon_count:
+        click.echo(
+            f"  addons:    {addon_count} CFN template(s) — manual "
+            f"translation required (see IMPORT_SUMMARY.md)"
+        )
     click.echo(f"\n  wrote {rc_path}")
     click.echo(f"  wrote {compose_path}")
     click.echo(f"  wrote {summary_path}")

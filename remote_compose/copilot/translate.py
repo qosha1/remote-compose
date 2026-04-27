@@ -625,6 +625,72 @@ def _guess_region(app: CopilotApp) -> str | None:
     return None
 
 
+# rc-e5u.43.8: per-AWS-resource-type guidance for addons we don't translate.
+# When a copilot addon CFN template declares one of these resource types, the
+# import summary points the user at the right replacement path. Anything not
+# in this map gets a generic "manual translation required" line, which is
+# still better than silently dropping the addon.
+_ADDON_RESOURCE_GUIDANCE: dict[str, str] = {
+    "AWS::RDS::DBInstance": (
+        "set up RDS yourself (or `rc up` with a separate Postgres/MySQL "
+        "ECS service) and point DATABASE_URL at it"
+    ),
+    "AWS::RDS::DBCluster": (
+        "set up RDS yourself; point DATABASE_URL / cluster endpoint env "
+        "vars at the new cluster"
+    ),
+    "AWS::S3::Bucket": (
+        "either use rc.yml `backup.bucket` for backup staging or add the "
+        "bucket to your own terraform module + set BUCKET_NAME env var"
+    ),
+    "AWS::DynamoDB::Table": (
+        "create the table via your own terraform module; pass the name "
+        "via env var (Copilot Addon naming convention is "
+        "<addon>_NAME / <addon>_ARN)"
+    ),
+    "AWS::ElastiCache::CacheCluster": (
+        "either deploy redis as an rc.yml infrastructure service "
+        "(persistence via EFS) or use ElastiCache via your own terraform"
+    ),
+    "AWS::ElastiCache::ReplicationGroup": (
+        "either deploy redis/valkey as an rc.yml infrastructure service "
+        "or wire ElastiCache via your own terraform module"
+    ),
+    "AWS::SQS::Queue": (
+        "create the queue via your own terraform; pass QUEUE_URL via env "
+        "var (or use celery/sidekiq with redis from rc.yml directly)"
+    ),
+    "AWS::SNS::Topic": (
+        "create the topic via your own terraform; pass TOPIC_ARN via env"
+    ),
+    "AWS::SecretsManager::Secret": (
+        "use rc.yml top-level `secrets:` with `source: file` for the value "
+        "OR `source: arn` to reference an externally-managed secret"
+    ),
+    "AWS::IAM::Role": (
+        "the ECS task role is provider-managed; if the addon role exists "
+        "for cross-service access, replicate the policy in your own "
+        "terraform module"
+    ),
+}
+
+
+def _addon_resource_types(addon: "CopilotAddon") -> list[str]:
+    """Extract Type: <X> values from a CFN-template-shaped addon."""
+    raw = addon.raw or {}
+    resources = raw.get("Resources") if isinstance(raw, dict) else None
+    if not isinstance(resources, dict):
+        return []
+    out: list[str] = []
+    for r in resources.values():
+        if not isinstance(r, dict):
+            continue
+        t = r.get("Type")
+        if isinstance(t, str):
+            out.append(t)
+    return out
+
+
 def _build_summary(
     app: CopilotApp,
     rc_yml: dict[str, Any],
@@ -659,6 +725,50 @@ def _build_summary(
             lines.append(f"  {kind}: {len(group)}")
             for w in group:
                 lines.append(f"    [{w.service}] {w.message}")
+
+    # rc-e5u.43.8: surface addon CFN templates we did NOT translate, with
+    # per-resource-type guidance so the user knows what to do next.
+    addon_count = sum(len(svc.addons or []) for svc in app.services)
+    if addon_count:
+        lines.append("")
+        lines.append(
+            f"Addon templates detected: {addon_count} — manual translation required"
+        )
+        # Aggregate by AWS resource type for the guidance section.
+        by_type: dict[str, list[str]] = {}  # type -> [service/addon]
+        unknown_types: list[tuple[str, str]] = []  # (svc, addon) pairs without recognized types
+        for svc in app.services:
+            for addon in (svc.addons or []):
+                rtypes = _addon_resource_types(addon)
+                if not rtypes:
+                    unknown_types.append((svc.name, addon.name))
+                    continue
+                for rt in rtypes:
+                    by_type.setdefault(rt, []).append(f"{svc.name}/{addon.name}.yml")
+        for rt in sorted(by_type):
+            sources = by_type[rt]
+            lines.append("")
+            lines.append(f"  {rt} ({len(sources)} resource(s) across "
+                         f"{len({s.split('/')[0] for s in sources})} service(s))")
+            for s in sorted(set(sources)):
+                lines.append(f"    in: {s}")
+            guidance = _ADDON_RESOURCE_GUIDANCE.get(rt)
+            if guidance:
+                lines.append(f"    next: {guidance}")
+            else:
+                lines.append(
+                    f"    next: not yet auto-handled — replicate via your own "
+                    f"terraform module or open an issue"
+                )
+        if unknown_types:
+            lines.append("")
+            lines.append(
+                f"  Addon templates with no parseable Resources block: "
+                f"{len(unknown_types)}"
+            )
+            for svc, addon in sorted(unknown_types):
+                lines.append(f"    - {svc}/{addon}.yml")
+
     if app.pipelines:
         lines.append("")
         lines.append(
