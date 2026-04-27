@@ -2973,205 +2973,8 @@ def _print_service_table(context):
 # (registered at the bottom of this file via cli.add_command)
 
 
-# =============================================================================
-# rc dev — hot-reload iteration (rc-e5u.45.9)
-# =============================================================================
-
-@cli.group(name='dev')
-def dev_group():
-    """Hot-reload iteration on a deployed dev-mode stack.
-
-    \b
-    Workflow:
-      1. Add `dev_volumes:` entries to services in rc.yml.
-      2. `rc up --dev` — deploys with EFS-backed bind mounts at the
-         declared paths. The container will start empty until you push.
-      3. `rc dev push <service>` — streams local source into the EFS
-         mount via `aws ecs execute-command`. Django runserver et al.
-         auto-reload on file change.
-      4. `rc dev push --watch <service>` — keeps streaming on every
-         local edit (debounced ~250ms).
-    """
-
-
-@dev_group.command(name='push')
-@click.argument('service', required=False)
-@click.option('--watch', 'watch', is_flag=True,
-              help='Watch local sources and re-push on every change '
-                   '(debounced ~250ms). Requires fswatch (macOS) or '
-                   'inotifywait (Linux).')
-@click.pass_context
-def dev_push_cmd(ctx, service, watch):
-    """Push local dev_volume source(s) to a running task via EFS.
-
-    With no SERVICE arg, pushes EVERY service that declares dev_volumes.
-    With --watch, runs forever, re-pushing on every local edit.
-    """
-    from pathlib import Path as _Path
-    from remote_compose.dev_push import (
-        DevPushError, push_all, watch_and_push,
-    )
-
-    config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
-    rc_path = _Path(config_path)
-    if not rc_path.exists():
-        click.echo(f"Error: {rc_path} not found.", err=True)
-        sys.exit(1)
-
-    def _progress(msg: str) -> None:
-        click.echo(msg)
-
-    try:
-        if watch:
-            watch_and_push(rc_path, service, progress=_progress)
-        else:
-            results = push_all(rc_path, service, progress=_progress)
-            total = sum(r["elapsed_s"] for r in results)
-            click.echo(
-                f"\n  pushed {len(results)} dev_volume(s) in {total:.1f}s."
-            )
-    except DevPushError as exc:
-        click.echo(f"\n  rc dev push: {exc}", err=True)
-        sys.exit(1)
-
-
-# =============================================================================
-# rc fix — one-shot scaffolders for the most common ECS gotchas
-# =============================================================================
-
-
-@cli.group(name='fix')
-def fix_group():
-    """One-shot scaffolders for common ECS deploy gotchas.
-
-    \b
-    Subcommands:
-      rc fix nginx-conf   Emit an ECS-ready nginx.conf + Dockerfile
-                          (rc-e5u.44.21).
-    """
-
-
-@fix_group.command(name='nginx-conf')
-@click.option('--upstream', 'upstream_specs', multiple=True,
-              help='Upstream service to proxy, in NAME:PORT form. Repeat '
-                   'for multi-upstream configs. The first --upstream is '
-                   'wired into the catch-all default_server block.')
-@click.option('--django', 'django_names', multiple=True,
-              help='Mark the named upstream(s) as Django so the generator '
-                   "injects 'proxy_set_header Host localhost;' (works around "
-                   "ALLOWED_HOSTS rejection of ALB DNS Host headers). "
-                   "Use --django=NAME or just --django to mark every "
-                   "upstream.")
-@click.option('--out', 'out_dir', default='compose/ecs/nginx', show_default=True,
-              type=click.Path(file_okay=False),
-              help='Subdir under the project to write nginx.conf + '
-                   'Dockerfile into. The default mirrors the convention '
-                   "verified against rc-test-startsimpli.")
-@click.option('--force', is_flag=True,
-              help='Overwrite existing nginx.conf / Dockerfile in --out.')
-@click.pass_context
-def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
-    """Emit an ECS-ready nginx.conf + Dockerfile (rc-e5u.44.21).
-
-    \b
-    Generates a SIBLING nginx config (under compose/ecs/nginx/) that proxies
-    one or more upstream compose services using the variable-based
-    proxy_pass pattern that survives Cloud Map task replacements.
-    Three pieces matter and must stay in sync:
-      1. resolver <vpc_cidr_base+2> — the only DNS reachable from a Fargate
-         task ENI. NOT 169.254.169.253.
-      2. NO 'upstream { server X:Y; }' blocks (stock nginx caches the lookup
-         at config-load time → dies on task replacement).
-      3. 'set $u "<svc>.<project>.local:<port>"; proxy_pass http://$u;' —
-         per-request resolution, FQDN form (nginx's resolver doesn't
-         honour /etc/resolv.conf search domains).
-
-    \b
-    For Django upstreams add --django=NAME so the generator also injects
-    'proxy_set_header Host localhost;' — Django's ALLOWED_HOSTS check
-    rejects the ALB DNS Host header otherwise (returns 400).
-
-    \b
-    Examples:
-      rc fix nginx-conf --upstream django:8000 --django=django
-      rc fix nginx-conf --upstream web:3000 --upstream api:5000 --django=api
-      rc fix nginx-conf  # reads upstreams from rc.yml services with port:
-    """
-    from pathlib import Path as _Path
-    from remote_compose.fix_nginx_conf import (
-        Upstream, parse_upstream_arg, upstreams_from_rc_v2, write_ecs_nginx,
-    )
-
-    config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
-    rc_path = _Path(config_path)
-    if not rc_path.exists():
-        click.echo(f"Error: {rc_path} not found.", err=True)
-        sys.exit(1)
-
-    raw = yaml.safe_load(rc_path.read_text()) or {}
-    project = str(raw.get('project') or '')
-    ecs_cfg = ((raw.get('provider_config') or {}).get('ecs') or {})
-    vpc_cidr = ecs_cfg.get('vpc_cidr')
-
-    # If --django was passed without an explicit value (just the bare flag,
-    # not supported by click multiple), treat each --django=NAME as a name.
-    django_set = {str(d) for d in (django_names or ())}
-
-    upstreams: list[Upstream] = []
-    if upstream_specs:
-        for spec in upstream_specs:
-            try:
-                upstreams.append(parse_upstream_arg(spec, django_set))
-            except ValueError as exc:
-                click.echo(f"Error: {exc}", err=True)
-                sys.exit(1)
-    else:
-        # Fall back to rc.yml services with port:.
-        upstreams = upstreams_from_rc_v2(raw, django_services=django_set)
-        if not upstreams:
-            click.echo(
-                "Error: no --upstream specs and rc.yml has no services "
-                "with a numeric `port:` to derive upstreams from.",
-                err=True,
-            )
-            sys.exit(1)
-
-    project_dir = rc_path.parent.resolve()
-    try:
-        nginx_path, dockerfile_path = write_ecs_nginx(
-            project_dir=project_dir,
-            upstreams=upstreams,
-            project=project,
-            vpc_cidr=vpc_cidr,
-            force=force,
-            output_subdir=out_dir,
-        )
-    except FileExistsError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    click.echo(f"\nrc fix nginx-conf")
-    click.echo(f"  project:    {project or '<unset>'}")
-    click.echo(f"  vpc_cidr:   {vpc_cidr or '10.0.0.0/16 (default)'}")
-    click.echo(f"  upstreams:  " + ", ".join(
-        f"{u.name}:{u.port}{' (django)' if u.django else ''}"
-        for u in upstreams
-    ))
-    click.echo(f"  wrote:      {nginx_path.relative_to(project_dir)}")
-    click.echo(f"              {dockerfile_path.relative_to(project_dir)}")
-    click.echo(
-        f"\n  Wire it into your compose ECS variant (build context = "
-        f"project root):"
-    )
-    click.echo(f"\n    services:")
-    click.echo(f"      nginx:")
-    click.echo(f"        build:")
-    click.echo(f"          context: .")
-    click.echo(f"          dockerfile: {out_dir}/Dockerfile")
-    click.echo(
-        "\n  Then `rc deploy --services nginx` should produce a healthy "
-        "ALB target on first attempt — no resolver/FQDN/Host iteration loop."
-    )
+# rc dev + rc fix moved to cli_commands/dev.py + cli_commands/fix.py
+# (registered at the bottom of this file via cli.add_command)
 
 
 # =============================================================================
@@ -3183,8 +2986,10 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
 from .cli_commands.audit import audit_cmd as _audit_cmd
 from .cli_commands.compose import compose_group as _compose_group
 from .cli_commands.copilot import copilot_group as _copilot_group
+from .cli_commands.dev import dev_group as _dev_group
 from .cli_commands.doctor import doctor_cmd as _doctor_cmd
 from .cli_commands.doctor import install_cmd as _install_cmd
+from .cli_commands.fix import fix_group as _fix_group
 from .cli_commands.lifecycle import lifecycle_cmd as _lifecycle_cmd
 from .cli_commands.migrate import migrate_cmd as _migrate_cmd
 from .cli_commands.plan import plan_cmd as _plan_cmd
@@ -3192,7 +2997,9 @@ from .cli_commands.plan import plan_cmd as _plan_cmd
 cli.add_command(_audit_cmd)
 cli.add_command(_compose_group)
 cli.add_command(_copilot_group)
+cli.add_command(_dev_group)
 cli.add_command(_doctor_cmd)
+cli.add_command(_fix_group)
 cli.add_command(_install_cmd)
 cli.add_command(_lifecycle_cmd)
 cli.add_command(_migrate_cmd)
