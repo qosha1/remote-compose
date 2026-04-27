@@ -59,7 +59,7 @@ def test_scaffolds_rcyml_when_missing(runner, tmp_path, compose_file):
     rc_yml = tmp_path / "rc.yml"
     # Stub the deploy + secrets steps so we exercise just the scaffold.
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
         result = runner.invoke(
             cli,
             ["-c", str(rc_yml), "up", "--from-compose", str(compose_file),
@@ -77,7 +77,7 @@ def test_existing_rcyml_skips_scaffold(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: existing\n")
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True) as dispatch, \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     assert dispatch.called
@@ -95,7 +95,7 @@ def test_v1_rcyml_rejected(runner, tmp_path):
     rc_yml.write_text("cluster: legacy\nregion: us-west-2\n")
     # Returns False on v1 -> rc up should raise ClickException.
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=False), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=False):
+         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=False):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code != 0
     assert "v2" in result.output.lower()
@@ -109,7 +109,7 @@ def test_ttl_flag_is_acknowledged(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up", "--ttl", "4h"])
     assert result.exit_code == 0, result.output
     assert "ttl" in result.output.lower()
@@ -120,7 +120,7 @@ def test_no_ttl_no_ack_message(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     # The "TTL acknowledged" line must NOT appear when --ttl wasn't passed
@@ -136,7 +136,7 @@ def test_secrets_push_failure_warns_but_succeeds(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
     with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2",
+         patch("remote_compose.cli_commands.up._secrets_push_v2",
                side_effect=RuntimeError("boto3 lol")):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
