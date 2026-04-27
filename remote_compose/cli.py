@@ -570,11 +570,40 @@ def _bootstrap_django(config: Dict[str, Any]):
             f.write(secret_key)
         os.chmod(secret_key_file, 0o600)
 
-    # Pick up encryption key from environment
-    encryption_key = os.environ.get('REMOTE_COMPOSE_ENCRYPTION_KEY') or os.environ.get('ENCRYPTION_KEY')
+    # Pick up encryption key from environment, then fall back to a
+    # per-project key persisted alongside secret_key on disk
+    # (remote-compose-5d2). Earlier behavior generated a NEW Fernet
+    # key each CLI session when the env var wasn't set, which silently
+    # made every previously-encrypted credential unrecoverable on the
+    # very next invocation. The on-disk fallback preserves the key
+    # across sessions; the env-var override still wins for users who
+    # want centralized key management (KMS / Vault / 1Password).
+    encryption_key = (
+        os.environ.get('REMOTE_COMPOSE_ENCRYPTION_KEY')
+        or os.environ.get('ENCRYPTION_KEY')
+    )
     if not encryption_key:
-        from cryptography.fernet import Fernet
-        encryption_key = Fernet.generate_key().decode()
+        encryption_key_file = os.path.join(str(db_dir), 'encryption_key')
+        if os.path.exists(encryption_key_file):
+            with open(encryption_key_file) as f:
+                encryption_key = f.read().strip()
+        else:
+            from cryptography.fernet import Fernet
+            encryption_key = Fernet.generate_key().decode()
+            with open(encryption_key_file, 'w') as f:
+                f.write(encryption_key)
+            os.chmod(encryption_key_file, 0o600)
+            click.echo(
+                f"\n  Generated new credential-encryption key at "
+                f"{encryption_key_file} (mode 0600).",
+                err=True,
+            )
+            click.echo(
+                f"  Back this file up alongside the SQLite db at "
+                f"{db_path} — without it, every credential stored by "
+                f"rc becomes unrecoverable.\n",
+                err=True,
+            )
 
     settings.configure(
         DEBUG=False,
