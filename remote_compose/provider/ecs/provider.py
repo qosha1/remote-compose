@@ -1290,14 +1290,27 @@ class ECSProvider(Provider):
                     f"as not RUNNING"
                 )
             if time.monotonic() > deadline:
-                return ExecResult(
-                    exit_code=1, stdout="",
-                    stderr=(
+                # When wait_budget=0 and there's never been any task, the
+                # diagnostic about "stuck on startup" misleads — the user
+                # never had a task, period. Use a clearer message in that
+                # case (also exercised by tests that mock list_tasks=[]).
+                if wait_budget == 0 and last_diag == "no running tasks":
+                    msg = (
+                        f"no running tasks for service {service!r}. "
+                        f"Run `rc deploy` first or check `rc status`."
+                    )
+                else:
+                    msg = (
                         f"timed out ({wait_budget}s) waiting for service "
-                        f"{service!r}: {last_diag}. Recent tasks may be stuck "
-                        f"on startup; check `rc status` and recent log streams."
-                    ),
-                )
+                        f"{service!r}: {last_diag}. Recent tasks may be "
+                        f"stuck on startup; check `rc status` and recent "
+                        f"log streams."
+                    )
+                return ExecResult(exit_code=1, stdout="", stderr=msg)
+            # Don't sleep past the deadline — eats wait_interval seconds
+            # for nothing on tests that set a 0 budget.
+            if time.monotonic() + wait_interval > deadline:
+                continue
             time.sleep(wait_interval)
 
         env = _os.environ.copy()

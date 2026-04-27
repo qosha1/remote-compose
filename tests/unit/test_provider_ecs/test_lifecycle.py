@@ -324,7 +324,15 @@ class TestLogsAndExec:
         assert result.exit_code == 254
         assert "InvalidParameterException" in result.stderr
 
-    def test_exec_no_running_tasks_returns_error(self, provider, mock_session, tmp_path):
+    def test_exec_no_running_tasks_returns_error(
+        self, provider, mock_session, tmp_path, monkeypatch,
+    ):
+        # ECSProvider.exec polls list_tasks for up to 5 min (rc-e5u.46.6)
+        # waiting for a task that has its ExecuteCommandAgent ready. With
+        # taskArns=[] forever (mocked) the loop would poll the full budget,
+        # so tests MUST set RC_EXEC_WAIT_TIMEOUT_S=0 to short-circuit.
+        monkeypatch.setenv("RC_EXEC_WAIT_TIMEOUT_S", "0")
+        monkeypatch.setenv("RC_EXEC_WAIT_INTERVAL_S", "0")
         mock_session.client.return_value.list_tasks.return_value = {"taskArns": []}
         ctx = _ctx(tmp_path)
         result = provider.exec(ctx, "web", ["ls"])

@@ -153,7 +153,12 @@ class TestLogsAgainstMoto:
 
 class TestExecAgainstMoto:
     @mock_aws
-    def test_exec_no_tasks_returns_error(self, tmp_path):
+    def test_exec_no_tasks_returns_error(self, tmp_path, monkeypatch):
+        # See ECSProvider.exec: poll budget defaults to 5 min via
+        # RC_EXEC_WAIT_TIMEOUT_S. Tests that mock empty taskArns MUST
+        # zero this out or the test hangs for 5 min.
+        monkeypatch.setenv("RC_EXEC_WAIT_TIMEOUT_S", "0")
+        monkeypatch.setenv("RC_EXEC_WAIT_INTERVAL_S", "0")
         _seed_cluster_and_services("moto-cluster", {"web": 0})
         provider = ECSProvider(session_factory=_session_factory())
         result = provider.exec(_ctx(tmp_path), "web", ["ls"])
