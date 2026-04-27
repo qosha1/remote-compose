@@ -74,6 +74,16 @@ class Framework:
     testing_defaults_env: dict[str, str] = field(default_factory=dict)
     testing_defaults_marker_keys: tuple[str, ...] = ()
     host_header_rewrite: Optional[str] = None
+    # rc-e5u.35.7: per-framework lifecycle hooks injected when a service
+    # declares ``framework: <name>`` (or detect_framework matches via
+    # Dockerfile markers). Each entry is ``hook_name -> argv``; cli_v2
+    # merges them into ServiceSpec.lifecycle for hooks not already
+    # declared in rc.yml. Examples:
+    #   django: createsuperuser, shell, collectstatic
+    #   rails:  console, db:seed
+    # Users can still override per-hook in rc.yml — explicit declarations
+    # win over framework defaults.
+    lifecycle_hooks: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,24 @@ DJANGO = Framework(
     },
     testing_defaults_marker_keys=("DJANGO_ALLOWED_HOSTS",),
     host_header_rewrite="localhost",
+    lifecycle_hooks={
+        # `rc lifecycle createsuperuser <svc>` for one-off admin user.
+        # --noinput honors DJANGO_SUPERUSER_EMAIL / _USERNAME / _PASSWORD
+        # env vars (USERNAME_FIELD-aware: works on either pk model).
+        "createsuperuser": (
+            "python", "manage.py", "createsuperuser", "--noinput",
+        ),
+        # Static-file collection — typically already in /start, but
+        # exposed as a hook for re-running after manual asset changes.
+        "collectstatic": (
+            "python", "manage.py", "collectstatic", "--noinput",
+        ),
+        # Interactive shell. CLI uses interactive=True via the lifecycle
+        # subcommand, attaching stdin/tty.
+        "shell": ("python", "manage.py", "shell"),
+        # Database shell — same pattern.
+        "dbshell": ("python", "manage.py", "dbshell"),
+    },
 )
 
 RAILS = Framework(
@@ -121,6 +149,16 @@ RAILS = Framework(
     },
     testing_defaults_marker_keys=("RAILS_HOSTS",),
     host_header_rewrite=None,
+    lifecycle_hooks={
+        "console": ("bundle", "exec", "rails", "console"),
+        "dbconsole": ("bundle", "exec", "rails", "dbconsole"),
+        # db:seed is destructive on schema-only seeds; --no-bundle skipped
+        # because most users want the bundle env vars resolved.
+        "seed": ("bundle", "exec", "rails", "db:seed"),
+        # rails routes — useful for verifying route table inside the live
+        # container after a deploy (compares ALB host-routing vs app-side).
+        "routes": ("bundle", "exec", "rails", "routes"),
+    },
 )
 
 PHOENIX = Framework(
@@ -138,6 +176,12 @@ PHOENIX = Framework(
     },
     testing_defaults_marker_keys=("PHX_HOST",),
     host_header_rewrite=None,
+    lifecycle_hooks={
+        # `iex -S mix` — the canonical Phoenix REPL.
+        "console": ("iex", "-S", "mix"),
+        "seed": ("mix", "run", "priv/repo/seeds.exs"),
+        "rollback": ("mix", "ecto.rollback"),
+    },
 )
 
 

@@ -210,6 +210,70 @@ def _service_command(svc_compose: dict) -> list[str]:
     return []
 
 
+def _merge_framework_lifecycle(
+    svc: "object",
+    svc_compose: dict,
+    compose_path: Path,
+) -> dict[str, dict]:
+    """Merge framework preset lifecycle hooks into a service's lifecycle dict.
+
+    rc-e5u.35.7. The user's explicit rc.yml hooks always win; framework
+    presets fill gaps for hooks the user didn't declare. The framework is
+    resolved in priority order:
+      1. ``services.<svc>.framework`` if explicitly set in rc.yml
+      2. otherwise, ``frameworks.detect_framework`` against the compose
+         service's Dockerfile (lights up the same surface for users who
+         don't bother to declare it)
+
+    Returns the merged lifecycle dict in the shape ServiceSpec.lifecycle
+    expects (``hook_name -> {command, auto_on_deploy, run_once,
+    interactive, probe}``). Framework-injected hooks default to
+    auto_on_deploy=False / run_once=False / interactive=False / probe=None;
+    the user can override these by declaring a full lifecycle entry under
+    rc.yml.
+    """
+    from .frameworks import detect_framework, framework_by_name
+
+    out: dict[str, dict] = {}
+    # 1. Start with the user's explicit hooks — these win on collision.
+    for hook_name, h in (getattr(svc, "lifecycle", None) or {}).items():
+        out[hook_name] = {
+            "command": list(h.command),
+            "auto_on_deploy": h.auto_on_deploy,
+            "run_once": h.run_once,
+            "interactive": h.interactive,
+            "probe": list(h.probe) if h.probe else None,
+        }
+
+    # 2. Framework resolution: explicit field wins, else detect.
+    explicit_name = getattr(svc, "framework", None)
+    fw = None
+    if explicit_name:
+        fw = framework_by_name(explicit_name)
+    if fw is None:
+        fw = detect_framework(svc_compose, compose_path)
+    if fw is None or not fw.lifecycle_hooks:
+        return out
+
+    # 3. Fill in framework-provided hooks the user didn't declare.
+    # Interactive hooks (shell, console, dbshell, dbconsole) get
+    # interactive=True so the lifecycle CLI attaches a tty when running.
+    interactive_hook_names = {
+        "shell", "console", "dbshell", "dbconsole", "routes",
+    }
+    for hook_name, argv in fw.lifecycle_hooks.items():
+        if hook_name in out:
+            continue
+        out[hook_name] = {
+            "command": list(argv),
+            "auto_on_deploy": False,
+            "run_once": False,
+            "interactive": hook_name in interactive_hook_names,
+            "probe": None,
+        }
+    return out
+
+
 def _compose_named_volume_mounts(svc_compose: dict) -> list[dict[str, str]]:
     """Extract NAMED-volume mounts from a compose service.
 
@@ -478,16 +542,9 @@ def build_deploy_context(
                 extra_ports=extras,
                 env=env,
                 command=cmd,
-                lifecycle={
-                    hook_name: {
-                        "command": list(h.command),
-                        "auto_on_deploy": h.auto_on_deploy,
-                        "run_once": h.run_once,
-                        "interactive": h.interactive,
-                        "probe": list(h.probe) if h.probe else None,
-                    }
-                    for hook_name, h in (svc.lifecycle or {}).items()
-                },
+                lifecycle=_merge_framework_lifecycle(
+                    svc, svc_compose, compose_path,
+                ),
                 domain=svc.domain,
                 aliases=list(svc.aliases or []),
             )

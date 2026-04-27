@@ -141,6 +141,12 @@ class ServiceV2:
     # nginx Host: rewrites. Hand-editable for any non-secret toggle a user
     # wants applied at the rc.yml layer rather than touching compose.
     env: dict[str, str] = field(default_factory=dict)
+    # rc-e5u.35.7: explicit framework hint. When set, cli_v2 merges the
+    # named preset's lifecycle_hooks into this service's lifecycle dict
+    # for hooks the user hasn't declared. ``django`` / ``rails`` /
+    # ``phoenix`` are built-in (see remote_compose.frameworks).
+    # Auto-detection from the Dockerfile still runs when this is None.
+    framework: Optional[str] = None
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -490,6 +496,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
                 if isinstance(raw.get("env"), dict)
                 else (raw["env"] if "env" in raw else {})
             ),
+            framework=raw.get("framework"),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
