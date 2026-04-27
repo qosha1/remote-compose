@@ -105,25 +105,42 @@ resolves them at container start.
 ## Dependency graph (what imports what)
 
 ```
-  ┌────────────────────────────────────────────────────────────────┐
-  │                           cli.py                               │
-  └───────┬──────────────┬───────────────┬──────────────┬──────────┘
-          │              │               │              │
-          ▼              ▼               ▼              ▼
-      config/       provider/        image/         (legacy)
-      v2_schema     __init__,        builder,       services/
-      migrate       base  (ABC)      pusher         …
-                       │                             (being retired)
-            ┌──────────┼───────────────────┐
-            ▼          ▼                   ▼
-         fake.py    ecs/provider.py    k8s/provider.py (future)
-            │          │                   │
-            │          ├──▶ boto3 [ecs]    ├──▶ kubernetes [k8s]
-            │          │                   │
-            └──────────┴─▶ terraform/      ◀─┘
-                            runner         (subprocess wrapper)
-                            emitter        (Jinja2 renderer)
-                            backend        (HCL block generator)
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  cli.py (100 lines: thin entry point — registers commands)      │
+  └──────────────────────┬───────────────────────────────────────────┘
+                         │
+                         ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ cli_commands/  (per-command modules: deploy, destroy, plan,     │
+  │                 secrets, db, exec, status, restart, logs,        │
+  │                 copilot, compose, audit, dev, fix, lifecycle,    │
+  │                 init, migrate, provision, up, list_stacks,       │
+  │                 service_ops, ...)                                │
+  │                                                                  │
+  │  cli_commands/_dispatchers.py  v2-aware shared helpers           │
+  │                                (_secrets_push_v2, _db_push_v2,   │
+  │                                 _exec_v2, _load_v2_if_present)   │
+  │  cli_commands/_legacy.py       v1-only helpers (Django bootstrap,│
+  │                                ECS exec resolve, backup engine)  │
+  └────┬───────────┬──────────────┬──────────────┬──────────────────┘
+       │           │              │              │
+       ▼           ▼              ▼              ▼
+   config/      provider/      image/        (legacy)
+   v2_schema    __init__       builder       services/
+   migrate      base (ABC)     pusher        ...
+   _schema_types                              (being retired)
+   _schema_parser
+                    │
+            ┌───────┼───────────────────────┐
+            ▼       ▼                       ▼
+       fake.py   ecs/provider.py      k8s/provider.py (future)
+            │       │                       │
+            │       ├──▶ boto3 [ecs]        ├──▶ kubernetes [k8s]
+            │       │                       │
+            └───────┴─▶ terraform/         ◀┘
+                          runner    (subprocess wrapper)
+                          emitter   (Jinja2 renderer)
+                          backend   (HCL block generator)
 ```
 
 Rules (enforced by human review + extras in `pyproject.toml`):
@@ -186,20 +203,42 @@ sanitizes errors and picks the exit code; `--verbose` promotes to traceback.
 
 ```
 remote_compose/
-├── cli.py                       # Click entry point (rc deploy / plan / …)
+├── cli.py                       # Click entry point (100 lines — thin
+│                                # registration of commands from cli_commands/)
+│
+├── cli_commands/                # Per-command modules (sdb.2 refactor)
+│   ├── _dispatchers.py          # v2-aware helpers (_secrets_push_v2,
+│   │                            # _db_push_v2, _exec_v2, _load_v2_if_present)
+│   ├── _legacy.py               # v1-only helpers (_load_config,
+│   │                            # _bootstrap_django, _resolve_ecs_exec_target,
+│   │                            # backup engines, Django ORM bridge)
+│   ├── deploy.py / up.py        # rc deploy / rc up
+│   ├── destroy.py               # rc destroy + rc reap
+│   ├── plan.py / migrate.py     # rc plan / rc migrate
+│   ├── status.py / service_ops.py  # rc status / restart / logs
+│   ├── secrets.py / db.py       # rc secrets / rc db (group + 5 subcmds)
+│   ├── exec.py / lifecycle.py   # rc exec / rc lifecycle
+│   ├── copilot.py / compose.py  # rc copilot import / rc compose import
+│   ├── audit.py                 # rc audit
+│   ├── dev.py / fix.py          # rc dev / rc fix
+│   ├── doctor.py / init.py      # rc doctor / rc install / rc init
+│   ├── provision.py             # rc provision (v1 imperative)
+│   └── list_stacks.py           # rc list (ephemeral inventory)
 │
 ├── config/                      # rc.yml parsing
 │   ├── v1_schema.py             # legacy loader
-│   ├── v2_schema.py             # dataclass model + validation
+│   ├── v2_schema.py             # public re-export (sdb.7 split)
+│   ├── _schema_types.py         # dataclasses + per-instance validate()
+│   ├── _schema_parser.py        # _parse_* + cross-instance validation
 │   └── migrate.py               # v1 → v2 converter (used by `rc migrate`)
 │
 ├── provider/                    # Pluggable cloud deployers
 │   ├── base.py                  # Provider ABC + dataclasses (no cloud deps)
 │   ├── __init__.py              # registry: register() / get() / available()
 │   ├── fake.py                  # FakeProvider — in-memory, test baseline
-│   └── ecs/                     # AWS ECS (Fargate today; EC2 in rc-e5u.13)
+│   └── ecs/                     # AWS ECS (Fargate + EC2 launch types)
 │       ├── provider.py          # ECSProvider class
-│       └── templates/           # .tf.j2 Jinja templates
+│       └── templates/           # .tf.j2 Jinja templates (16 files)
 │
 ├── terraform/                   # Terraform subprocess + HCL tooling
 │   ├── runner.py                # TerraformRunner + RecordingTerraformRunner
@@ -210,9 +249,30 @@ remote_compose/
 │   ├── builder.py               # ImageBuilder (docker build)
 │   └── pusher.py                # ImagePusher (docker push with auth hook)
 │
+├── copilot/                     # rc copilot import — AWS Copilot migration
+│   ├── discover.py              # walk copilot/ tree → CopilotApp
+│   └── translate.py             # 5 translators + composer
+│
+├── compose_import.py            # rc compose import — scaffold rc.yml from
+│                                # an existing docker-compose.yml
+├── audit.py                     # rc audit — sweep AWS for project resources
+├── dblocal.py                   # rc db dump-local — docker exec pg_dump
+├── dev_push.py                  # rc dev push — stream local source to EFS
+├── envfile.py                   # .env parser (used by provider + db push)
+├── ephemeral.py                 # local registry: ~/.config/remote-compose/
+├── doctor.py                    # rc doctor — preflight + repair
+├── frameworks.py                # framework presets (django/rails/phoenix)
+├── fix_nginx_conf.py            # rc fix nginx-conf — generate ECS nginx
+├── init_from_compose.py         # rc init --from-compose scaffolder
+│
 └── services/                    # Legacy imperative deploy pipeline
-    │                            # Retained on main; being retired provider-by-provider
-    │                            # (see rc-e5u.10 for deprecation plan)
+    │                            # ~18,850 lines across ~40 files. Retained
+    │                            # on main and on portable-deploy because v1
+    │                            # commands (provision, deploy fallback,
+    │                            # secrets push fallback, status fallback,
+    │                            # db backup/restore) still use it. Will be
+    │                            # deleted as a single PR after rc-e5u.28
+    │                            # cuts start-simpli to v2.
     └── ...
 ```
 
@@ -421,14 +481,36 @@ should provision, verify, and destroy within ~10 minutes; the reap cron
 
 ## Current state
 
-- **Closed & tested**: Provider ABC, FakeProvider, rc.yml v2 + migrate CLI,
-  terraform/image modules, ECSProvider (emit_terraform + lifecycle methods).
-  **366 unit tests pass, 9 skip (real-terraform/AWS tiers).**
-- **Open** (tracked in bd): EC2 launch type, EFS, secrets integration, custom
-  domain + ACM/Route 53, contract-suite enrollment, Kubernetes provider,
-  legacy-service deprecation.
-- **Legacy**: the imperative 15-step pipeline in `remote_compose/services/`
-  and `remote_compose/management/commands/` remains functional on `main`.
-  It is deprecated in-place and retired provider-by-provider per rc-e5u.10.
+- **Closed & tested**: Provider ABC + contract suite, FakeProvider,
+  ECSProvider (deploy/destroy/redeploy/plan/status/logs/exec/rollback,
+  EC2 launch type, EFS volumes, per-key SM secrets, custom domain +
+  ACM + Route 53 multi-SAN, ALB host-based routing, ephemeral stacks
+  via TTL, dev-mode hot-reload). rc.yml v2 + migrate CLI. Terraform/
+  image modules. AWS Copilot importer. Compose-only scaffolder.
+  Audit sweep. Local pg_dump → S3 → restore round-trip.
 
-See `bd list --status=open` for the authoritative in-flight work.
+  **Test count: 1,397 unit + contract pass, 4 skip; 36 integration
+  pass (real terraform binary + moto).** Run them via the canonical
+  3-tier invocation in CLAUDE.md → Testing.
+
+- **Open** (tracked in bd, see `bd list --status=open` for the
+  authoritative list): Kubernetes provider (rc-e5u.8), direct EC2-VM
+  provider for active service mgmt + agents (remote-compose-7ao),
+  legacy-service deprecation tracker (remote-compose-sdb.5),
+  FakeProvider relocation out of installed package
+  (remote-compose-sdb.10), and the e2e-tier execution beads under
+  remote-compose-oug for sentinal/Mini-v4/multi-domain.
+
+- **Legacy**: the imperative pipeline in `remote_compose/services/`
+  is ~18,850 lines across ~40 files (efs_service 1396, compose_converter
+  1229, ecs_service 1124, compose_preprocessor 1022, ecs_deployment_service
+  935, image_build_service 932). Still used by:
+    - `rc provision` (v1 imperative VPC/ALB/SG setup)
+    - `rc deploy` v1 fallback (when rc.yml has no version: 2)
+    - `rc secrets push` v1 fallback
+    - `rc status` v1 fallback
+    - `rc db backup` / `rc db restore`
+    - `rc list` ephemeral (uses local registry, not legacy services)
+  All accessed through `cli_commands/_legacy.py`. Production deploy
+  of start-simpli still uses these paths. Slated for mass deletion
+  in a single PR after rc-e5u.28 cuts start-simpli to v2.
