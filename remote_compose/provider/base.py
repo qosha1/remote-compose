@@ -143,6 +143,13 @@ class ServiceStatus:
 
 @dataclass
 class StatusReport:
+    """Result of :meth:`Provider.status`.
+
+    services: one ServiceStatus per service in ctx (in deterministic order).
+    cluster_health: provider-defined coarse string ('healthy' / 'inactive' /
+        'degraded'). Read by `rc status` for the summary line.
+    ingress_url: public-facing URL when one exists (ECS: ALB DNS name).
+    """
     services: list[ServiceStatus]
     cluster_health: str
     ingress_url: Optional[str] = None
@@ -150,6 +157,19 @@ class StatusReport:
 
 @dataclass
 class DeployResult:
+    """Result of :meth:`Provider.deploy` / redeploy / rollback.
+
+    revision_id: provider-specific stable id for this revision. Caller
+        treats it as opaque. Identical (config_hash, ctx) → identical id.
+    services: service names actually rolled. Subset of ctx.services when
+        services_filter was set.
+    duration_s: wall-clock seconds.
+    warnings: non-fatal observations (empty secrets, dev_volumes without
+        --dev mode, image-build skipped due to no compose build:, etc).
+        Rendered to stderr by `rc deploy`.
+    terraform_outputs: provider-specific blob exposed by `terraform output
+        -json`. ECS surfaces alb_dns_name + ecr_repositories + efs_*.
+    """
     revision_id: str
     services: list[str]
     duration_s: float
@@ -159,6 +179,13 @@ class DeployResult:
 
 @dataclass
 class PlanResult:
+    """Result of :meth:`Provider.plan`.
+
+    Counts come from terraform's "Plan: N to add, N to change, N to
+    destroy" line. raw_plan carries full stdout. warnings accumulates
+    compose-level lint findings (rc.yml schema warnings, unsupported
+    compose features) — see compose_warnings.collect_compose_warnings.
+    """
     create: int
     update: int
     destroy: int
@@ -168,23 +195,100 @@ class PlanResult:
 
 @dataclass
 class ExecResult:
+    """Result of :meth:`Provider.exec` (non-interactive only).
+
+    Interactive exec replaces the current process and never returns a
+    value. For non-interactive: exit_code is the inner command's real
+    exit code (parsed from a sentinel for ECS — SSM exec channel doesn't
+    surface it natively). stdout/stderr are captured strings; trailing
+    newline preserved as-is.
+    """
     exit_code: int
     stdout: str
     stderr: str
 
 
 class Provider(ABC):
-    """Abstract base class every provider implementation extends."""
+    """Abstract base class every provider implementation extends.
+
+    Contract semantics are enforced by tests/contract/test_provider_contract.py:
+    every concrete provider runs against the same suite, and any new provider
+    that passes the suite is interchangeable with ECSProvider / FakeProvider /
+    KubernetesProvider from the rest of the system's POV.
+
+    All methods take a :class:`DeployContext` describing the target stack
+    (project name, compose, rc.yml v2, services, secrets). Methods may read
+    from ctx but should not mutate it — the only ctx mutations rc itself
+    performs are setting ``ctx.dev_mode`` (rc up --dev) and ``ctx.expires_at``
+    (rc deploy --ttl) BEFORE calling the provider.
+
+    Error contract: provider methods raise :class:`ProviderError` (or a
+    subclass) for provider-attributable failures. They MAY also let
+    :class:`subprocess.SubprocessError` / boto3 ``ClientError`` propagate
+    when the failure is upstream and providing a wrapped message would only
+    obscure the cause. The CLI catches ProviderError and renders cleanly;
+    bare exceptions render with a stack trace (intentional — they're bugs).
+
+    Idempotency: deploy / destroy / plan / redeploy / emit_terraform must
+    all be safe to call repeatedly with the same context. status / logs /
+    exec are read-only or per-call and naturally idempotent.
+
+    Subclass-only attribute: ``name`` is the lowercase identifier used by
+    ``rc.yml`` ``provider:`` and the registry. Must match the key passed
+    to :func:`provider.register`.
+    """
 
     name: str
 
     @abstractmethod
     def emit_terraform(self, ctx: DeployContext, out_dir: Path) -> Path:
-        """Write a self-contained terraform module. Does not run terraform."""
+        """Write a self-contained terraform module to ``out_dir``.
+
+        Args:
+            ctx: Source context. The provider reads project, services,
+                secrets, provider_config, tf_backend_config, dev_mode,
+                expires_at. Compose-derived fields (build_context, image)
+                are honored when present but optional.
+            out_dir: Destination directory for the .tf files. Created if
+                missing. Existing files in this directory may be
+                overwritten — the caller owns lifecycle.
+
+        Returns:
+            The same ``out_dir`` (resolved absolute), as a convenience for
+            chaining into ``TerraformRunner(out_dir)``.
+
+        Raises:
+            ProviderConfigError: ctx is missing a required field
+                (e.g. provider_config.ecs.region for ECSProvider) or
+                contains an invalid value (cpu not in Fargate's allowed
+                ladder, EFS volume without uid/gid, etc.).
+
+        Side effects: filesystem writes only — never runs terraform,
+        boto3, or docker. Pure emission.
+        """
 
     @abstractmethod
     def plan(self, ctx: DeployContext) -> PlanResult:
-        """Emit terraform and run ``terraform plan``."""
+        """Emit terraform and run ``terraform plan``.
+
+        Args:
+            ctx: Same shape as emit_terraform.
+
+        Returns:
+            PlanResult with create/update/destroy resource counts parsed
+            from the plan output. ``raw_plan`` carries the full stdout
+            so callers can render or persist it. ``warnings`` collects
+            compose-level lint findings (rc.yml schema warnings,
+            unsupported compose features, etc.).
+
+        Raises:
+            ProviderConfigError: ctx invalid (see emit_terraform).
+            ProviderError: terraform binary missing or plan exited
+                non-zero. The wrapped TerraformError stderr is preserved
+                in the message.
+
+        Idempotent. Runs `terraform init` (no -upgrade) before plan.
+        """
 
     @abstractmethod
     def deploy(
@@ -193,28 +297,81 @@ class Provider(ABC):
         services_filter: Optional[list[str]] = None,
         tag: Optional[str] = None,
     ) -> DeployResult:
-        """Idempotent apply: emit tf, terraform apply, build/push images, update services.
+        """Idempotent apply: emit tf, terraform apply, build/push images, roll services.
 
-        When ``services_filter`` is set, only those services have their images
-        rebuilt + pushed + force-rolled. Other services keep their existing
-        task-def revision. Terraform apply still runs (idempotent, may be a
-        no-op) so any rc.yml-driven infra changes still take effect. Used by
-        ``rc deploy --services <name>`` for fast iteration on a single service.
+        Args:
+            ctx: Source context.
+            services_filter: When set, only these services have images
+                rebuilt + pushed + force-rolled. Other services keep
+                their existing task-def revision. Terraform apply still
+                runs (idempotent, may be a no-op) so rc.yml-driven infra
+                changes still take effect. Used by ``rc deploy --services
+                <name>`` for fast single-service iteration.
+            tag: When set (and not 'latest'), provider-specific shortcut:
+                check the registry for ``<repo>:<tag>``; if present, skip
+                docker build and re-tag the existing image as ``:latest``
+                so the task def picks it up. Used by ``rc deploy --tag
+                <known-good>`` for rollback or pinned-image deploys.
+                ~2-5s per service. When None, build :latest as usual.
 
-        When ``tag`` is set (and not 'latest'), provider-specific shortcut:
-        ECS checks ECR for ``<repo>:<tag>`` first; if present, docker build
-        is skipped and the existing image is re-tagged as ``:latest`` so the
-        task def picks it up. Used by ``rc deploy --tag <known-good>`` for
-        instant rollback / pinned-image deploys. ~2-5s per service.
+        Returns:
+            DeployResult with the new revision_id (provider-specific,
+            stable per (config_hash, ctx)), the services that were
+            actually rolled, total duration, and any warnings (e.g.
+            empty-secrets detection, dev_volumes without dev_mode).
+            ``terraform_outputs`` carries provider-specific data (for
+            ECS: ALB DNS name, ECR repo URLs, EFS file system IDs).
+
+        Raises:
+            ProviderConfigError: ctx invalid.
+            ProviderError: terraform apply failed, image build failed,
+                ECS service update failed.
+
+        Idempotent: re-running with the same ctx is a no-op apply +
+        forced rollout.
         """
 
     @abstractmethod
     def redeploy(self, ctx: DeployContext, services: Optional[list[str]] = None) -> DeployResult:
-        """Force a new revision without a config change."""
+        """Force a new task revision without changing config or rebuilding images.
+
+        Args:
+            ctx: Source context.
+            services: When set, only these services are rolled. When
+                None, every service in ctx is rolled.
+
+        Returns:
+            DeployResult shaped like deploy(). Skips image build, skips
+            terraform apply.
+
+        Raises:
+            ProviderError: ECS service update failed.
+
+        Use case: env vars rotated out-of-band (e.g. SM secret value
+        changed via `rc secrets push --no-rollout`), and the user wants
+        running tasks to pick them up without a code change.
+        """
 
     @abstractmethod
     def status(self, ctx: DeployContext) -> StatusReport:
-        """Inspect live infrastructure and return per-service state."""
+        """Inspect live infrastructure and return per-service state.
+
+        Args:
+            ctx: Source context.
+
+        Returns:
+            StatusReport with one ServiceStatus per service in ctx. Each
+            entry's running_revision / latest_revision drives the
+            ``is_stale`` property used by ``rc deploy --reconcile``.
+            ``ingress_url`` is the public-facing URL when one exists
+            (for ECS: ALB DNS name).
+
+        Raises:
+            ProviderError: AWS API failure during describe-services /
+                describe-task-definition.
+
+        Read-only. Does not mutate AWS state.
+        """
 
     @abstractmethod
     def logs(
@@ -224,7 +381,26 @@ class Provider(ABC):
         follow: bool = False,
         tail: int = 100,
     ) -> Iterator[str]:
-        """Stream or tail container logs for one service."""
+        """Stream or tail container logs for one service.
+
+        Args:
+            ctx: Source context.
+            service: Service name (must be in ctx.services).
+            follow: When True, yield indefinitely as new lines arrive.
+                When False, yield ``tail`` historical lines and stop.
+            tail: When ``follow`` is False, max number of lines to return.
+
+        Yields:
+            Log lines as strings, in chronological order, no trailing
+            newline. Each line is one container stdout/stderr write.
+
+        Raises:
+            ProviderNotFoundError: ``service`` not in ctx, or has no
+                task definition deployed yet.
+            ProviderError: log group / log stream lookup failed.
+
+        Read-only.
+        """
 
     @abstractmethod
     def exec(
@@ -234,7 +410,34 @@ class Provider(ABC):
         command: list[str],
         interactive: bool = False,
     ) -> ExecResult:
-        """Run a command in a live container of the named service."""
+        """Run a command in a live container of the named service.
+
+        Args:
+            ctx: Source context.
+            service: Service name (must be in ctx.services).
+            command: Argv to run inside the container. NOT a shell
+                string — the provider may wrap with ``sh -c`` for
+                multi-arg commands but quoting is the caller's job.
+            interactive: When True, the provider exec replaces the
+                current process with an interactive session (stdin/stdout
+                wired to the user's terminal). The return is unreachable
+                — caller never observes the result. When False, captures
+                stdout/stderr/exit code and returns them.
+
+        Returns:
+            ExecResult with the command's exit_code, stdout, stderr.
+            Only meaningful when interactive=False.
+
+        Raises:
+            ProviderNotFoundError: ``service`` not in ctx, or no running
+                tasks for the service.
+            ProviderError: SSM / exec channel setup failed (missing
+                session-manager-plugin, IAM denial, agent not ready).
+
+        For ECS, exit_code is parsed from a sentinel injected by the
+        wrapper: SSM doesn't surface the inner command's exit code
+        directly. See ECSProvider._SENTINEL_BEGIN/END/EXIT.
+        """
 
     @abstractmethod
     def rollback(
@@ -242,8 +445,48 @@ class Provider(ABC):
         ctx: DeployContext,
         to_revision: Optional[str] = None,
     ) -> DeployResult:
-        """Revert to the previous (or specified) deployed state."""
+        """Revert to the previous (or specified) deployed state.
+
+        Args:
+            ctx: Source context.
+            to_revision: Revision id to roll back to. When None, picks
+                the most recent revision other than the active one.
+
+        Returns:
+            DeployResult for the rolled-back revision. revision_id is
+            the new clone (rolling back is itself a new revision —
+            history is append-only).
+
+        Raises:
+            ProviderError: nothing to roll back to (less than 2
+                revisions exist), or terraform/cloud failure during
+                the revert.
+            ProviderNotFoundError: ``to_revision`` is set but no such
+                revision exists.
+
+        Local-backend providers may refuse: terraform rollback against
+        a local state file isn't safe (state could have drifted between
+        the original apply and now). ECS today rejects rollback when
+        tf_backend_config.type == "local"; users with remote backends
+        (s3) can use it.
+        """
 
     @abstractmethod
     def destroy(self, ctx: DeployContext) -> None:
-        """Fully remove everything this provider created for ctx."""
+        """Fully remove everything this provider created for ctx.
+
+        Args:
+            ctx: Source context.
+
+        Returns:
+            None.
+
+        Raises:
+            ProviderError: terraform destroy failed.
+
+        Idempotent: re-running on already-destroyed state is a no-op
+        (terraform destroy is itself idempotent). Resources NOT under
+        this provider's terraform module (out-of-band created secrets,
+        manually-imported buckets) are left alone — see ``rc audit``
+        for post-destroy leftover detection.
+        """
