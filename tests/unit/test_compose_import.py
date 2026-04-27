@@ -136,6 +136,66 @@ class TestDefaults:
 
 
 # ---------------------------------------------------------------------
+# --exclude (rc-e5u.41.3): drop dev-only sidecars from the deploy set
+# ---------------------------------------------------------------------
+
+
+class TestExcludeFlag:
+    def test_excluded_services_appear_in_compose_exclude_block(self, tmp_path):
+        _write_compose(
+            tmp_path,
+            "  api:\n    image: busybox\n"
+            "  ngrok:\n    image: ngrok/ngrok:latest\n"
+            "  docs:\n    image: busybox\n",
+        )
+        out = scaffold_rc_yml(
+            tmp_path / "docker-compose.yml",
+            project="m",
+            exclude=["ngrok", "docs"],
+        )
+        cfg = yaml.safe_load(out)
+        # Stable sorted order in output for diff-friendly behavior.
+        assert cfg["compose"]["exclude"] == ["docs", "ngrok"]
+
+    def test_excluded_services_not_in_overrides_block(self, tmp_path):
+        # ngrok is a worker-shaped image with worker hint in name; without
+        # --exclude it'd land in services{}. With --exclude it must be
+        # entirely absent from services{}.
+        _write_compose(
+            tmp_path,
+            "  worker-cron:\n    image: app:latest\n"
+            "  api:\n    image: busybox\n    ports: ['8000:8000']\n",
+        )
+        out = scaffold_rc_yml(
+            tmp_path / "docker-compose.yml",
+            project="m",
+            exclude=["worker-cron"],
+        )
+        cfg = yaml.safe_load(out)
+        # api still gets the public+port override; worker-cron is gone.
+        assert "api" in cfg.get("services", {})
+        assert "worker-cron" not in cfg.get("services", {})
+        assert cfg["compose"]["exclude"] == ["worker-cron"]
+
+    def test_unknown_excluded_service_raises(self, tmp_path):
+        _write_compose(tmp_path, "  api:\n    image: busybox\n")
+        with pytest.raises(ValueError, match="not in compose"):
+            scaffold_rc_yml(
+                tmp_path / "docker-compose.yml",
+                project="m",
+                exclude=["does-not-exist"],
+            )
+
+    def test_empty_exclude_list_is_no_op(self, tmp_path):
+        _write_compose(tmp_path, "  api:\n    image: busybox\n")
+        out = scaffold_rc_yml(
+            tmp_path / "docker-compose.yml", project="m", exclude=[],
+        )
+        cfg = yaml.safe_load(out)
+        assert "compose" not in cfg
+
+
+# ---------------------------------------------------------------------
 # Round-trip: emitted rc.yml parses through the v2 schema
 # ---------------------------------------------------------------------
 

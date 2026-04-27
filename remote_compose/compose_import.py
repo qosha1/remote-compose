@@ -39,22 +39,42 @@ _WORKER_HINTS = ("celery", "worker", "beat", "scheduler", "cron", "sidekiq")
 
 
 def scaffold_rc_yml(
-    compose_path: Path | str, project: str | None = None,
+    compose_path: Path | str,
+    project: str | None = None,
+    exclude: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     """Read a docker-compose.yml and return rc.yml v2 content as a string.
 
-    `project` defaults to the parent dir name of the compose file.
+    ``project`` defaults to the parent dir name of the compose file.
+    ``exclude`` is a list of compose service names to drop from the
+    deploy set — they appear under ``compose.exclude`` in the output so
+    cli_v2.build_deploy_context honors the same shape it does for
+    rc-up scaffolding. Useful for filtering dev-only sidecars
+    (LinkedIn worker, ngrok, eval-app, docs builder, etc.) without
+    having to hand-edit the resulting rc.yml.
     """
     compose_path = Path(compose_path)
     project = project or compose_path.parent.resolve().name or "myapp"
+    excluded_set = {e.strip() for e in (exclude or []) if e and e.strip()}
 
     with compose_path.open() as f:
         compose = yaml.safe_load(f) or {}
     compose_services = compose.get("services") or {}
 
+    # Validate the exclude list: every name must exist in compose, otherwise
+    # the user has a typo and would silently get a no-op exclusion.
+    unknown = excluded_set - set(compose_services.keys())
+    if unknown:
+        raise ValueError(
+            f"--exclude lists service(s) not in compose: {sorted(unknown)}. "
+            f"Known: {sorted(compose_services.keys())}"
+        )
+
     services_section: dict[str, Any] = {}
     env_file_refs: list[tuple[str, list[str]]] = []  # [(svc_name, [paths]), ...]
     for svc_name, raw in compose_services.items():
+        if svc_name in excluded_set:
+            continue
         if not isinstance(raw, dict):
             continue
         overrides = _infer_service_overrides(svc_name, raw)
@@ -83,6 +103,9 @@ def scaffold_rc_yml(
     }
     if services_section:
         rc_yml["services"] = services_section
+    if excluded_set:
+        # Stable order for diff-friendliness.
+        rc_yml["compose"] = {"exclude": sorted(excluded_set)}
 
     # Render with a leading explanatory comment + env_file hints.
     out = StringIO()

@@ -3200,9 +3200,14 @@ def compose_group():
 @click.option('--project', 'project_name', default=None,
               help='rc.yml v2 project field. Defaults to the parent dir name '
                    'of the compose file.')
+@click.option('--exclude', 'exclude_csv', default=None,
+              help='Comma-separated list of compose service names to drop '
+                   'from the deploy set (lands under compose.exclude in '
+                   'the output). Useful for dev-only sidecars: e.g. '
+                   '--exclude=ngrok,docs-builder,eval-app.')
 @click.option('--force', is_flag=True,
               help='Overwrite an existing rc.yml at --out.')
-def compose_import(compose_file, out_path, project_name, force):
+def compose_import(compose_file, out_path, project_name, exclude_csv, force):
     """Scaffold a starter rc.yml v2 from an existing docker-compose.yml.
 
     \b
@@ -3221,6 +3226,7 @@ def compose_import(compose_file, out_path, project_name, force):
     Examples:
       rc compose import
       rc compose import --from docker-compose.prod.yml --project myapp
+      rc compose import --exclude=ngrok,eval-app,docs
     """
     from pathlib import Path as _Path
     from remote_compose.compose_import import scaffold_rc_yml
@@ -3235,7 +3241,15 @@ def compose_import(compose_file, out_path, project_name, force):
         )
         raise click.exceptions.Exit(1)
 
-    rc_yml = scaffold_rc_yml(src, project=project_name)
+    excluded = (
+        [s.strip() for s in exclude_csv.split(",") if s.strip()]
+        if exclude_csv else None
+    )
+    try:
+        rc_yml = scaffold_rc_yml(src, project=project_name, exclude=excluded)
+    except ValueError as exc:
+        click.echo(f"rc compose import: {exc}", err=True)
+        raise click.exceptions.Exit(1)
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(rc_yml)
 
