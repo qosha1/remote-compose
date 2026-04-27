@@ -791,366 +791,10 @@ def up(ctx, from_compose, public_service, region, aws_profile,
 # rc status
 # =============================================================================
 
-@cli.command()
-@click.pass_context
-def status(ctx):
-    """Show service status table."""
-    from remote_compose.cli_v2 import dispatch_if_v2
-    if dispatch_if_v2(ctx.obj.get('config_path'), 'status'):
-        return
+# rc status / restart / exec / logs moved to cli_commands/{service_ops,exec}.py
 
-    config = _load_config(ctx.obj.get('config_path'))
-    _bootstrap_django(config)
 
-    project_name = config['project_name']
-    cluster_name = config['cluster']
-
-    from remote_compose.models import ECSCluster, ECSService as ECSServiceModel
-
-    try:
-        cluster = ECSCluster.objects.get(name=cluster_name)
-    except ECSCluster.DoesNotExist:
-        click.echo(f"Error: Cluster '{cluster_name}' not found. Run 'rc provision' first.", err=True)
-        sys.exit(1)
-
-    click.echo(f"\nRemote Compose — {project_name} ({cluster.aws_region})\n")
-
-    services = ECSServiceModel.objects.filter(cluster=cluster)
-
-    if not services.exists():
-        click.echo("  No services deployed yet.")
-        return
-
-    # Try to get live status from AWS
-    from remote_compose.services import ECSDeploymentService
-    deployment_svc = ECSDeploymentService()
-
-    header = f"  {'SERVICE':<24} {'STATUS':<12} {'TASKS':<8} {'TYPE':<16}"
-    click.echo(header)
-    click.echo(f"  {'-' * 60}")
-
-    for svc in services:
-        svc_type = ''
-        svc_config = config.get('services', {}).get(
-            svc.name.replace(f"{project_name}-", ''), {}
-        )
-        svc_type = svc_config.get('type', '')
-
-        try:
-            status_info = deployment_svc.get_service_status(svc)
-            status_str = status_info.get('status', 'unknown')
-            running = status_info.get('running_count', 0)
-            desired = status_info.get('desired_count', 0)
-            tasks_str = f"{running}/{desired}"
-        except Exception:
-            status_str = str(svc.status) if svc.status else 'unknown'
-            tasks_str = f"{svc.running_count or 0}/{svc.desired_count or 0}"
-
-        click.echo(f"  {svc.name:<24} {status_str:<12} {tasks_str:<8} {svc_type:<16}")
-
-    # Show ALB if available
-    try:
-        if cluster.load_balancer:
-            click.echo(f"\n  ALB: {cluster.load_balancer.alb_dns_name}")
-    except Exception:
-        pass
-
-
-# =============================================================================
-# rc restart
-# =============================================================================
-
-@cli.command()
-@click.argument('service', required=False)
-@click.pass_context
-def restart(ctx, service):
-    """Force a new deployment for all or a specific service."""
-    config = _load_config(ctx.obj.get('config_path'))
-    _bootstrap_django(config)
-
-    project_name = config['project_name']
-
-    from remote_compose.models import ECSCluster, ECSService as ECSServiceModel
-    from remote_compose.services import ECSService
-
-    try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
-    except ECSCluster.DoesNotExist:
-        click.echo(f"Error: Cluster '{config['cluster']}' not found.", err=True)
-        sys.exit(1)
-
-    ecs_svc = ECSService()
-    services = ECSServiceModel.objects.filter(cluster=cluster)
-
-    if service:
-        # Try both the bare name and project-prefixed name
-        svc = services.filter(name=service).first() or \
-              services.filter(name=f"{project_name}-{service}").first()
-        if not svc:
-            click.echo(f"Error: Service '{service}' not found.", err=True)
-            sys.exit(1)
-        targets = [svc]
-    else:
-        targets = list(services)
-
-    if not targets:
-        click.echo("No services to restart.")
-        return
-
-    click.echo(f"\nRemote Compose — restarting {'all services' if not service else service}\n")
-
-    for svc in targets:
-        click.echo(f"  Restarting {svc.name}...", nl=False)
-        try:
-            ecs_svc.update_service(svc, force_new_deployment=True)
-            click.echo(" done")
-        except Exception as e:
-            click.echo(f" FAILED ({e})")
-
-    click.echo("\n  Waiting for stability...", nl=False)
-    for svc in targets:
-        try:
-            ecs_svc.wait_for_service_stable(svc, timeout=300)
-        except Exception:
-            pass
-    click.echo(" done")
-
-
-# =============================================================================
-# rc exec
-# =============================================================================
-
-@cli.command(
-    context_settings=dict(
-        ignore_unknown_options=True,
-    ),
-)
-@click.argument('service')
-@click.argument('command', nargs=-1, type=click.UNPROCESSED)
-@click.option('--container', default=None, help='Container name (default: first container)')
-@click.pass_context
-def exec_cmd(ctx, service, command, container):
-    """Execute a command in a running container of a service.
-
-    \b
-    Examples:
-      rc exec django -- python manage.py migrate
-      rc exec django -- /bin/bash
-      rc exec django --container sidecar -- /bin/sh
-    """
-    import shutil
-    import subprocess
-
-    if not command:
-        click.echo("Error: No command specified. Use -- before the command.", err=True)
-        click.echo("Example: rc exec django -- python manage.py shell", err=True)
-        sys.exit(1)
-
-    # Check for session-manager-plugin
-    if not shutil.which('session-manager-plugin'):
-        click.echo(
-            "Error: session-manager-plugin is not installed.\n"
-            "Install it: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html",
-            err=True,
-        )
-        sys.exit(1)
-
-    # v2 path: route through Provider.exec which knows about v2 stacks.
-    # Returns True when handled (rc.yml v2 detected), else falls through.
-    if _exec_v2(ctx.obj.get('config_path'), service, list(command)):
-        return
-
-    config = _load_config(ctx.obj.get('config_path'))
-    _bootstrap_django(config)
-
-    project_name = config['project_name']
-
-    from remote_compose.models import ECSCluster, ECSService as ECSServiceModel
-    from remote_compose.services import ECSService
-
-    try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
-    except ECSCluster.DoesNotExist:
-        click.echo(f"Error: Cluster '{config['cluster']}' not found.", err=True)
-        sys.exit(1)
-
-    ecs_svc = ECSService()
-
-    # Resolve service name (bare name or project-prefixed)
-    services = ECSServiceModel.objects.filter(cluster=cluster)
-    svc = services.filter(name=service).first() or \
-          services.filter(name=f"{project_name}-{service}").first()
-
-    if not svc:
-        available = [s.name for s in services]
-        click.echo(f"Error: Service '{service}' not found.", err=True)
-        if available:
-            click.echo(f"Available services: {', '.join(available)}", err=True)
-        sys.exit(1)
-
-    # Find a running task
-    try:
-        task_arns = ecs_svc.list_tasks(cluster, service_name=svc.name)
-    except Exception as e:
-        click.echo(f"Error listing tasks: {e}", err=True)
-        sys.exit(1)
-
-    if not task_arns:
-        click.echo(f"Error: No running tasks for service '{svc.name}'.", err=True)
-        sys.exit(1)
-
-    task_arn = task_arns[0]
-
-    # Get container name from task description if not specified
-    if not container:
-        try:
-            tasks = ecs_svc.describe_tasks(cluster, [task_arn])
-            if tasks and tasks[0].get('containers'):
-                container = tasks[0]['containers'][0]['name']
-            else:
-                click.echo("Error: Could not determine container name.", err=True)
-                sys.exit(1)
-        except Exception as e:
-            click.echo(f"Error describing task: {e}", err=True)
-            sys.exit(1)
-
-    cmd_str = ' '.join(command)
-    cluster_ref = cluster.aws_cluster_arn or cluster.aws_cluster_name
-
-    click.echo(f"Connecting to {svc.name} ({container})...")
-
-    aws_cmd = [
-        'aws', 'ecs', 'execute-command',
-        '--cluster', cluster_ref,
-        '--task', task_arn,
-        '--container', container,
-        '--interactive',
-        '--command', cmd_str,
-    ]
-
-    region = cluster.aws_region
-    if region:
-        aws_cmd.extend(['--region', region])
-
-    result = subprocess.run(aws_cmd)
-    sys.exit(result.returncode)
-
-
-# =============================================================================
-# rc logs
-# =============================================================================
-
-@cli.command()
-@click.argument('service')
-@click.option('-n', '--lines', default=50, help='Number of log lines (default: 50)')
-@click.pass_context
-def logs(ctx, service, lines):
-    """Show recent deployment logs for a service."""
-    config = _load_config(ctx.obj.get('config_path'))
-    _bootstrap_django(config)
-
-    project_name = config['project_name']
-
-    from remote_compose.models import ECSCluster, Deployment, DeploymentLog
-
-    try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
-    except ECSCluster.DoesNotExist:
-        click.echo(f"Error: Cluster '{config['cluster']}' not found.", err=True)
-        sys.exit(1)
-
-    # Find recent deployments for this project
-    deployments = Deployment.objects.filter(
-        project_name=project_name,
-    ).order_by('-started_at')[:5]
-
-    if not deployments.exists():
-        click.echo(f"No deployment logs found for {project_name}.")
-        return
-
-    click.echo(f"\nRecent deployment logs for {project_name}\n")
-
-    for dep in deployments:
-        status_str = dep.status if dep.status else 'unknown'
-        started = dep.started_at.strftime('%Y-%m-%d %H:%M:%S') if dep.started_at else '?'
-        click.echo(f"  [{started}] {status_str} — {dep.version or 'no version'}")
-
-        log_entries = DeploymentLog.objects.filter(
-            deployment=dep,
-        ).order_by('-created_at')[:lines]
-
-        for entry in reversed(list(log_entries)):
-            ts = entry.created_at.strftime('%H:%M:%S') if entry.created_at else ''
-            click.echo(f"    {ts}  {entry.message}")
-
-        click.echo()
-
-
-# =============================================================================
-# rc secrets push
-# =============================================================================
-
-@cli.group(name='secrets')
-def secrets_group():
-    """Manage secrets for the deployment."""
-    pass
-
-
-@secrets_group.command(name='push')
-@click.option('--rollout/--no-rollout', default=True,
-              help='Force new ECS deployments so running tasks pick up the new secrets.')
-@click.pass_context
-def secrets_push(ctx, rollout):
-    """Push secrets from env files defined in rc.yml."""
-    config_path = ctx.obj.get('config_path')
-
-    # v2 path: read rc.yml directly; push one SM secret per file block,
-    # uploaded as JSON so ECS JSON-key selectors resolve per-key env vars.
-    if _secrets_push_v2(config_path, rollout=rollout):
-        return
-
-    # Legacy v1 path below — requires Django models + rc provision.
-    config = _load_config(config_path)
-    _bootstrap_django(config)
-
-    secrets_files = config.get('secrets', [])
-    if not secrets_files:
-        click.echo("No secrets files configured in rc.yml.")
-        return
-
-    from remote_compose.models import ECSCluster
-    from remote_compose.services import SecretsService
-
-    try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
-    except ECSCluster.DoesNotExist:
-        click.echo(f"Error: Cluster '{config['cluster']}' not found. Run 'rc provision' first.", err=True)
-        sys.exit(1)
-
-    svc = SecretsService()
-
-    click.echo(f"\nRemote Compose — pushing secrets for {config['project_name']}\n")
-
-    total = 0
-    for env_file in secrets_files:
-        path = Path.cwd() / env_file
-        if not path.exists():
-            click.echo(f"  Warning: {env_file} not found, skipping")
-            continue
-
-        click.echo(f"  Pushing {env_file}...", nl=False)
-        try:
-            arns = svc.push_env_file(cluster=cluster, env_file_path=str(path))
-            count = len(arns)
-            total += count
-            click.echo(f" done ({count} secrets)")
-        except Exception as e:
-            click.echo(f" FAILED ({e})")
-
-    click.echo(f"\n  Total: {total} secrets pushed")
-
-
-cli.add_command(secrets_group)
+# rc secrets moved to cli_commands/secrets.py
 
 
 # =============================================================================
@@ -2202,21 +1846,33 @@ from .cli_commands.copilot import copilot_group as _copilot_group
 from .cli_commands.dev import dev_group as _dev_group
 from .cli_commands.doctor import doctor_cmd as _doctor_cmd
 from .cli_commands.doctor import install_cmd as _install_cmd
+from .cli_commands.exec import exec_cmd as _exec_cmd
 from .cli_commands.fix import fix_group as _fix_group
 from .cli_commands.lifecycle import lifecycle_cmd as _lifecycle_cmd
 from .cli_commands.migrate import migrate_cmd as _migrate_cmd
 from .cli_commands.plan import plan_cmd as _plan_cmd
+from .cli_commands.secrets import secrets_group as _secrets_group
+from .cli_commands.service_ops import (
+    logs_cmd as _logs_cmd,
+    restart_cmd as _restart_cmd,
+    status_cmd as _status_cmd,
+)
 
 cli.add_command(_audit_cmd)
 cli.add_command(_compose_group)
 cli.add_command(_copilot_group)
 cli.add_command(_dev_group)
 cli.add_command(_doctor_cmd)
+cli.add_command(_exec_cmd)
 cli.add_command(_fix_group)
 cli.add_command(_install_cmd)
 cli.add_command(_lifecycle_cmd)
+cli.add_command(_logs_cmd)
 cli.add_command(_migrate_cmd)
 cli.add_command(_plan_cmd)
+cli.add_command(_restart_cmd)
+cli.add_command(_secrets_group)
+cli.add_command(_status_cmd)
 
 
 if __name__ == '__main__':
