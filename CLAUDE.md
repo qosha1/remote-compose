@@ -112,10 +112,32 @@ Settings via `REMOTE_COMPOSE` dict in Django settings. Key settings:
 
 ## Testing
 
+Three tiers, each with its own runtime cost / dependency surface. Pick the
+narrowest one that proves your change.
+
+```bash
+# Tier 1 — unit + contract (fast, default loop, ~30s, all-mock)
+pytest tests/unit/ tests/contract/ -q
+
+# Tier 2 — integration (real terraform binary + moto/LocalStack, ~3-5min)
+pytest tests/integration/ -q
+
+# Tier 3 — e2e (real AWS, real money + time, gated)
+RC_E2E=1 pytest tests/e2e/ -q
+```
+
+Markers (registered in pyproject.toml):
+- `unit`, `contract`, `integration`, `e2e` — tier identification
+- `slow` — anything over ~5s wall-clock; use `-m "not slow"` to skip
+
+Conventions:
 - Test settings: `tests/settings.py` (in-memory SQLite, test encryption key)
 - Fixtures: `tests/conftest.py`
 - Model factories: `tests/factories.py` (factory-boy)
 - Mock SSH/AWS clients in tests
+- Every file under `tests/integration/` declares `pytestmark = pytest.mark.integration`
+  at module level so the marker is inherited by every test in the file.
+- Same convention for `tests/e2e/`.
 
 ## Scripts
 
@@ -152,6 +174,9 @@ bd close <id>         # Complete work
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- If `bd create` errors with `database not initialized: issue_prefix config is missing`,
+  run `bd config set issue_prefix remote-compose` once. The dolt-backed runtime config
+  doesn't round-trip cleanly through git on a fresh checkout (see `.beads/config.yaml`).
 
 ## Session Completion
 

@@ -13,6 +13,9 @@ from remote_compose.services import (
     DeploymentService,
     CredentialService,
 )
+
+
+pytestmark = pytest.mark.integration
 from remote_compose.models import (
     DeploymentTarget,
     DockerContext,

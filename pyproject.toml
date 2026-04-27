@@ -75,6 +75,7 @@ markers = [
     "contract: provider contract tests, parameterized across providers",
     "integration: provider-specific integration (real terraform, LocalStack, kind)",
     "e2e: end-to-end smoke tests against real cloud targets (opt-in)",
+    "slow: tests over 5s wall-clock; deselect via -m 'not slow' for fast loops",
 ]
 
 [tool.black]
