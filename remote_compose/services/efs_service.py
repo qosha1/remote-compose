@@ -1015,6 +1015,13 @@ class EFSService(BaseService):
     # Security Group Management
     # -------------------------------------------------------------------------
 
+    # remote-compose-jzp: max retries on the find/create race. If the
+    # find-existing path consistently misses the SG (permissions error,
+    # eventual-consistency lag, etc.) we'd previously recurse until stack
+    # overflow. A bounded loop bounds the worst case at MAX_DUPLICATE_
+    # RETRIES iterations + a clear error.
+    _MAX_DUPLICATE_RETRIES = 3
+
     def get_or_create_efs_security_group(
         self,
         vpc_id: str,
@@ -1029,6 +1036,11 @@ class EFSService(BaseService):
         Creates a security group that allows inbound NFS (port 2049)
         traffic from the VPC CIDR block.
 
+        Race handling: when create_security_group races against another
+        caller and AWS returns InvalidGroup.Duplicate, we re-run the
+        find pass — bounded at _MAX_DUPLICATE_RETRIES iterations so a
+        broken find path can't recurse indefinitely.
+
         Args:
             vpc_id: VPC ID
             name: Security group name
@@ -1041,7 +1053,40 @@ class EFSService(BaseService):
         """
         ec2 = self._get_ec2_client(region, credential)
 
-        # Try to find existing security group
+        last_duplicate_error: Optional[ClientError] = None
+        for attempt in range(self._MAX_DUPLICATE_RETRIES):
+            existing = self._find_efs_security_group(ec2, vpc_id, name)
+            if existing is not None:
+                if attempt > 0:
+                    self.log_info(
+                        f"Found EFS security group {name!r} after "
+                        f"create-race retry {attempt}"
+                    )
+                return existing
+            try:
+                return self._create_efs_security_group(
+                    ec2, vpc_id, name,
+                    region=region,
+                    credential=credential,
+                    description=description,
+                )
+            except ClientError as e:
+                if e.response['Error']['Code'] != 'InvalidGroup.Duplicate':
+                    raise EFSError(f"Failed to create EFS security group: {e}")
+                # Lost a create race — another caller has the SG; the
+                # next iteration's find should pick it up. Cap retries
+                # so a broken find path can't loop forever.
+                last_duplicate_error = e
+                continue
+        raise EFSError(
+            f"Failed to get_or_create EFS security group {name!r} after "
+            f"{self._MAX_DUPLICATE_RETRIES} retries — find/create kept "
+            f"racing without converging. Last error: {last_duplicate_error}"
+        )
+
+    def _find_efs_security_group(
+        self, ec2, vpc_id: str, name: str,
+    ) -> Optional[Dict[str, Any]]:
         try:
             response = ec2.describe_security_groups(
                 Filters=[
@@ -1049,83 +1094,81 @@ class EFSService(BaseService):
                     {'Name': 'group-name', 'Values': [name]},
                 ]
             )
-            security_groups = response.get('SecurityGroups', [])
-
-            if security_groups:
-                sg = security_groups[0]
-                self.log_info(f"Found existing EFS security group: {name}")
-                return {
-                    'security_group_id': sg['GroupId'],
-                    'group_name': sg['GroupName'],
-                    'vpc_id': sg['VpcId'],
-                    'description': sg.get('Description'),
-                }
-
         except ClientError as e:
             raise EFSError(f"Failed to search for security group: {e}")
+        security_groups = response.get('SecurityGroups', [])
+        if not security_groups:
+            return None
+        sg = security_groups[0]
+        self.log_info(f"Found existing EFS security group: {name}")
+        return {
+            'security_group_id': sg['GroupId'],
+            'group_name': sg['GroupName'],
+            'vpc_id': sg['VpcId'],
+            'description': sg.get('Description'),
+        }
 
-        # Get VPC CIDR for the inbound rule
+    def _create_efs_security_group(
+        self,
+        ec2,
+        vpc_id: str,
+        name: str,
+        region: Optional[str] = None,
+        credential: Optional[SecureCredential] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
         vpc_cidr = self._get_vpc_cidr(vpc_id, region, credential)
 
-        try:
-            # Create security group
-            response = ec2.create_security_group(
-                GroupName=name,
-                Description=description or f"EFS security group for {name}",
-                VpcId=vpc_id,
-                TagSpecifications=[
-                    {
-                        'ResourceType': 'security-group',
-                        'Tags': [
-                            {'Key': 'Name', 'Value': name},
-                            {'Key': 'CreatedBy', 'Value': 'remote-compose'},
-                        ],
-                    }
-                ],
-            )
+        # Create security group. Caller (get_or_create_efs_security_group)
+        # catches InvalidGroup.Duplicate and retries the find/create
+        # loop — we re-raise here so the bounded retry can do its work.
+        response = ec2.create_security_group(
+            GroupName=name,
+            Description=description or f"EFS security group for {name}",
+            VpcId=vpc_id,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'security-group',
+                    'Tags': [
+                        {'Key': 'Name', 'Value': name},
+                        {'Key': 'CreatedBy', 'Value': 'remote-compose'},
+                    ],
+                }
+            ],
+        )
 
-            security_group_id = response['GroupId']
+        security_group_id = response['GroupId']
 
-            # Add NFS inbound rule
-            ec2.authorize_security_group_ingress(
-                GroupId=security_group_id,
-                IpPermissions=[
-                    {
-                        'IpProtocol': 'tcp',
-                        'FromPort': 2049,
-                        'ToPort': 2049,
-                        'IpRanges': [
-                            {
-                                'CidrIp': vpc_cidr,
-                                'Description': 'NFS from VPC',
-                            }
-                        ],
-                    }
-                ],
-            )
+        # Add NFS inbound rule.
+        ec2.authorize_security_group_ingress(
+            GroupId=security_group_id,
+            IpPermissions=[
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': 2049,
+                    'ToPort': 2049,
+                    'IpRanges': [
+                        {
+                            'CidrIp': vpc_cidr,
+                            'Description': 'NFS from VPC',
+                        }
+                    ],
+                }
+            ],
+        )
 
-            self.log_info(f"Created EFS security group: {name} ({security_group_id})")
-            self.notify_observers(
-                'efs_security_group_created',
-                security_group_id=security_group_id,
-                name=name
-            )
-
-            return {
-                'security_group_id': security_group_id,
-                'group_name': name,
-                'vpc_id': vpc_id,
-                'description': description or f"EFS security group for {name}",
-            }
-
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidGroup.Duplicate':
-                # Race condition, try to find it again
-                return self.get_or_create_efs_security_group(
-                    vpc_id, name, region, credential, description
-                )
-            raise EFSError(f"Failed to create EFS security group: {e}")
+        self.log_info(f"Created EFS security group: {name} ({security_group_id})")
+        self.notify_observers(
+            'efs_security_group_created',
+            security_group_id=security_group_id,
+            name=name
+        )
+        return {
+            'security_group_id': security_group_id,
+            'group_name': name,
+            'vpc_id': vpc_id,
+            'description': description or f"EFS security group for {name}",
+        }
 
     def _get_vpc_cidr(
         self,
