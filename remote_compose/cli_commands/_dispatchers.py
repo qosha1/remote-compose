@@ -21,6 +21,40 @@ import click
 _RC_CONFIG_FILE = 'rc.yml'
 
 
+def _load_v2_if_present(
+    config_path: Optional[str], strict: bool = True,
+) -> Optional[tuple[Path, dict, Any]]:
+    """Resolve config_path → (path, raw_dict, RcConfigV2) when rc.yml is v2.
+
+    Returns None when:
+      - the file doesn't exist, or
+      - the file is v1/legacy, or
+      - parsing failed AND strict=False.
+
+    With strict=True (default), parse failures echo the error and Exit(1).
+    With strict=False, parse failures are swallowed (caller falls through).
+
+    Use strict=True for commands that have a v1 fallback whose error
+    UX is "tell the user the v2 parse went wrong"; strict=False for
+    commands like rc exec where v1 may also exist and we want the user
+    to silently fall through if rc.yml looks unparseable.
+    """
+    path = Path(config_path) if config_path else Path.cwd() / _RC_CONFIG_FILE
+    if not path.exists():
+        return None
+    from remote_compose.cli_v2 import load_rc_yml
+    try:
+        version, raw, v2 = load_rc_yml(path)
+    except Exception as exc:
+        if strict:
+            click.echo(f"rc.yml parse failed: {exc}", err=True)
+            raise click.exceptions.Exit(1)
+        return None
+    if version != 2 or v2 is None:
+        return None
+    return path, raw, v2
+
+
 def _detect_empty_file_secrets(
     v2, region: str, aws_profile: Optional[str], file_secrets: list,
 ) -> list[str]:
@@ -70,18 +104,10 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     This matches the ECS JSON-key syntax the provider emits in task defs.
     """
     import json
-    path = Path(config_path) if config_path else Path.cwd() / _RC_CONFIG_FILE
-    if not path.exists():
+    loaded = _load_v2_if_present(config_path, strict=True)
+    if loaded is None:
         return False
-
-    from remote_compose.cli_v2 import load_rc_yml
-    try:
-        version, raw, v2 = load_rc_yml(path)
-    except Exception as exc:
-        click.echo(f"rc.yml parse failed: {exc}", err=True)
-        raise click.exceptions.Exit(1)
-    if version != 2 or v2 is None:
-        return False
+    path, raw, v2 = loaded
 
     from remote_compose.envfile import EnvFileError, parse as parse_env
     ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
@@ -158,20 +184,14 @@ def _db_push_v2(
     caller can decide what to do (currently: exit with error).
     """
     from datetime import datetime, timezone
-    path = Path(config_path) if config_path else Path.cwd() / _RC_CONFIG_FILE
-    if not path.exists():
+    loaded = _load_v2_if_present(config_path, strict=True)
+    if loaded is None:
         return False
+    path, raw, v2 = loaded
 
     from remote_compose.cli_v2 import (
-        build_deploy_context, load_rc_yml, resolve_provider,
+        build_deploy_context, resolve_provider,
     )
-    try:
-        version, raw, v2 = load_rc_yml(path)
-    except Exception as exc:
-        click.echo(f"rc.yml parse failed: {exc}", err=True)
-        raise click.exceptions.Exit(1)
-    if version != 2 or v2 is None:
-        return False
 
     backup_cfg = v2.backup
     if not backup_cfg or not backup_cfg.bucket:
@@ -339,19 +359,16 @@ def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
     when handled. False signals the caller to fall back to the legacy
     v1 path.
     """
-    path = Path(config_path) if config_path else Path.cwd() / _RC_CONFIG_FILE
-    if not path.exists():
+    # strict=False: silent fall-through if rc.yml is unparseable, matching
+    # the legacy behavior where rc exec also has a v1 path.
+    loaded = _load_v2_if_present(config_path, strict=False)
+    if loaded is None:
         return False
+    path, raw, v2 = loaded
 
     from remote_compose.cli_v2 import (
-        build_deploy_context, load_rc_yml, resolve_provider,
+        build_deploy_context, resolve_provider,
     )
-    try:
-        version, raw, v2 = load_rc_yml(path)
-    except Exception:
-        return False
-    if version != 2 or v2 is None:
-        return False
 
     if service not in v2.services:
         click.echo(

@@ -40,18 +40,14 @@ def audit_cmd(ctx, project_name, region_name, profile_name, delete):
     from remote_compose.audit import audit_project
 
     if not project_name or not region_name or not profile_name:
-        path = Path(ctx.obj.get('config_path') or 'rc.yml')
-        if path.exists():
-            try:
-                from remote_compose.cli_v2 import load_rc_yml
-                version, _, v2 = load_rc_yml(path)
-                if version == 2 and v2 is not None:
-                    project_name = project_name or v2.project
-                    ecs_cfg = (v2.provider_config or {}).get('ecs') or {}
-                    region_name = region_name or ecs_cfg.get('region')
-                    profile_name = profile_name or ecs_cfg.get('aws_profile')
-            except Exception:
-                pass
+        from ._dispatchers import _load_v2_if_present
+        loaded = _load_v2_if_present(ctx.obj.get('config_path'), strict=False)
+        if loaded is not None:
+            _, _, v2 = loaded
+            project_name = project_name or v2.project
+            ecs_cfg = (v2.provider_config or {}).get('ecs') or {}
+            region_name = region_name or ecs_cfg.get('region')
+            profile_name = profile_name or ecs_cfg.get('aws_profile')
 
     if not project_name:
         click.echo("rc audit: --project required (or run from a dir with rc.yml v2).",

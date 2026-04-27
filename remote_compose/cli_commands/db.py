@@ -320,16 +320,9 @@ def db_dump_local(ctx, container_name, output_path_str, pg_user, pg_db, pg_port)
     if output_path_str:
         output_path = Path(output_path_str)
     else:
-        project = "rc-db-dump"
-        try:
-            from remote_compose.cli_v2 import load_rc_yml
-            rc_path = Path(ctx.obj.get('config_path') or 'rc.yml')
-            if rc_path.exists():
-                version, _, v2 = load_rc_yml(rc_path)
-                if version == 2 and v2 is not None:
-                    project = v2.project
-        except Exception:
-            pass
+        from ._dispatchers import _load_v2_if_present
+        loaded = _load_v2_if_present(ctx.obj.get('config_path'), strict=False)
+        project = loaded[2].project if loaded is not None else "rc-db-dump"
         output_path = default_dump_path(project)
 
     click.echo(f"\nrc db dump-local — {container_name}")
