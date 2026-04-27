@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -734,6 +735,113 @@ def _run_auto_on_deploy_hooks(
             )
 
 
+def run_auto_on_deploy_hooks_for_path(
+    config_path: str | Path | None,
+    services_filter: Optional[list[str]] = None,
+    wait_for_stable: bool = True,
+) -> None:
+    """Run auto_on_deploy lifecycle hooks for the v2 stack at config_path.
+
+    Companion to ``dispatch_if_v2(... defer_lifecycle_hooks=True)``: ``rc up``
+    defers hooks until after the outer secrets-push + force-roll have
+    completed, then calls this helper so the hooks land on tasks with real
+    env vars (rc-3q9). Silent no-op for v1 / non-existent rc.yml.
+
+    When ``wait_for_stable=True`` (default for the rc-up path), polls the
+    target services for ECS deployment stability — a single PRIMARY
+    deployment with rolloutState=COMPLETED, meaning new task definition
+    is fully live and old task definition has drained. Up to 5 minutes;
+    override via RC_HOOK_WAIT_TIMEOUT_S.
+    """
+    import click as _click
+    p = Path(config_path) if config_path else Path.cwd() / "rc.yml"
+    if not p.exists():
+        return
+    try:
+        version, raw, v2 = load_rc_yml(p)
+    except Exception:
+        return
+    if version != 2 or v2 is None:
+        return
+    if not v2.services:
+        return
+    # Skip work when no service has an auto_on_deploy hook in the first place.
+    has_auto = any(
+        getattr(h, "auto_on_deploy", False)
+        for svc in v2.services.values()
+        for h in (svc.lifecycle or {}).values()
+    )
+    if not has_auto:
+        return
+
+    ctx = build_deploy_context(v2, raw, p)
+    provider = resolve_provider(v2)
+
+    if wait_for_stable:
+        ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+        cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
+        targets = sorted(set(services_filter)) if services_filter else sorted(v2.services.keys())
+        try:
+            session = provider.session_factory(ctx)
+            ecs_client = session.client("ecs")
+        except Exception as exc:  # noqa: BLE001
+            _click.echo(
+                f"  WARN: skipping deployment-stability wait — could not "
+                f"contact ECS: {type(exc).__name__}: {exc}",
+                err=True,
+            )
+        else:
+            import os as _os
+            wait_budget = int(_os.environ.get("RC_HOOK_WAIT_TIMEOUT_S", "300"))
+            wait_interval = float(_os.environ.get("RC_HOOK_WAIT_INTERVAL_S", "10"))
+            deadline = time.monotonic() + wait_budget
+            _click.echo(
+                f"  Waiting up to {wait_budget}s for "
+                f"{len(targets)} service(s) to reach steady state before "
+                f"running auto_on_deploy hooks..."
+            )
+            while True:
+                try:
+                    desc = ecs_client.describe_services(
+                        cluster=cluster, services=targets,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _click.echo(
+                        f"  WARN: describe_services failed: {exc!s}",
+                        err=True,
+                    )
+                    break
+                pending = []
+                for svc in desc.get("services", []) or []:
+                    deployments = svc.get("deployments") or []
+                    if len(deployments) != 1:
+                        pending.append(svc.get("serviceName"))
+                        continue
+                    dep = deployments[0]
+                    rollout = dep.get("rolloutState")
+                    # rolloutState may be None on classic ECS deployment
+                    # controllers — fall back to runningCount == desiredCount
+                    # in that case.
+                    if rollout is None:
+                        if dep.get("runningCount") != dep.get("desiredCount"):
+                            pending.append(svc.get("serviceName"))
+                    elif rollout != "COMPLETED":
+                        pending.append(svc.get("serviceName"))
+                if not pending:
+                    break
+                if time.monotonic() > deadline:
+                    _click.echo(
+                        f"  WARN: services {pending} did not stabilize "
+                        f"within {wait_budget}s — running hooks anyway "
+                        f"(may hit old tasks).",
+                        err=True,
+                    )
+                    break
+                time.sleep(wait_interval)
+
+    _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
+
+
 def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bool:
     """Dispatch a CLI command through the v2 Provider pathway.
 
@@ -838,10 +946,19 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
         # not contain json key Y'). Push is idempotent + only fires on
         # ACTUALLY empty blobs.
         _auto_push_empty_secrets_if_any(path, v2, raw)
-        # On --services deploys, only run hooks for the targeted service(s)
-        # — e.g., `rc deploy --services django` triggers django.migrate but
-        # not nginx.reload.
-        _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
+        # rc-3q9: when invoked from `rc up`, the orchestrator pushes secrets
+        # + force-rolls AFTER this dispatcher returns, then runs hooks once
+        # the latest task definition is live. Running hooks HERE on a fresh
+        # deploy hits the still-old task (with placeholder env vars) →
+        # 'manage.py migrate' fails to connect to Postgres → exit 254 →
+        # noisy false alarm. defer_lifecycle_hooks=True opts into that
+        # deferred run; default behavior (rc deploy / rc deploy --services)
+        # still runs hooks right here for backward compat.
+        if not kwargs.get("defer_lifecycle_hooks"):
+            # On --services deploys, only run hooks for the targeted service(s)
+            # — e.g., `rc deploy --services django` triggers django.migrate but
+            # not nginx.reload.
+            _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
         return True
 
     if command == "destroy":

@@ -1428,9 +1428,18 @@ def up(ctx, from_compose, public_service, region, aws_profile,
             )
 
     # --- Step 2: deploy via the v2 dispatcher ---
+    # rc-3q9: defer auto_on_deploy lifecycle hooks until after Step 3
+    # secrets-push + force-roll have completed. Otherwise the hooks land
+    # on tasks still running with placeholder env vars (e.g. Django's
+    # migrate hook fails connecting to Postgres → exit 254 noise).
     # ttl=None is fine; dispatcher only acts when truthy.
-    from remote_compose.cli_v2 import dispatch_if_v2
-    if not dispatch_if_v2(str(target), 'deploy', ttl=ttl, dev=dev_mode):
+    from remote_compose.cli_v2 import (
+        dispatch_if_v2, run_auto_on_deploy_hooks_for_path,
+    )
+    if not dispatch_if_v2(
+        str(target), 'deploy',
+        ttl=ttl, dev=dev_mode, defer_lifecycle_hooks=True,
+    ):
         raise click.ClickException(
             f"{target} is not a v2 rc.yml. `rc up` only supports v2 — "
             f"migrate with `rc migrate` or use `rc deploy` for v1."
@@ -1446,6 +1455,18 @@ def up(ctx, from_compose, public_service, region, aws_profile,
     except Exception as exc:
         click.echo(f"\n  WARN: secrets push failed: {exc}", err=True)
         click.echo("  Run `rc secrets push` after fixing the issue above.")
+
+    # --- Step 4: now that real env vars are live, run any auto_on_deploy
+    # lifecycle hooks (rc-3q9). Helper waits for ECS deployment stability
+    # before exec-ing so the hook lands on a fresh task definition.
+    try:
+        run_auto_on_deploy_hooks_for_path(str(target))
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            f"\n  WARN: auto_on_deploy hooks failed: {exc!s}. "
+            f"Rerun with `rc lifecycle <hook> <service>` for full output.",
+            err=True,
+        )
 
     if ttl:
         click.echo(
