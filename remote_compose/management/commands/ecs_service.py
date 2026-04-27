@@ -230,11 +230,12 @@ class Command(BaseCommand):
             ).order_by('timestamp')[:options['limit']]
 
             for log in logs:
+                # remote-compose-mps: model field is `log_level`, not `level`.
                 level_style = {
                     'info': lambda x: x,
                     'warning': self.style.WARNING,
                     'error': self.style.ERROR,
-                }.get(log.level, lambda x: x)
+                }.get(log.log_level, lambda x: x)
 
                 self.stdout.write(
                     f"  [{log.timestamp.strftime('%H:%M:%S')}] {level_style(log.message)}"

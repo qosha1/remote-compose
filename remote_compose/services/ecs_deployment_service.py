@@ -522,7 +522,7 @@ class ECSDeploymentService(BaseService):
             project_name=ecs_service.name,
             version='update',
             deployed_by=deployed_by,
-            status=Deployment.Status.IN_PROGRESS,
+            status=Deployment.Status.RUNNING,
             metadata={
                 'type': 'ecs_update',
                 'service': ecs_service.name,
@@ -568,7 +568,10 @@ class ECSDeploymentService(BaseService):
 
             deployment.status = Deployment.Status.SUCCESS
             deployment.completed_at = end_time
-            deployment.duration = duration
+            # remote-compose-mps: ``Deployment.duration`` is a @property
+            # computed from completed_at - started_at; assigning to it
+            # raised AttributeError. Setting completed_at above is enough
+            # for the property to return the right value to readers.
             deployment.save()
 
             ecs_service.deployments.add(deployment)
