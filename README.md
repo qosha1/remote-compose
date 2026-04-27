@@ -87,6 +87,54 @@ no changes prints `no changes — infrastructure matches config`.
 
 ---
 
+## First-deploy walkthrough
+
+If you want to verify rc actually works end-to-end against real AWS
+before you commit to it, the repo ships a scripted acceptance trace
+that takes a clean account → a fully-running production-shape Django +
+celery + nginx stack → clean teardown. Single command, no aws-cli, no
+sed, no `/tmp` dance.
+
+```bash
+# Prereqs: terraform installed (or run scripts/bootstrap-from-zero.sh
+# first), an AWS profile with creds, and a Django+celery compose to
+# point at. We use start-simpli (private repo) — substitute your own
+# via the START_SIMPLI / COMPOSE_FILE / REGION / AWS_PROFILE_OVERRIDE
+# env vars at the top of the script.
+
+bash scripts/test-startsimpli-end-to-end.sh
+```
+
+What it does, step by step:
+
+1. **`rc destroy --all-ephemeral`** — clean slate. Removes any prior
+   ephemeral stacks from the local registry.
+2. **`rc up --from-compose docker-compose.local.yml --aws-profile X
+   --region Y --ttl 4h`** — single-command full deploy. Scaffolds an
+   rc.yml from your compose, auto-fixes nginx for ECS Cloud Map
+   (variable-based proxy_pass + VPC resolver), imports any orphan
+   Container Insights log group, runs terraform apply, builds + pushes
+   images, force-rolls services, pushes file-sourced secrets into
+   Secrets Manager, runs auto_on_deploy lifecycle hooks (e.g.
+   `python manage.py migrate --noinput`).
+3. **`rc status` polling** — waits for all services to reach
+   `health=healthy`.
+4. **Plain `curl http://<ALB>/api/v1/health/`** — no Host: header
+   rewrite, no `https`, no `--insecure`. The patient retry loop tolerates
+   the ~60-90s window where ECS marks the task healthy but Django is
+   still finishing migrations + collectstatic + runserver. When it
+   returns 200, the body is checked for `{"celery":"healthy"}` —
+   real workers responding to ping, not "no_workers".
+5. **`rc destroy --yes`** — clean teardown. Removes every AWS resource
+   tagged `Project=<this-stack>` and unregisters the entry from the
+   ephemeral registry.
+6. **`rc list --ephemeral`** — registry empty. No stale rows.
+
+Scripted. Repeatable. The tracking bead is
+[rc-e5u.46](.beads/issues.jsonl) (`bd show rc-e5u.46`).
+
+---
+
 ## What rc.yml v2 looks like
 
 ```yaml
