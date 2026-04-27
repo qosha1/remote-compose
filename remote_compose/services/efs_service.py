@@ -35,12 +35,26 @@ class EFSService(BaseService):
     for persistent volumes in ECS Fargate deployments.
     """
 
-    # Default POSIX user settings for access points
-    # Use root (0/0) with permissive mode to allow any container to access
-    # This is necessary for containers like postgres/redis that run chown on startup
-    DEFAULT_UID = 0
-    DEFAULT_GID = 0
-    DEFAULT_PERMISSIONS = '0777'
+    # Default POSIX user settings for access points (remote-compose-29w).
+    # Standard non-root unprivileged user (1000/1000) with mode 0755:
+    # owner rwx, group/other rx. Most container images run as a
+    # non-root user; matching that surface in the EFS access point
+    # avoids accidentally writing files as root that the application
+    # then can't read. Applications that need permissive defaults (e.g.
+    # legacy postgres images that want world-writable) should set the
+    # values explicitly via the create_access_point() kwargs or use
+    # ``EFSService.PERMISSIVE_*`` constants below.
+    DEFAULT_UID = 1000
+    DEFAULT_GID = 1000
+    DEFAULT_PERMISSIONS = '0755'
+
+    # Opt-in permissive defaults for the unusual case where the
+    # application performs its own chown/chmod on startup and needs
+    # ECS to mount as root + world-writable. Pre-fix code unwittingly
+    # used these for every volume; new code must opt in explicitly.
+    PERMISSIVE_UID = 0
+    PERMISSIVE_GID = 0
+    PERMISSIVE_PERMISSIONS = '0777'
 
     def __init__(
         self,
