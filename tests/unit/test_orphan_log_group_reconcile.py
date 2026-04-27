@@ -79,6 +79,91 @@ class TestOrphanFoundAndImported:
 # ---------------------------------------------------------------------------
 
 
+class TestImportFailureFallsBackToDelete:
+    """When terraform import fails for any reason OTHER than 'already
+    managed', the reconcile must fall back to deleting the orphan via
+    boto3 — otherwise terraform apply blows up with
+    ResourceAlreadyExistsException.
+
+    The trigger we hit in production: --domain wiring adds a
+    ``for_each = { ... aws_acm_certificate.main.domain_validation_options
+    ... }`` block. terraform import validates the WHOLE module before
+    importing, and ``aws_acm_certificate.main.domain_validation_options``
+    is unknown-until-apply. Import fails with 'Invalid for_each
+    argument'; without the boto3 fallback the next apply dies on the
+    pre-existing log group.
+    """
+
+    def test_invalid_for_each_failure_triggers_boto3_delete(self, ctx):
+        progress_msgs: list[str] = []
+        client = MagicMock()
+        client.describe_log_groups.return_value = {
+            "logGroups": [
+                {"logGroupName": "/aws/ecs/containerinsights/testp-cluster/performance"}
+            ],
+        }
+        session = MagicMock()
+        session.client.return_value = client
+
+        provider = ECSProvider(
+            session_factory=lambda c: session,
+            progress=progress_msgs.append,
+        )
+        runner = MagicMock()
+        runner.import_resource.side_effect = TerraformError(
+            cmd=["terraform", "import"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Error: Invalid for_each argument\n"
+                "  on /tmp/terraform/domain.tf line 25\n"
+                "aws_acm_certificate.main.domain_validation_options is "
+                "a set of object, known only after apply"
+            ),
+        )
+
+        provider._reconcile_orphan_log_groups(ctx, runner)
+
+        # Boto3 delete was invoked.
+        client.delete_log_group.assert_called_once_with(
+            logGroupName="/aws/ecs/containerinsights/testp-cluster/performance",
+        )
+        assert any("falling back to boto3 delete" in m for m in progress_msgs)
+        assert any("deleted orphan log group" in m for m in progress_msgs)
+
+    def test_boto3_delete_failure_emits_actionable_warning(self, ctx):
+        progress_msgs: list[str] = []
+        client = MagicMock()
+        client.describe_log_groups.return_value = {
+            "logGroups": [
+                {"logGroupName": "/aws/ecs/containerinsights/testp-cluster/performance"}
+            ],
+        }
+        client.delete_log_group.side_effect = RuntimeError(
+            "AccessDenied: logs:DeleteLogGroup",
+        )
+        session = MagicMock()
+        session.client.return_value = client
+
+        provider = ECSProvider(
+            session_factory=lambda c: session,
+            progress=progress_msgs.append,
+        )
+        runner = MagicMock()
+        runner.import_resource.side_effect = TerraformError(
+            cmd=["terraform", "import"], returncode=1,
+            stdout="", stderr="Error: Invalid for_each argument",
+        )
+
+        provider._reconcile_orphan_log_groups(ctx, runner)
+
+        assert any("AccessDenied" in m for m in progress_msgs)
+        # Surfaces a copy-pasteable manual recovery command.
+        assert any(
+            "aws logs delete-log-group" in m for m in progress_msgs
+        )
+
+
 class TestOrphanAlreadyImported:
     def test_already_managed_swallowed(self, ctx):
         progress_msgs: list[str] = []

@@ -902,13 +902,46 @@ class ECSProvider(Provider):
                 f"imported orphan log group {log_group_name} into "
                 f"terraform state"
             )
+            return
         except TerraformError as exc:
             msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
             if "already managed" in msg or "already exists in state" in msg:
                 return  # already imported on a prior deploy
+            # Import failed. Fall through to the boto3-delete fallback
+            # below — apply otherwise blows up with
+            # ResourceAlreadyExistsException on the same log group.
             self._emit(
-                f"warning: failed to import orphan log group "
-                f"{log_group_name}: {exc}"
+                f"orphan log-group import failed ({exc.__class__.__name__}); "
+                f"falling back to boto3 delete + recreate-on-apply."
+            )
+
+        # Fallback: delete the orphan via boto3 so the upcoming apply
+        # creates it fresh under terraform management. Container Insights
+        # log groups carry only ephemeral task-lifecycle metadata; AWS
+        # auto-recreates the group on first task launch under the new
+        # terraform-managed resource. The known triggers for this path:
+        # (a) terraform import validates the WHOLE module before
+        # importing, and a for_each over a managed-resource attribute
+        # (e.g. aws_acm_certificate.main.domain_validation_options for
+        # the --domain wiring) is "unknown until apply" — fatal to
+        # import even though it's fine for apply itself; (b) the import
+        # subprocess racing with another caller. Both cases boil down
+        # to "AWS has the orphan, terraform can't import it, apply will
+        # die" — delete is the cleanest unblock.
+        try:
+            logs = self.session_factory(ctx).client("logs")
+            logs.delete_log_group(logGroupName=log_group_name)
+            self._emit(
+                f"deleted orphan log group {log_group_name} via boto3; "
+                f"terraform will recreate it under management on apply"
+            )
+        except Exception as del_exc:  # noqa: BLE001
+            self._emit(
+                f"warning: orphan log-group fallback delete failed: "
+                f"{type(del_exc).__name__}: {del_exc}. terraform apply "
+                f"will likely fail with ResourceAlreadyExistsException; "
+                f"manually delete via: aws logs delete-log-group "
+                f"--log-group-name {log_group_name}"
             )
 
     # Service-type rollout priority (rc-e5u.46.5). Force-rolls in this order
