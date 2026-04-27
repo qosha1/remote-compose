@@ -2338,8 +2338,18 @@ cli.add_command(db_group)
          'rc deploy --ttl / rc up --ttl), regardless of TTL expiry. '
          'Single confirmation prompt covers all stacks.',
 )
+@click.option(
+    '--force-delete-secrets', 'force_delete_secrets', is_flag=True,
+    help='Bypass AWS Secrets Manager 30-day recovery window when '
+         'deleting per-secret blobs as part of teardown. Default '
+         '(off) preserves the recovery window so a mistaken destroy '
+         'is reversible — but the secret name stays reserved for 30 '
+         'days, blocking re-create with the same name. Set this when '
+         'you intend to immediately re-deploy with the same project '
+         'name. (remote-compose-myw)',
+)
 @click.pass_context
-def destroy(ctx, infra, yes, all_ephemeral):
+def destroy(ctx, infra, yes, all_ephemeral, force_delete_secrets):
     """Tear down all services (prompts for confirmation)."""
     if all_ephemeral:
         # Reuse the reap pipeline — same registry, same provider.destroy
@@ -2421,7 +2431,9 @@ def destroy(ctx, infra, yes, all_ephemeral):
 
     # Tear down infrastructure if requested
     if infra:
-        _teardown_infrastructure(cluster)
+        _teardown_infrastructure(
+            cluster, force_delete_secrets=force_delete_secrets,
+        )
 
     click.echo("\n  Teardown complete.")
 
@@ -2478,7 +2490,7 @@ def _teardown_services(cluster, project_name):
                 pass
 
 
-def _teardown_infrastructure(cluster):
+def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
     """Tear down VPC, ALB, security groups, and other infrastructure."""
     click.echo("  Tearing down infrastructure...")
 
@@ -2577,16 +2589,27 @@ def _teardown_infrastructure(cluster):
             region=cluster.aws_region,
             credential=cluster.aws_credential,
         )
+        # remote-compose-myw: default to AWS's 30-day recovery window
+        # so a mistaken `rc destroy` is reversible. Force-delete is
+        # opt-in via --force-delete-secrets when the user knows they
+        # want to immediately re-deploy with the same project name
+        # (otherwise the reserved name blocks re-create for 30d).
         for secret in secrets:
             try:
-                sm.delete_secret(
-                    SecretId=secret.secret_arn,
-                    ForceDeleteWithoutRecovery=True,
-                )
+                if force_delete_secrets:
+                    sm.delete_secret(
+                        SecretId=secret.secret_arn,
+                        ForceDeleteWithoutRecovery=True,
+                    )
+                else:
+                    sm.delete_secret(SecretId=secret.secret_arn)
                 secret.delete()
             except Exception:
                 pass
-        click.echo(" removed")
+        if force_delete_secrets:
+            click.echo(" removed (force)")
+        else:
+            click.echo(" scheduled for deletion (30d recovery window)")
 
 
 # =============================================================================
