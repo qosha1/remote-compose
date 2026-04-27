@@ -697,6 +697,96 @@ def detect_nginx_auto_fix_target(
     return None
 
 
+def _zone_from_domain_drop_leftmost(domain: str) -> str:
+    """Heuristic Route 53 hosted-zone name derivation for ``rc up --domain``.
+
+    Drops the LEFTMOST label of an FQDN — for ``a.b.c.d`` returns ``b.c.d``;
+    for an apex ``b.c`` returns ``b.c`` unchanged. Different from the
+    provider's last-two-labels fallback because users typically delegate a
+    subdomain (e.g. ``rctest.ezapps.ai``) and deploy ephemeral apps under it
+    (``startsimpli-test.rctest.ezapps.ai``) — the hosted zone is the parent
+    of the FQDN, not the registrable apex. ``--route53-zone <Z>`` is the
+    explicit override when this heuristic is wrong.
+    """
+    parts = domain.strip(".").split(".")
+    if len(parts) <= 2:
+        return ".".join(parts)
+    return ".".join(parts[1:])
+
+
+def _patch_rc_yml_domain(
+    rc_yml_path: Path,
+    domain: str,
+    aliases: list[str],
+    route53_zone: Optional[str] = None,
+) -> dict:
+    """Wire ``--domain`` / ``--alias`` / ``--route53-zone`` into a scaffolded
+    rc.yml on disk. Returns the resolved settings dict.
+
+    Mutates the YAML body, preserves any leading comment block. Idempotent
+    (re-running with the same values is a no-op). Targets the service that
+    has ``public: true`` — that's the ALB-fronted entry the scaffolder
+    picked. If no public service exists, raises ValueError.
+    """
+    text = rc_yml_path.read_text()
+    lines = text.splitlines(keepends=True)
+    header_lines: list[str] = []
+    body_start = 0
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            header_lines.append(line)
+            continue
+        body_start = i
+        break
+    body_text = "".join(lines[body_start:])
+    raw = yaml.safe_load(body_text) or {}
+    services = raw.get("services") or {}
+    if not isinstance(services, dict):
+        raise ValueError("services block in rc.yml is not a mapping")
+    public_name = next(
+        (n for n, s in services.items() if isinstance(s, dict) and s.get("public")),
+        None,
+    )
+    if public_name is None:
+        raise ValueError(
+            "no public service in rc.yml — cannot wire --domain. Mark one "
+            "service with `public: true` first."
+        )
+    public_entry = services[public_name]
+    public_entry["domain"] = domain
+    if aliases:
+        # Stable order: declaration order, deduped.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for a in aliases:
+            if a in seen or a == domain:
+                continue
+            seen.add(a)
+            deduped.append(a)
+        public_entry["aliases"] = deduped
+
+    zone = route53_zone or _zone_from_domain_drop_leftmost(domain)
+    pc = raw.setdefault("provider_config", {})
+    if not isinstance(pc, dict):
+        pc = {}
+        raw["provider_config"] = pc
+    ecs_cfg = pc.setdefault("ecs", {})
+    if not isinstance(ecs_cfg, dict):
+        ecs_cfg = {}
+        pc["ecs"] = ecs_cfg
+    ecs_cfg["route53_zone"] = zone
+
+    new_body = yaml.safe_dump(raw, sort_keys=False, default_flow_style=False)
+    rc_yml_path.write_text("".join(header_lines) + new_body)
+    return {
+        "public_service": public_name,
+        "domain": domain,
+        "aliases": list(public_entry.get("aliases", [])),
+        "route53_zone": zone,
+    }
+
+
 def _patch_rc_yml_dockerfile(
     rc_yml_path: Path,
     service_name: str,

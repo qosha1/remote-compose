@@ -1338,9 +1338,24 @@ def deploy(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, dev_m
                    'every services[*].dev_volumes entry so `rc dev push` can '
                    'stream local source into the running task for sub-second '
                    'iteration. See rc-e5u.45.8.')
+@click.option('--domain', 'domain', default=None,
+              help='Wire the ALB to a custom FQDN. Scaffolds '
+                   'services.<public>.domain + provider_config.ecs.'
+                   'route53_zone (drop-leftmost-label heuristic) so '
+                   'terraform creates ACM cert + Route 53 A records. '
+                   'Verifies the zone exists in the configured aws_profile '
+                   'before deploying. See rc-e5u.46.7.')
+@click.option('--alias', 'aliases', multiple=True,
+              help='Add an additional FQDN as a SAN on the ACM cert + an '
+                   'extra A record. Repeat --alias N times for N aliases. '
+                   'Requires --domain.')
+@click.option('--route53-zone', 'route53_zone', default=None,
+              help='Override the Route 53 hosted-zone name (defaults to '
+                   '--domain with the leftmost label dropped). Use when '
+                   'your zone is something other than parent-of-FQDN.')
 @click.pass_context
 def up(ctx, from_compose, public_service, region, aws_profile,
-       testing_defaults, ttl, dev_mode):
+       testing_defaults, ttl, dev_mode, domain, aliases, route53_zone):
     """One-shot: scaffold rc.yml (if missing), deploy, push secrets, print ALB URL.
 
     The "I have a docker-compose.yml — get me a running stack" command. With
@@ -1350,6 +1365,13 @@ def up(ctx, from_compose, public_service, region, aws_profile,
     """
     config_path = ctx.obj.get('config_path') or RC_CONFIG_FILE
     target = Path(config_path)
+
+    # --- Pre-flight: --alias requires --domain ---
+    if aliases and not domain:
+        raise click.ClickException(
+            "--alias requires --domain. Use --domain <FQDN> + "
+            "--alias <other-FQDN> together."
+        )
 
     # --- Step 1: scaffold rc.yml if missing ---
     if not target.exists():
@@ -1370,6 +1392,50 @@ def up(ctx, from_compose, public_service, region, aws_profile,
         )
         target.write_text(text)
         click.echo(f"  written ({len(text)} bytes).\n")
+
+    # --- Step 1.25: --domain wiring (rc-e5u.46.7) ---
+    if domain:
+        from remote_compose.init_from_compose import _patch_rc_yml_domain
+        # Pre-flight: verify the configured Route 53 hosted zone exists in
+        # the user's account/profile. Cheaper to fail here than after the
+        # 5-min terraform apply that would error on aws_route53_record.
+        from remote_compose.init_from_compose import _zone_from_domain_drop_leftmost
+        zone_check = route53_zone or _zone_from_domain_drop_leftmost(domain)
+        try:
+            import boto3
+            session = boto3.Session(profile_name=aws_profile, region_name=region)
+            r53 = session.client("route53")
+            zones = r53.list_hosted_zones().get("HostedZones") or []
+            zone_names = {z.get("Name", "").rstrip(".") for z in zones}
+            if zone_check.rstrip(".") not in zone_names:
+                raise click.ClickException(
+                    f"--domain pre-flight: Route 53 hosted zone "
+                    f"'{zone_check}' not found in profile {aws_profile!r}. "
+                    f"Existing zones: {sorted(zone_names) or '(none)'}. "
+                    f"Override with --route53-zone <zone-you-own>."
+                )
+        except click.ClickException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            click.echo(
+                f"  WARN: could not verify Route 53 zone {zone_check!r} "
+                f"({type(exc).__name__}: {exc}); proceeding anyway.",
+                err=True,
+            )
+        try:
+            wired = _patch_rc_yml_domain(
+                target, domain, list(aliases or []), route53_zone=route53_zone,
+            )
+        except ValueError as exc:
+            raise click.ClickException(f"--domain: {exc}")
+        click.echo(
+            f"  Domain wired (rc-e5u.46.7): "
+            f"services.{wired['public_service']}.domain = {wired['domain']}; "
+            f"route53_zone = {wired['route53_zone']}"
+        )
+        if wired["aliases"]:
+            click.echo(f"    aliases: {', '.join(wired['aliases'])}")
+        click.echo("")
 
     # --- Step 1.5: auto-fix nginx for ECS when compose trips .44.18 + Django ---
     # rc-e5u.46.2: when the user's nginx.conf has 'upstream { server X:Y; }'
