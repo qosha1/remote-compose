@@ -53,6 +53,135 @@ class VPCService(BaseService):
             'Tags': self._build_tags(cluster_name, resource_label, extra),
         }]
 
+    def _discover_vpc_resources(
+        self, ec2, vpc_id: str, cluster_name: str,
+    ) -> Dict[str, Any]:
+        """Discover the topology of an existing managed VPC.
+
+        Used when ``provision_vpc`` finds a VPC tagged for this cluster
+        but the DB record is missing or partial (remote-compose-tff).
+        Returns a dict with the same keys as the VPCInfrastructure
+        model so the caller can pass it to get_or_create defaults or
+        a save() update.
+
+        Best-effort: each step is wrapped in try/except so a missing
+        sub-resource (e.g. NAT gateway never created) doesn't blow up
+        the discovery — that field comes back None and the caller
+        backfills only what's present.
+        """
+        out: Dict[str, Any] = {
+            'vpc_cidr': None,
+            'public_subnet_ids': None,
+            'private_subnet_ids': None,
+            'internet_gateway_id': None,
+            'nat_gateway_id': None,
+            'public_route_table_id': None,
+            'private_route_table_id': None,
+        }
+        # VPC CIDR.
+        try:
+            resp = ec2.describe_vpcs(VpcIds=[vpc_id])
+            vpcs = resp.get('Vpcs') if isinstance(resp, dict) else None
+            if isinstance(vpcs, list) and vpcs and isinstance(vpcs[0], dict):
+                out['vpc_cidr'] = vpcs[0].get('CidrBlock')
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"discover_vpc: describe_vpcs({vpc_id}) failed: {exc}"
+            )
+
+        # Subnets — public/private split via Name tag suffix
+        # (managed VPCs always use this convention, set by the
+        # provision_vpc create path).
+        try:
+            resp = ec2.describe_subnets(
+                Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+            )
+            public_ids: list[str] = []
+            private_ids: list[str] = []
+            subnets = resp.get('Subnets') if isinstance(resp, dict) else None
+            for s in (subnets if isinstance(subnets, list) else []):
+                name = next(
+                    (t.get('Value') for t in s.get('Tags') or []
+                     if t.get('Key') == 'Name'),
+                    '',
+                ) or ''
+                sid = s.get('SubnetId')
+                if not sid:
+                    continue
+                if 'public-subnet' in name:
+                    public_ids.append(sid)
+                elif 'private-subnet' in name:
+                    private_ids.append(sid)
+                elif s.get('MapPublicIpOnLaunch'):
+                    # Untagged-but-public-by-attr — still classify.
+                    public_ids.append(sid)
+                else:
+                    private_ids.append(sid)
+            if public_ids:
+                out['public_subnet_ids'] = sorted(public_ids)
+            if private_ids:
+                out['private_subnet_ids'] = sorted(private_ids)
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"discover_vpc: describe_subnets({vpc_id}) failed: {exc}"
+            )
+
+        # Internet gateway (one per VPC).
+        try:
+            resp = ec2.describe_internet_gateways(
+                Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}]
+            )
+            igws = resp.get('InternetGateways') if isinstance(resp, dict) else None
+            igws = igws if isinstance(igws, list) else []
+            if igws:
+                out['internet_gateway_id'] = igws[0].get('InternetGatewayId')
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"discover_vpc: describe_internet_gateways failed: {exc}"
+            )
+
+        # NAT gateway (optional — may not exist for cost-optimized VPCs).
+        try:
+            resp = ec2.describe_nat_gateways(
+                Filters=[
+                    {'Name': 'vpc-id', 'Values': [vpc_id]},
+                    {'Name': 'state', 'Values': ['available', 'pending']},
+                ]
+            )
+            ngws = resp.get('NatGateways') if isinstance(resp, dict) else None
+            ngws = ngws if isinstance(ngws, list) else []
+            if ngws:
+                out['nat_gateway_id'] = ngws[0].get('NatGatewayId')
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"discover_vpc: describe_nat_gateways failed: {exc}"
+            )
+
+        # Route tables — public/private split via Name tag suffix.
+        try:
+            resp = ec2.describe_route_tables(
+                Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+            )
+            rts = resp.get('RouteTables') if isinstance(resp, dict) else None
+            for rt in (rts if isinstance(rts, list) else []):
+                name = next(
+                    (t.get('Value') for t in rt.get('Tags') or []
+                     if t.get('Key') == 'Name'),
+                    '',
+                ) or ''
+                rt_id = rt.get('RouteTableId')
+                if not rt_id:
+                    continue
+                if name.endswith('-public-rt') or 'public-rt' in name:
+                    out['public_route_table_id'] = rt_id
+                elif name.endswith('-private-rt') or 'private-rt' in name:
+                    out['private_route_table_id'] = rt_id
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"discover_vpc: describe_route_tables failed: {exc}"
+            )
+        return out
+
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
@@ -89,14 +218,44 @@ class VPCService(BaseService):
         existing = self._find_existing_vpc(cluster_name, region, credential)
         if existing:
             self.log_info(f"Found existing VPC for cluster {cluster_name}: {existing}")
-            # Return or update the model
-            vpc_infra, _ = VPCInfrastructure.objects.get_or_create(
-                cluster=cluster,
-                defaults={'vpc_id': existing, 'vpc_cidr': vpc_cidr, 'is_managed': True},
+            # remote-compose-tff: when the DB record is gone but the VPC
+            # still exists in AWS (e.g. cluster_db migrated, manual
+            # delete), get_or_create lands an EMPTY VPCInfrastructure
+            # row. Subsequent ALB / EFS / ECS provisioning then breaks
+            # on missing subnet_ids. Discover the VPC's full topology
+            # via boto3 and populate every field.
+            discovered = self._discover_vpc_resources(
+                ec2, existing, cluster_name,
             )
+            defaults = {
+                'vpc_id': existing,
+                'vpc_cidr': discovered.get('vpc_cidr') or vpc_cidr,
+                'is_managed': True,
+                **{k: v for k, v in discovered.items() if v is not None},
+            }
+            vpc_infra, created = VPCInfrastructure.objects.get_or_create(
+                cluster=cluster,
+                defaults=defaults,
+            )
+            # Backfill any field still empty on the existing record. This
+            # heals records created before the discovery step landed.
+            update_fields: list[str] = []
             if vpc_infra.vpc_id != existing:
                 vpc_infra.vpc_id = existing
-                vpc_infra.save(update_fields=['vpc_id'])
+                update_fields.append('vpc_id')
+            for field, value in discovered.items():
+                if value is None:
+                    continue
+                current = getattr(vpc_infra, field, None)
+                if not current:
+                    setattr(vpc_infra, field, value)
+                    update_fields.append(field)
+            if update_fields:
+                vpc_infra.save(update_fields=update_fields)
+                self.log_info(
+                    f"Backfilled VPC infrastructure record for "
+                    f"{cluster_name}: {update_fields}"
+                )
             return vpc_infra
 
         try:
