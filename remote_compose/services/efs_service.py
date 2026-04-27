@@ -248,16 +248,29 @@ class EFSService(BaseService):
         region: Optional[str] = None,
         credential: Optional[SecureCredential] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Find a file system by its Name tag."""
+        """Find a file system by its Name tag.
+
+        remote-compose-4rm: Earlier behavior made an extra
+        ``describe_tags`` call for EVERY file system in the account
+        (N+1 API), AND ``describe_tags`` is deprecated (AWS replaced
+        it with ``list_tags_for_resource``). Tags are already included
+        in the ``describe_file_systems`` response under each fs's
+        ``Tags`` key — read them inline. Drops one API call per fs and
+        eliminates the deprecated-API dependency.
+        """
         client = self._get_efs_client(region, credential)
 
         try:
             paginator = client.get_paginator('describe_file_systems')
             for page in paginator.paginate():
                 for fs in page.get('FileSystems', []):
-                    # Check tags for Name
-                    tags_response = client.describe_tags(FileSystemId=fs['FileSystemId'])
-                    tags = {t['Key']: t['Value'] for t in tags_response.get('Tags', [])}
+                    # Tags are already in the describe_file_systems
+                    # response — no extra round-trip needed.
+                    tags = {
+                        t['Key']: t['Value']
+                        for t in (fs.get('Tags') or [])
+                        if isinstance(t, dict) and 'Key' in t and 'Value' in t
+                    }
                     if tags.get('Name') == name:
                         mount_targets = self._get_mount_target_ids(
                             fs['FileSystemId'], region, credential
