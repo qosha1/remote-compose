@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from pathlib import Path
 
@@ -836,9 +837,15 @@ class ComposeToECSConverter(BaseService):
         return ecs_secrets
 
     def _convert_command(self, command: Any) -> List[str]:
-        """Convert command to list format."""
+        """Convert command to list format.
+
+        String form uses shlex.split so quoted args survive — ``sh -c
+        "echo hello"`` becomes ``['sh', '-c', 'echo hello']`` instead of
+        ``['sh', '-c', '"echo', 'hello"']`` (the str.split() bug from
+        remote-compose-l9o).
+        """
         if isinstance(command, str):
-            return command.split()
+            return shlex.split(command)
         elif isinstance(command, list):
             return [str(c) for c in command]
         return []
