@@ -2972,36 +2972,8 @@ def plan_cmd(ctx):
     raise click.exceptions.Exit(1)
 
 
-@cli.command(name='doctor')
-@click.option('--fix', is_flag=True,
-              help='Attempt to install/upgrade missing deps via the platform package manager.')
-def doctor_cmd(fix):
-    """Check that terraform/docker/python/AWS are set up correctly."""
-    from remote_compose import doctor
-    report = doctor.run()
-    click.echo(report.render_table())
-    if not report.ok and not fix:
-        click.echo("\n  Some hard requirements are missing. Re-run with --fix "
-                   "to attempt repair, or `rc install`.", err=True)
-        raise click.exceptions.Exit(1)
-    if fix and not report.ok:
-        click.echo("\n  Attempting fixes...\n")
-        outcomes = doctor.apply_fixes(report)
-        for name, ok, detail in outcomes:
-            mark = "✓" if ok else "✗"
-            click.echo(f"    {mark} {name}: {detail}")
-        click.echo("\n  Re-running checks...\n")
-        report = doctor.run()
-        click.echo(report.render_table())
-        if not report.ok:
-            raise click.exceptions.Exit(1)
-
-
-@cli.command(name='install')
-@click.pass_context
-def install_cmd(ctx):
-    """Install/upgrade every prerequisite (alias for `rc doctor --fix`)."""
-    ctx.invoke(doctor_cmd, fix=True)
+# rc doctor + rc install moved to cli_commands/doctor.py
+# (registered at the bottom of this file via cli.add_command)
 
 
 @cli.command(name='migrate')
@@ -3139,248 +3111,12 @@ def lifecycle_cmd(ctx, hook, service):
         raise click.exceptions.Exit(result.exit_code)
 
 
-# =============================================================================
-# rc copilot import — migrate AWS Copilot apps to rc.yml v2
-# =============================================================================
-
-@cli.group(name='copilot')
-def copilot_group():
-    """AWS Copilot migration. (Copilot is end-of-support 2026-06-12.)"""
-    pass
+# rc copilot + rc compose moved to cli_commands/copilot.py + cli_commands/compose.py
+# (registered at the bottom of this file via cli.add_command)
 
 
-@copilot_group.command(name='import')
-@click.option('--from', 'from_dir', default='./copilot', show_default=True,
-              type=click.Path(exists=True, file_okay=False),
-              help='Path to the source copilot/ directory.')
-@click.option('--out', 'out_dir', default='.', show_default=True,
-              type=click.Path(file_okay=False),
-              help='Where to write rc.yml + docker-compose.yml + IMPORT_SUMMARY.md.')
-@click.option('--env', 'env_name', default=None,
-              help="Copilot environment to pin (production/staging/dev). "
-                   "If unset, base manifest values are used and "
-                   "${COPILOT_ENVIRONMENT_NAME} stays literal in secret ARNs.")
-@click.option('--project', 'project_name', default=None,
-              help='rc.yml v2 project field. Defaults to the parent dir name '
-                   'of the copilot/ tree.')
-@click.option('--force', is_flag=True,
-              help='Overwrite existing rc.yml / docker-compose.yml in --out.')
-def copilot_import(from_dir, out_dir, env_name, project_name, force):
-    """Translate a copilot/ tree to rc.yml v2 + docker-compose.yml.
-
-    \b
-    Reads every copilot/<service>/manifest.yml + copilot/environments/*,
-    runs the translators, and writes:
-      <out>/rc.yml                  rc.yml v2
-      <out>/docker-compose.yml      compose file with build/image + env
-      <out>/IMPORT_SUMMARY.md       per-service translation report
-
-    AWS Copilot reaches end-of-support on 2026-06-12. This command is the
-    fast path off it.
-    """
-    import yaml as _yaml
-    from pathlib import Path as _Path
-    from remote_compose.copilot import discover, DiscoveryError
-    from remote_compose.copilot.translate import compose_app
-
-    src = _Path(from_dir).resolve()
-    target = _Path(out_dir).resolve()
-    target.mkdir(parents=True, exist_ok=True)
-
-    rc_path = target / 'rc.yml'
-    compose_path = target / 'docker-compose.yml'
-    summary_path = target / 'IMPORT_SUMMARY.md'
-
-    for p in (rc_path, compose_path):
-        if p.exists() and not force:
-            click.echo(
-                f"refusing to overwrite {p} — re-run with --force to replace.",
-                err=True,
-            )
-            raise click.exceptions.Exit(1)
-
-    try:
-        app = discover(src)
-    except DiscoveryError as exc:
-        click.echo(f"rc copilot import: {exc}", err=True)
-        raise click.exceptions.Exit(1)
-
-    result = compose_app(app, project=project_name, env=env_name)
-
-    rc_path.write_text(_yaml.safe_dump(result.rc_yml, sort_keys=False))
-    compose_path.write_text(_yaml.safe_dump(result.docker_compose, sort_keys=False))
-    summary_path.write_text(result.summary)
-
-    click.echo(f"\nrc copilot import — {result.rc_yml['project']}")
-    click.echo(f"  source:    {src}")
-    click.echo(f"  env:       {env_name or '(base manifest values)'}")
-    click.echo(f"  services:  {len(result.rc_yml['services'])}")
-    if result.warnings:
-        click.echo(f"  warnings:  {len(result.warnings)} (see IMPORT_SUMMARY.md)")
-    # rc-e5u.43.8: surface untranslated addon CFN templates so the user can
-    # decide what to do (RDS, S3, DynamoDB etc. need manual replacement).
-    addon_count = sum(len(s.addons or []) for s in app.services)
-    if addon_count:
-        click.echo(
-            f"  addons:    {addon_count} CFN template(s) — manual "
-            f"translation required (see IMPORT_SUMMARY.md)"
-        )
-    click.echo(f"\n  wrote {rc_path}")
-    click.echo(f"  wrote {compose_path}")
-    click.echo(f"  wrote {summary_path}")
-    click.echo(f"\n  Next: review the summary, then `rc plan` from {target}")
-
-
-# =============================================================================
-# rc compose import — scaffold a starter rc.yml from a docker-compose.yml
-# =============================================================================
-
-@cli.group(name='compose')
-def compose_group():
-    """docker-compose interop helpers."""
-    pass
-
-
-@compose_group.command(name='import')
-@click.option('--from', 'compose_file', default='./docker-compose.yml',
-              show_default=True,
-              type=click.Path(exists=True, dir_okay=False),
-              help='Path to the source docker-compose.yml.')
-@click.option('--out', 'out_path', default='./rc.yml', show_default=True,
-              type=click.Path(dir_okay=False),
-              help='Where to write the scaffolded rc.yml.')
-@click.option('--project', 'project_name', default=None,
-              help='rc.yml v2 project field. Defaults to the parent dir name '
-                   'of the compose file.')
-@click.option('--exclude', 'exclude_csv', default=None,
-              help='Comma-separated list of compose service names to drop '
-                   'from the deploy set (lands under compose.exclude in '
-                   'the output). Useful for dev-only sidecars: e.g. '
-                   '--exclude=ngrok,docs-builder,eval-app.')
-@click.option('--force', is_flag=True,
-              help='Overwrite an existing rc.yml at --out.')
-def compose_import(compose_file, out_path, project_name, exclude_csv, force):
-    """Scaffold a starter rc.yml v2 from an existing docker-compose.yml.
-
-    \b
-    Reads docker-compose.yml and writes an rc.yml shell with project +
-    provider + provider_config defaults, plus per-service overrides for
-    things we can detect (public ports, db services with volume hints,
-    worker-shaped names). env_file refs surface as commented stubs in the
-    secrets: block.
-
-    \b
-    The auto-import path makes services[] OPTIONAL — compose drives the
-    deploy set with cpu=256/memory=512 defaults. Add a service entry only
-    to OVERRIDE those defaults.
-
-    \b
-    Examples:
-      rc compose import
-      rc compose import --from docker-compose.prod.yml --project myapp
-      rc compose import --exclude=ngrok,eval-app,docs
-    """
-    from pathlib import Path as _Path
-    from remote_compose.compose_import import scaffold_rc_yml
-
-    src = _Path(compose_file).resolve()
-    dst = _Path(out_path).resolve()
-
-    if dst.exists() and not force:
-        click.echo(
-            f"refusing to overwrite {dst} — re-run with --force to replace.",
-            err=True,
-        )
-        raise click.exceptions.Exit(1)
-
-    excluded = (
-        [s.strip() for s in exclude_csv.split(",") if s.strip()]
-        if exclude_csv else None
-    )
-    try:
-        rc_yml = scaffold_rc_yml(src, project=project_name, exclude=excluded)
-    except ValueError as exc:
-        click.echo(f"rc compose import: {exc}", err=True)
-        raise click.exceptions.Exit(1)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(rc_yml)
-
-    click.echo(f"\nrc compose import")
-    click.echo(f"  source:  {src}")
-    click.echo(f"  wrote:   {dst}")
-    click.echo(f"\n  Next: edit {dst.name} (provider region, secrets), "
-               f"then `rc plan`.")
-
-
-# =============================================================================
-# rc audit — sweep an AWS account for resources matching a project
-# =============================================================================
-
-@cli.command(name='audit')
-@click.option('--project', 'project_name', default=None,
-              help='Project name to scan for. Defaults to rc.yml v2 project.')
-@click.option('--region', 'region_name', default=None,
-              help='AWS region to scan. Defaults to rc.yml v2 provider_config.ecs.region.')
-@click.option('--profile', 'profile_name', default=None,
-              help='AWS profile. Defaults to rc.yml v2 provider_config.ecs.aws_profile.')
-@click.option('--delete', is_flag=True,
-              help='Prompt to delete every leftover. Off by default — dry-run is the safer default.')
-@click.pass_context
-def audit_cmd(ctx, project_name, region_name, profile_name, delete):
-    """Find AWS resources matching this project — orphans, leftovers, etc.
-
-    \b
-    Reverse of `rc destroy`. Sweeps every resource class terraform owns
-    and reports anything tagged Project=<name> or named with the project
-    prefix. Useful as a post-destroy verifier or account-hygiene check.
-
-    \b
-    Examples:
-      rc audit
-      rc audit --project rc-test-foo --region us-west-1
-      rc audit --delete       # interactive cleanup
-    """
-    import boto3
-    from remote_compose.audit import audit_project
-    from pathlib import Path as _Path
-
-    # Resolve missing args from rc.yml v2 if present.
-    if not project_name or not region_name or not profile_name:
-        path = _Path(ctx.obj.get('config_path') or 'rc.yml')
-        if path.exists():
-            try:
-                from remote_compose.cli_v2 import load_rc_yml
-                version, _, v2 = load_rc_yml(path)
-                if version == 2 and v2 is not None:
-                    project_name = project_name or v2.project
-                    ecs_cfg = (v2.provider_config or {}).get('ecs') or {}
-                    region_name = region_name or ecs_cfg.get('region')
-                    profile_name = profile_name or ecs_cfg.get('aws_profile')
-            except Exception:
-                pass
-
-    if not project_name:
-        click.echo("rc audit: --project required (or run from a dir with rc.yml v2).",
-                   err=True)
-        raise click.exceptions.Exit(1)
-    if not region_name:
-        click.echo("rc audit: --region required (or set provider_config.ecs.region in rc.yml).",
-                   err=True)
-        raise click.exceptions.Exit(1)
-
-    session = boto3.Session(region_name=region_name, profile_name=profile_name)
-    report = audit_project(session, project=project_name, region=region_name)
-    click.echo(report.render())
-
-    if not delete or report.is_clean:
-        return
-
-    if not click.confirm(f"\nDelete {len(report.findings)} resource(s)?"):
-        click.echo("Aborted.")
-        return
-    click.echo("\n  --delete is dry-run today. Per-resource deletion will land "
-               "in the next iteration; for now use the listed identifiers with "
-               "the matching `aws <svc> delete-...` commands.", err=True)
+# rc audit moved to cli_commands/audit.py
+# (registered at the bottom of this file via cli.add_command)
 
 
 # =============================================================================
@@ -3582,6 +3318,25 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
         "\n  Then `rc deploy --services nginx` should produce a healthy "
         "ALB target on first attempt — no resolver/FQDN/Host iteration loop."
     )
+
+
+# =============================================================================
+# Register commands extracted into cli_commands/* modules
+# =============================================================================
+# As we split this file, command modules export click commands/groups that get
+# registered here. cli.py stays the entry point; the modules own the bodies.
+
+from .cli_commands.audit import audit_cmd as _audit_cmd
+from .cli_commands.compose import compose_group as _compose_group
+from .cli_commands.copilot import copilot_group as _copilot_group
+from .cli_commands.doctor import doctor_cmd as _doctor_cmd
+from .cli_commands.doctor import install_cmd as _install_cmd
+
+cli.add_command(_audit_cmd)
+cli.add_command(_compose_group)
+cli.add_command(_copilot_group)
+cli.add_command(_doctor_cmd)
+cli.add_command(_install_cmd)
 
 
 if __name__ == '__main__':
