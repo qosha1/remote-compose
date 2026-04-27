@@ -19,12 +19,19 @@ class RemoteComposeError(Exception):
 
 
 # Connection Errors (2000-2999)
-class ConnectionError(RemoteComposeError):
-    """Raised when connection to remote host fails."""
+class RemoteConnectionError(RemoteComposeError):
+    """Raised when connection to a remote host (SSH / TCP / HTTP) fails.
+
+    Renamed from ``ConnectionError`` (remote-compose-7fn) — the old name
+    shadowed Python's builtin ``ConnectionError``, so any
+    ``except ConnectionError`` in this codebase silently caught network
+    OS-level errors (refused / reset / aborted) as if they were rc-domain
+    errors. New code should always use this name.
+    """
     pass
 
 
-class SSHConnectionError(ConnectionError):
+class SSHConnectionError(RemoteConnectionError):
     """Raised when SSH connection fails."""
 
     def __init__(self, message, host=None, port=None, **kwargs):
