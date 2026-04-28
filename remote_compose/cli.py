@@ -70,6 +70,7 @@ from .cli_commands.service_ops import (
     status_cmd as _status_cmd,
 )
 from .cli_commands.up import up_cmd as _up_cmd
+from .cli_commands.v1_migrate import v1_group as _v1_group
 
 cli.add_command(_audit_cmd)
 cli.add_command(_compose_group)
@@ -94,6 +95,7 @@ cli.add_command(_restart_cmd)
 cli.add_command(_secrets_group)
 cli.add_command(_status_cmd)
 cli.add_command(_up_cmd)
+cli.add_command(_v1_group)
 
 
 if __name__ == '__main__':

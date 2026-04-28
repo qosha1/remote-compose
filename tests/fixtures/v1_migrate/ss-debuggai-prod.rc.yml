@@ -1,0 +1,54 @@
+# rc.yml — Remote Compose configuration for StartSimpli
+
+cluster: ss-debuggai-prod
+region: us-west-2
+aws_profile: debuggai
+compose_file: docker-compose.ecs.yml
+project_name: ss-debuggai
+
+vpc_cidr: 10.0.0.0/16
+domain: api.startsimpli.com
+
+secrets:
+  - .envs/.production/.django
+  - .envs/.production/.postgres
+
+backup:
+  bucket: ss-debuggai-db-dumps
+  service: django
+
+services:
+  postgres:
+    cpu: 512
+    memory: 1024
+    type: infrastructure
+  redis:
+    cpu: 256
+    memory: 512
+    type: infrastructure
+  django:
+    cpu: 1024
+    memory: 4096
+    type: application
+    health_check_path: /api/health/
+    ephemeral_storage: 40
+  celery-worker:
+    cpu: 4096
+    memory: 8192
+    type: worker
+  celery-worker-linkedin:
+    cpu: 1024
+    memory: 2048
+    type: worker
+  celery-beat:
+    cpu: 512
+    memory: 1024
+    type: worker
+  nginx:
+    cpu: 256
+    memory: 512
+    type: proxy
+    public: true
+    port: 80
+    health_check_path: /health
+    default_target: true
