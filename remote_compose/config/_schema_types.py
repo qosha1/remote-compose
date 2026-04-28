@@ -298,6 +298,33 @@ class TerraformBackend:
     dynamodb_table: Optional[str] = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def validate(self) -> None:
+        """Strict schema validation.
+
+        ``type=s3`` requires both ``bucket`` and ``key``. ``dynamodb_table``
+        is optional but recommended — without it, terraform's s3 backend
+        runs without state-locking and concurrent ``rc deploy`` calls can
+        corrupt state. We emit a stderr warning in that case rather than
+        raise so back-compat with existing single-developer setups stays
+        intact.
+        """
+        if self.type == "s3":
+            if not self.bucket:
+                raise ConfigError(
+                    "terraform.backend type=s3 requires bucket"
+                )
+            if not self.key:
+                raise ConfigError(
+                    "terraform.backend type=s3 requires key"
+                )
+            if not self.dynamodb_table:
+                import sys
+                sys.stderr.write(
+                    "warning: terraform.backend type=s3 without "
+                    "dynamodb_table — concurrent rc deploys can corrupt "
+                    "state. Add a lock table to guard against this.\n"
+                )
+
 
 @dataclass
 class TerraformConfig:

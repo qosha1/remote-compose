@@ -150,8 +150,15 @@ services:
                    '--from-compose). Default: auto-enabled when project '
                    'starts with rc-test-, off otherwise. UNSAFE for '
                    'production stacks. See rc-e5u.46.4.')
+@click.option('--remote-backend', 'remote_backend', is_flag=True,
+              help='Bootstrap an S3 + DynamoDB-locked terraform backend so '
+                   '`rc deploy` works from any laptop / CI box. Discovers '
+                   'the AWS account id, creates s3://<account_id>-rc-tfstate '
+                   '+ DynamoDB table rc-tfstate-locks (idempotent), and '
+                   'writes the s3 backend block into the generated rc.yml. '
+                   'Without this flag rc init defaults to a local backend.')
 def init_cmd(use_v1, from_compose, output_path, public_service, region, aws_profile,
-             testing_defaults):
+             testing_defaults, remote_backend):
     """Generate an rc.yml template in the current directory.
 
     With --from-compose, read an existing docker-compose.yml and scaffold
@@ -184,6 +191,19 @@ def init_cmd(use_v1, from_compose, output_path, public_service, region, aws_prof
         click.echo("Review the generated file, then run `rc plan`.")
         return
 
+    if remote_backend:
+        if use_v1:
+            raise click.UsageError(
+                "--remote-backend requires v2 schema; drop --v1"
+            )
+        text = _render_v2_with_remote_backend(
+            region=region, aws_profile=aws_profile,
+        )
+        target.write_text(text)
+        click.echo(f"Created {target} with s3+dynamodb backend")
+        click.echo("Edit project/services and run `rc plan`.")
+        return
+
     template = RC_TEMPLATE_V1 if use_v1 else RC_TEMPLATE_V2
     target.write_text(template)
     click.echo(f"Created {target}")
@@ -191,3 +211,63 @@ def init_cmd(use_v1, from_compose, output_path, public_service, region, aws_prof
         click.echo("Legacy v1 schema. Edit cluster/region/services and run `rc deploy`.")
     else:
         click.echo("v2 schema. Edit project/region/services and run `rc plan`.")
+
+
+def _render_v2_with_remote_backend(*, region: str, aws_profile: str | None) -> str:
+    """Bootstrap S3 bucket + DynamoDB lock table, then return rc.yml v2
+    text whose terraform.backend block points at them.
+
+    Idempotent — re-running on an already-bootstrapped account is a no-op
+    (head_bucket OK / describe_table OK).
+    """
+    import boto3
+    from remote_compose.state_backend import bootstrap as _bootstrap
+
+    session = boto3.Session(profile_name=aws_profile, region_name=region)
+    account_id = _bootstrap.discover_account_id(session=session)
+    bucket = _bootstrap.bootstrap_bucket(
+        account_id=account_id, region=region, session=session,
+    )
+    table = _bootstrap.bootstrap_lock_table(region=region, session=session)
+
+    # Default project / key are placeholders; user is expected to edit
+    # before `rc plan`. The state-key path keeps per-project namespacing
+    # under the shared bucket: <project>/<env>/ecs.tfstate.
+    project = "my-project"
+    key = f"{project}/prod/ecs.tfstate"
+
+    profile_line = f"    aws_profile: {aws_profile}\n" if aws_profile else ""
+
+    return (
+        "version: 2\n"
+        f"project: {project}\n"
+        "compose_file: docker-compose.yml\n"
+        "provider: ecs\n"
+        "\n"
+        "provider_config:\n"
+        "  ecs:\n"
+        f"    region: {region}\n"
+        f"    cluster: {project}-cluster\n"
+        f"{profile_line}"
+        "    vpc_cidr: 10.42.0.0/16\n"
+        "    default_launch_type: FARGATE\n"
+        "\n"
+        "terraform:\n"
+        "  output_dir: ./terraform/${provider}\n"
+        "  backend:\n"
+        "    type: s3\n"
+        f"    bucket: {bucket}\n"
+        f"    key: {key}\n"
+        f"    region: {region}\n"
+        f"    dynamodb_table: {table}\n"
+        "\n"
+        "services:\n"
+        "  web:\n"
+        "    cpu: 512\n"
+        "    memory: 1024\n"
+        "    type: application\n"
+        "    public: true\n"
+        "    port: 80\n"
+        "    health_check_path: /health/\n"
+        "    default_target: true\n"
+    )

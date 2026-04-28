@@ -123,10 +123,27 @@ def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, d
         )
         services_list = stale
     from remote_compose.cli_v2 import dispatch_if_v2
-    if dispatch_if_v2(
-        ctx.obj.get('config_path'), 'deploy',
-        ttl=ttl, services=services_list, tag=tag, dev=dev_mode,
-    ):
+    from remote_compose.terraform.runner import TerraformError
+    try:
+        handled = dispatch_if_v2(
+            ctx.obj.get('config_path'), 'deploy',
+            ttl=ttl, services=services_list, tag=tag, dev=dev_mode,
+        )
+    except TerraformError as exc:
+        # Friendly rendering for the most common confusing failure: another
+        # rc deploy is in flight and holds the s3-backend dynamodb lock.
+        # terraform's stock message buries the cause in 12 lines of stack;
+        # surface a one-liner the user can act on.
+        msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
+        if "state lock" in msg or "conditionalcheckfailedexception" in msg:
+            raise click.ClickException(
+                "another rc deploy is already in flight (terraform state "
+                "lock held). Wait for it to finish, then retry. Force-"
+                "unlock with `terraform force-unlock <id>` ONLY if you're "
+                "sure no concurrent apply is running."
+            )
+        raise
+    if handled:
         return
     if ttl:
         click.echo(

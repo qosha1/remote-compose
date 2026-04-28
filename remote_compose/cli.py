@@ -47,6 +47,7 @@ def cli(ctx, config_path):
 # Register every command module. cli.py owns the registration; module owns body.
 # =============================================================================
 
+from .cli_commands.adopt import adopt_cmd as _adopt_cmd
 from .cli_commands.audit import audit_cmd as _audit_cmd
 from .cli_commands.compose import compose_group as _compose_group
 from .cli_commands.copilot import copilot_group as _copilot_group
@@ -72,6 +73,7 @@ from .cli_commands.service_ops import (
 from .cli_commands.up import up_cmd as _up_cmd
 from .cli_commands.v1_migrate import v1_group as _v1_group
 
+cli.add_command(_adopt_cmd)
 cli.add_command(_audit_cmd)
 cli.add_command(_compose_group)
 cli.add_command(_copilot_group)
