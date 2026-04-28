@@ -237,45 +237,218 @@ class TestImportStatePhase:
 # ServicesCutoverPhase
 # ---------------------------------------------------------------------
 
+class _FakeEcs:
+    """boto3 ecs.client stub: serves describe_services + describe_task_definition,
+    captures register_task_definition + update_service calls.
+    """
+
+    def __init__(self, services: dict[str, dict]):
+        # services: {service_name: existing_task_def_dict}
+        self._services = services
+        self.registered: list[dict] = []
+        self.updates: list[dict] = []
+
+    def list_services(self, cluster):
+        return {
+            "serviceArns": [
+                f"arn:aws:ecs:us-west-2:0:service/{cluster}/{n}"
+                for n in self._services
+            ],
+        }
+
+    def describe_services(self, cluster, services):
+        out = []
+        for name in services:
+            if name in self._services:
+                out.append({
+                    "serviceName": name,
+                    "taskDefinition": (
+                        f"arn:aws:ecs:us-west-2:0:task-definition/"
+                        f"{name}:1"
+                    ),
+                })
+        return {"services": out}
+
+    def describe_task_definition(self, taskDefinition):
+        # taskDefinition is "...:family:rev"; family is parent of name
+        family = taskDefinition.split("/")[-1].split(":")[0]
+        return {"taskDefinition": self._services[family]}
+
+    def register_task_definition(self, **kwargs):
+        self.registered.append(kwargs)
+        return {
+            "taskDefinition": {
+                "taskDefinitionArn": (
+                    f"arn:aws:ecs:us-west-2:0:task-definition/"
+                    f"{kwargs['family']}:2"
+                ),
+            },
+        }
+
+    def update_service(self, **kwargs):
+        self.updates.append(kwargs)
+        return {"service": {"serviceArn": "arn:..."}}
+
+
+def _v1_django_task_def() -> dict:
+    """A representative v1-shaped task def (envfile-injected secrets in env)."""
+    return {
+        "family": "ss-debuggai-django",
+        "networkMode": "awsvpc",
+        "requiresCompatibilities": ["FARGATE"],
+        "cpu": "1024",
+        "memory": "4096",
+        "executionRoleArn": "arn:aws:iam::033937118837:role/ecsTaskExecutionRole",
+        "taskRoleArn": "arn:aws:iam::033937118837:role/ecsTaskRole",
+        "ephemeralStorage": {"sizeInGiB": 40},
+        "containerDefinitions": [{
+            "name": "django",
+            "image": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/django:abc123",
+            "essential": True,
+            # v1 envfile injection: real secret values pasted in env (will be stripped).
+            "environment": [
+                {"name": "DEBUG", "value": "False"},  # not in plan.secret_arn_map -> kept
+                {"name": "POSTGRES_PASSWORD", "value": "real-secret-leaked"},  # collides -> dropped
+                {"name": "DJANGO_LOG_LEVEL", "value": "INFO"},
+            ],
+            "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
+            "mountPoints": [{
+                "sourceVolume": "static", "containerPath": "/app/static",
+                "readOnly": False,
+            }],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/ss-debuggai-prod",
+                    "awslogs-region": "us-west-2",
+                    "awslogs-stream-prefix": "django",
+                },
+            },
+        }],
+        "volumes": [{
+            "name": "static",
+            "efsVolumeConfiguration": {
+                "fileSystemId": "fs-0e8a2f9d1e006af95",
+                "rootDirectory": "/",
+                "transitEncryption": "ENABLED",
+                "authorizationConfig": {
+                    "accessPointId": "fsap-0027054fe47e721f1",
+                    "iam": "DISABLED",
+                },
+            },
+        }],
+        # Fields that describe_task_definition returns but RegisterTaskDefinition rejects:
+        "taskDefinitionArn": "arn:aws:ecs:us-west-2:0:task-definition/ss-debuggai-django:1",
+        "revision": 1,
+        "status": "ACTIVE",
+        "registeredAt": "2026-01-01T00:00:00Z",
+        "registeredBy": "arn:aws:iam::0:user/ci",
+    }
+
+
 class TestServicesCutoverPhase:
-    def test_updates_task_definitions_for_each_service(self, plan, monkeypatch):
-        updated = []
+    def test_rolls_each_v1_service_with_v2_secrets(self, plan):
+        # Stand up 7 v1 services, all with the same shape skeleton.
+        services = {
+            f"ss-debuggai-{name}": {**_v1_django_task_def(), "family": f"ss-debuggai-{name}"}
+            for name in [
+                "django", "postgres", "redis", "nginx",
+                "celery-worker", "celery-beat", "celery-worker-linkedin",
+            ]
+        }
+        ecs = _FakeEcs(services)
 
-        class FakeEcs:
-            def register_task_definition(self, **kwargs):
-                updated.append(kwargs["family"])
-                return {"taskDefinition": {"taskDefinitionArn": "arn:..."}}
+        result = ServicesCutoverPhase(
+            plan=plan, ecs_client=ecs,
+        ).run()
+        assert result.ok, result.details
+        # All 7 services registered + rolled.
+        assert len(ecs.registered) == 7
+        assert len(ecs.updates) == 7
 
-            def update_service(self, **kwargs):
-                return {"service": {"serviceArn": "arn:..."}}
+    def test_secrets_arrayed_by_arn_in_each_new_task_def(self, plan):
+        services = {"ss-debuggai-django": _v1_django_task_def()}
+        ecs = _FakeEcs(services)
+        ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
+        td = ecs.registered[0]
+        c0 = td["containerDefinitions"][0]
+        secret_names = {s["name"] for s in c0["secrets"]}
+        assert "POSTGRES_PASSWORD" in secret_names
+        # Every secret valueFrom is a full SM ARN.
+        for s in c0["secrets"]:
+            assert s["valueFrom"].startswith(
+                "arn:aws:secretsmanager:us-west-2:033937118837:secret:"
+            )
 
-        phase = ServicesCutoverPhase(plan=plan, ecs_client=FakeEcs())
-        phase.run()
-        # 7 services in prod; all 7 must be updated.
-        assert len(updated) == 7
+    def test_drops_env_keys_that_collide_with_secrets(self, plan):
+        services = {"ss-debuggai-django": _v1_django_task_def()}
+        ecs = _FakeEcs(services)
+        ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
+        c0 = ecs.registered[0]["containerDefinitions"][0]
+        env_names = {e["name"] for e in c0.get("environment", [])}
+        # Collision: dropped.
+        assert "POSTGRES_PASSWORD" not in env_names
+        # Non-collision: preserved.
+        assert "DEBUG" in env_names
+        assert "DJANGO_LOG_LEVEL" in env_names
 
-    def test_secrets_referenced_by_arn_in_new_task_def(self, plan):
-        # The new task def must put secrets[].valueFrom = full_arn,
-        # never re-create or rename. Otherwise tasks fail to start.
-        registered = []
+    def test_image_volumes_mounts_preserved(self, plan):
+        services = {"ss-debuggai-django": _v1_django_task_def()}
+        ecs = _FakeEcs(services)
+        ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
+        td = ecs.registered[0]
+        c0 = td["containerDefinitions"][0]
+        # Image, ports, mounts, log config preserved verbatim.
+        assert c0["image"].endswith("django:abc123")
+        assert c0["portMappings"] == [{"containerPort": 8000, "protocol": "tcp"}]
+        assert c0["mountPoints"][0]["containerPath"] == "/app/static"
+        # Volumes (the EFS reference) preserved at the task-def level.
+        assert td["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"] == \
+            "fs-0e8a2f9d1e006af95"
+        # Ephemeral storage preserved.
+        assert td["ephemeralStorage"] == {"sizeInGiB": 40}
 
-        class FakeEcs:
-            def register_task_definition(self, **kwargs):
-                registered.append(kwargs)
-                return {"taskDefinition": {"taskDefinitionArn": "arn:..."}}
+    def test_strips_describe_only_fields(self, plan):
+        # RegisterTaskDefinition rejects revision, status, taskDefinitionArn,
+        # registeredAt, registeredBy. Make sure we strip them.
+        services = {"ss-debuggai-django": _v1_django_task_def()}
+        ecs = _FakeEcs(services)
+        ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
+        td = ecs.registered[0]
+        for forbidden in ("revision", "status", "taskDefinitionArn",
+                          "registeredAt", "registeredBy"):
+            assert forbidden not in td, f"{forbidden!r} leaked into RegisterTaskDefinition"
 
-            def update_service(self, **kwargs):
-                return {"service": {"serviceArn": "arn:..."}}
+    def test_aborts_on_error_with_rollback_hint(self, plan):
+        # If register_task_definition raises mid-flight, the phase must
+        # report which services were rolled and how to roll them back.
+        services = {
+            "ss-debuggai-django": _v1_django_task_def(),
+            "ss-debuggai-postgres": _v1_django_task_def(),
+            "ss-debuggai-redis": _v1_django_task_def(),
+            "ss-debuggai-nginx": _v1_django_task_def(),
+            "ss-debuggai-celery-worker": _v1_django_task_def(),
+            "ss-debuggai-celery-beat": _v1_django_task_def(),
+            "ss-debuggai-celery-worker-linkedin": _v1_django_task_def(),
+        }
+        ecs = _FakeEcs(services)
+        # Make register_task_definition fail on the 3rd call.
+        original = ecs.register_task_definition
+        call_count = [0]
 
-        phase = ServicesCutoverPhase(plan=plan, ecs_client=FakeEcs())
-        phase.run()
-        # Find the django task def — it must carry SM ARNs.
-        django_td = next(
-            t for t in registered if t["family"].endswith("django")
-        )
-        secrets = django_td["containerDefinitions"][0].get("secrets", [])
-        arns = [s["valueFrom"] for s in secrets]
-        assert any("POSTGRES_PASSWORD" in arn for arn in arns)
+        def flaky(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 3:
+                raise RuntimeError("simulated AWS throttle")
+            return original(**kwargs)
+
+        ecs.register_task_definition = flaky
+
+        result = ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
+        assert not result.ok
+        # Error message names the failing service + rollback hint.
+        assert "Manual rollback" in result.details
+        assert "throttle" in result.details
 
 
 # ---------------------------------------------------------------------

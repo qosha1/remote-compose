@@ -568,9 +568,12 @@ class ResourceInventory:
                     default_action_type=actions[0].get("Type", ""),
                     certificate_arn=cert_arn,
                 ))
-            tgs_raw = elbv2.describe_target_groups(
-                LoadBalancerArn=lb["LoadBalancerArn"],
-            ).get("TargetGroups", [])
+            try:
+                tgs_raw = elbv2.describe_target_groups(
+                    LoadBalancerArn=lb["LoadBalancerArn"],
+                ).get("TargetGroups", [])
+            except Exception:
+                tgs_raw = []
             tgs = [
                 AlbTargetGroup(
                     name=tg["TargetGroupName"], arn=tg["TargetGroupArn"],

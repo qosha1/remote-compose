@@ -1,211 +1,260 @@
-# Production v1 → v2 Migration Runbook
+# Production v1 → v2 Migration Runbook (boto3-only cutover)
 
 **Target stack:** `ss-debuggai-prod` (us-west-2), 133 GB postgres on EFS, 7 ECS services, 32 SM secrets, customer-facing `api.startsimpli.com`.
 
-**Window budget:** 1 hour. Rollback budget: < 10 minutes. DNS unchanged throughout (ALB import preserves the chain).
+**Window budget:** ~30 min cutover + 5 min canary verification. Rollback < 5 min via task-def revert. DNS unchanged (registrar-side record points at the existing ALB DNS, ALB is untouched).
 
-**Tooling:** `rc v1 migrate plan` + `rc v1 migrate apply` (this package).
+**Approach:** v1 prod is deployed imperatively (boto3 calls, no terraform state). The migration is therefore an **ECS task-definition shape change**, not a terraform import. Every stateful resource (EFS, ALB, ACM cert, VPC, SM secrets, ECS cluster) stays exactly as-is. We only register new task-def revisions with v2 conventions (`secrets[]` referencing SM ARNs instead of v1's envfile injection) and rolling-update each service to use them.
+
+## Why this is the safest path
+
+| Resource | What we change | What changes in AWS |
+|---|---|---|
+| 133 GB postgres EFS volume | nothing | nothing — same `fileSystemId`, same access points |
+| 32 SM secrets | nothing | nothing — same ARNs, same values |
+| ALB + listeners + cert | nothing | nothing — same DNS, same SSL chain |
+| VPC + subnets + SGs | nothing | nothing |
+| ECS cluster | nothing | nothing — same name, same containerInsights setting |
+| ECR repos + images | nothing | nothing — task defs reference same image URIs |
+| ECS task definitions | new revisions registered | container `secrets[]` now ARN-by-key; env keys that collided with secrets dropped |
+| ECS services | rolling restart | task definition pointer flips to new revision |
+
+The data plane (EFS, SM, ALB, cert, DNS) is **byte-for-byte identical** before and after. The only thing that changes is each container's `secrets[]` block: v1 injected secret values into env at task-launch time via custom envfile machinery; v2 references SM ARNs natively so ECS handles the injection.
 
 ---
 
-## T−24h: Pre-flight (no downtime)
+## T−2h: Pre-flight (no downtime, no AWS mutation)
 
 ```bash
-# Snapshot the live tfstate FIRST. Required for ImportStatePhase.
+# 1. Generate the migration plan against live AWS state.
 cd ~/Repos/start-simpli/start-simpli-api
-cp terraform/<live>.tfstate /tmp/ss-debuggai-prod.tfstate.bak
-
-# Run plan (read-only — no AWS mutation).
 PYTHONPATH=~/Repos/devtools/remote-compose \
-~/Repos/devtools/remote-compose/.venv/bin/rc v1 migrate plan \
-  ./rc.yml \
+~/Repos/devtools/remote-compose/.venv/bin/rc v1 migrate plan ./rc.yml \
   --aws-profile debuggai \
   --out ./v2-migration
 
-# Review:
-#   v2-migration/MIGRATION_SUMMARY.md      <-- read this end-to-end
-#   v2-migration/imports.tf                <-- 23 imports, no destroys
-#   v2-migration/rc.yml.v2                 <-- the new config
-#   v2-migration/runbook.json              <-- 5 phases, undo per phase
+# 2. Review the artifacts.
+cat ./v2-migration/MIGRATION_SUMMARY.md            # blast radius, imports, secrets, undo
+cat ./v2-migration/rc.yml.v2                       # the new rc.yml (commit this later)
 
-# Verify safety properties at the shell:
-grep -ic "destroy\|delete" v2-migration/imports.tf      # MUST be 0
-grep -c "fsap-004097e867c7bb755" v2-migration/imports.tf  # MUST be 1 (live postgres)
+# 3. Verify safety properties.
+grep -ic 'destroy\|delete' ./v2-migration/imports.tf  # MUST be 0
+.venv/bin/python -c "
+import json
+plan = json.load(open('./v2-migration/runbook.json'))
+print('phases:', [e['phase'] for e in plan])
+"
 ```
 
-If any of those don't match, **STOP**. Re-run with `--inventory-snapshot` against a fresh `aws ...` capture and diff.
+If any check fails, **STOP** and inspect.
 
 ---
 
-## T−2h: Sandbox dry-run (no downtime)
+## T−24h: Write the canary row to live postgres
+
+Before kicking off the migration, drop a known row into a new table on
+the live postgres. After the cutover, the same SELECT must return the
+same row — that's the GO/NO-GO bar.
 
 ```bash
-# cp -r the live state. ImportStatePhase REFUSES to run without this.
-cp /tmp/ss-debuggai-prod.tfstate.bak /tmp/ss-debuggai-prod.tfstate.sandbox
+# Connect via ECS exec to the live postgres task.
+TASK_ARN=$(aws ecs list-tasks --cluster ss-debuggai-prod \
+  --service-name ss-debuggai-postgres --profile debuggai --region us-west-2 \
+  --query 'taskArns[0]' --output text)
 
-# Run apply against the sandbox copy. ValidatePhase + EmitV2 + ImportStatePhase
-# will all run; ServicesCutover + Decommission are explicitly skipped via --phase.
-rc v1 migrate apply ./rc.yml \
-  --out ./v2-migration \
-  --sandbox-tfstate /tmp/ss-debuggai-prod.tfstate.sandbox \
-  --aws-profile debuggai \
-  --phase validate
-rc v1 migrate apply ./rc.yml \
-  --out ./v2-migration \
-  --sandbox-tfstate /tmp/ss-debuggai-prod.tfstate.sandbox \
-  --aws-profile debuggai \
-  --phase emit_v2_terraform
-rc v1 migrate apply ./rc.yml \
-  --out ./v2-migration \
-  --sandbox-tfstate /tmp/ss-debuggai-prod.tfstate.sandbox \
-  --aws-profile debuggai \
-  --phase import_state
+aws ecs execute-command --cluster ss-debuggai-prod \
+  --task "$TASK_ARN" --container postgres --interactive \
+  --command "psql -U postgres -d <prod_db>" \
+  --profile debuggai --region us-west-2
+
+# In the psql session:
+CREATE TABLE IF NOT EXISTS migration_canary (
+  id INTEGER PRIMARY KEY,
+  marker TEXT NOT NULL,
+  written_at TIMESTAMP DEFAULT NOW()
+);
+INSERT INTO migration_canary (id, marker)
+VALUES (1, 'pre-migration-2026-04-28')
+ON CONFLICT (id) DO UPDATE SET marker = EXCLUDED.marker, written_at = NOW();
+SELECT * FROM migration_canary;
+\q
 ```
-
-Each phase prints `[<name>] OK (<elapsed>s)` on success or `FAIL` + the
-undo runbook on failure.
-
-The destroy-line guard: `import_state` parses the `terraform plan`
-output. If ANY line matches `- destroy` or `will be destroyed`, the
-phase aborts with `ok=False` BEFORE running `terraform apply`.
-
-If `import_state` returns `OK`, you have proven that running the same
-sequence against the LIVE tfstate will not destroy anything. Diff the
-sandbox state against the original to confirm only imports were
-applied.
 
 ---
 
-## T+0: Maintenance window opens — downtime starts
+## T+0: Maintenance window opens
 
-### Phase 1: Validate (read-only, ~5 min)
+### Phase 1: Validate (read-only, ~30s)
 
 ```bash
-rc v1 migrate apply ./rc.yml --out ./v2-migration \
-  --sandbox-tfstate /tmp/ss-debuggai-prod.tfstate.sandbox \
-  --aws-profile debuggai --phase validate
+rc v1 migrate apply ./rc.yml \
+  --out ./v2-migration \
+  --aws-profile debuggai \
+  --phase validate \
+  --auto-approve
 ```
 
 ValidatePhase re-discovers live state and diffs against the plan
-inventory. If anything has drifted since T−24h (new ECS service, new
-EFS access point, etc.), it reports `ok=False`. Re-run plan from
-scratch in that case.
+inventory. Drift here means a resource changed since T−2h plan; re-run
+plan + investigate before continuing.
 
-### Phase 2: Emit v2 terraform (~1 min)
+### Phase 2: Services cutover (~25 min — 7 services × ~3 min rolling)
 
-Already done at T−2h; re-run idempotently if needed. No AWS calls.
-
-### Phase 3: Import state — atomic swap (~5 min)
+This is the actual mutation. For each ECS service it:
+1. Reads the current task def (`describe_task_definition`).
+2. v2-shapes it: replaces `secrets[]` with ARN-by-key entries from
+   `plan.secret_arn_map`; drops env entries that collide with secret keys.
+3. Registers the new revision (`register_task_definition`).
+4. Updates the service to point at the new revision (`update_service`),
+   triggering a rolling deploy.
 
 ```bash
-# Atomic swap: backup + replace.
-cp ./terraform/<live>.tfstate ./terraform/<live>.tfstate.pre-migration
-cp /tmp/ss-debuggai-prod.tfstate.sandbox ./terraform/<live>.tfstate
-
-# Confirm the swap.
-diff /tmp/ss-debuggai-prod.tfstate.sandbox ./terraform/<live>.tfstate  # MUST be empty
+rc v1 migrate apply ./rc.yml \
+  --out ./v2-migration \
+  --aws-profile debuggai \
+  --phase services_cutover
+# Will prompt; review the plan before confirming.
 ```
 
-This is the moment of mutation. Everything before this point is
-idempotent.
-
-### Phase 4: Services cutover (~35 min)
+Watch CloudWatch:
 
 ```bash
-rc v1 migrate apply ./rc.yml --out ./v2-migration \
-  --sandbox-tfstate ./terraform/<live>.tfstate \
-  --aws-profile debuggai --phase services_cutover
-```
-
-Registers v2-shaped task definitions for all 7 ECS services and rolls
-each one. Sequential, ~5 min each. Watch CloudWatch:
-
-```bash
-aws ecs describe-services --cluster ss-debuggai-prod \
+watch -n 5 'aws ecs describe-services --cluster ss-debuggai-prod \
   --services ss-debuggai-django ss-debuggai-postgres ss-debuggai-redis \
              ss-debuggai-nginx ss-debuggai-celery-worker \
              ss-debuggai-celery-beat ss-debuggai-celery-worker-linkedin \
   --profile debuggai --region us-west-2 \
-  --query 'services[*].{Name:serviceName,Running:runningCount,Desired:desiredCount,Status:status}' \
-  --output table
+  --query "services[*].{Name:serviceName,Running:runningCount,Desired:desiredCount}" \
+  --output table'
 ```
 
-All `Running` columns must hit `desired` count before proceeding.
-
-### Phase 5: GO/NO-GO — DB integrity canary (~2 min)
-
-**This is the bar. Do not skip.**
+Wait for all `Running` columns to hit `Desired`. Per-service health
+endpoints:
 
 ```bash
-# Connect to the post-migration postgres via ECS exec or via a bastion.
+curl -fsS https://api.startsimpli.com/api/health/   # MUST return 200
+```
+
+### Phase 3: GO/NO-GO — DB integrity canary (~2 min)
+
+**Do not skip.** The cutover is reversible up to this point.
+
+```bash
+TASK_ARN=$(aws ecs list-tasks --cluster ss-debuggai-prod \
+  --service-name ss-debuggai-postgres --profile debuggai --region us-west-2 \
+  --query 'taskArns[0]' --output text)
+
 aws ecs execute-command --cluster ss-debuggai-prod \
-  --task <postgres-task-arn> --container postgres --interactive \
-  --command "psql -U postgres -d <prod_db> -c \
-    'SELECT id, marker FROM migration_canary WHERE id = 1;'" \
+  --task "$TASK_ARN" --container postgres --interactive \
+  --command "psql -U postgres -d <prod_db> -c \"SELECT id, marker FROM migration_canary WHERE id = 1;\"" \
   --profile debuggai --region us-west-2
 ```
 
-You wrote the canary row at T−24h:
-```sql
-CREATE TABLE IF NOT EXISTS migration_canary (id INTEGER PRIMARY KEY, marker TEXT);
-INSERT INTO migration_canary (id, marker) VALUES (1, 'pre-migration-<DATE>');
+The SELECT must return:
+```
+ id |          marker
+----+-------------------------
+  1 | pre-migration-2026-04-28
 ```
 
-The SELECT must return that exact row. If it doesn't:
-- **STOP**.
-- Roll back per the runbook below.
-- Do NOT continue to Phase 6.
+If the row is missing OR the marker doesn't match: **STOP**. Roll back
+per below.
 
-### Phase 6: Decommission v1 (~1 min)
+### Phase 4: Decommission v1 rc.yml (~5s)
 
 ```bash
-rc v1 migrate apply ./rc.yml --out ./v2-migration \
-  --sandbox-tfstate ./terraform/<live>.tfstate \
-  --aws-profile debuggai --phase decommission_v1
+rc v1 migrate apply ./rc.yml \
+  --out ./v2-migration \
+  --aws-profile debuggai \
+  --phase decommission_v1 \
+  --auto-approve
 ```
 
-Archives v1 rc.yml under `./v2-migration/archive/rc.yml.<timestamp>`.
-Tripwired: NEVER calls `delete_secret`, `delete_file_system`,
+Archives the v1 `rc.yml` to `./v2-migration/archive/rc.yml.<timestamp>`.
+Tripwired: never calls `delete_secret`, `delete_file_system`,
 `delete_load_balancer`, or `delete_certificate`.
+
+### Phase 5: Commit the v2 rc.yml
+
+```bash
+mv ./v2-migration/rc.yml.v2 ./rc.yml.v2
+git add rc.yml.v2 ./v2-migration/MIGRATION_SUMMARY.md ./v2-migration/runbook.json
+git commit -m "production cutover to rc v2 ($(date -u +%Y-%m-%d))"
+git push
+```
+
+(Don't `mv rc.yml.v2 rc.yml` yet — keep both side-by-side until v2's
+`rc deploy` path is wired up to handle imported stacks.)
 
 ---
 
-## Rollback (< 10 min)
+## Rollback (< 5 min)
 
-If Phase 5 (canary) fails OR any phase reports `ok=False`:
+If Phase 3 (canary) fails OR any service in Phase 2 fails to reach
+`Running == Desired`:
 
 ```bash
-# 1. Revert ECS services to v1 task definitions (parallel — fast).
+# Read the runbook.json to find the previous task-def ARN per service.
+.venv/bin/python -c "
+import json
+rb = json.load(open('./v2-migration/runbook.json'))
+cutover = next(e for e in rb if e['phase'] == 'services_cutover')
+print(cutover['details'])  # contains 'name->family:rev' pairs
+"
+
+# For each service, revert to the v1 task definition (the one BEFORE the
+# new revision we just registered). The previous revision number is
+# (current_revision - 1).
 for svc in ss-debuggai-django ss-debuggai-postgres ss-debuggai-redis \
            ss-debuggai-nginx ss-debuggai-celery-worker \
            ss-debuggai-celery-beat ss-debuggai-celery-worker-linkedin; do
+  CURRENT=$(aws ecs describe-services --cluster ss-debuggai-prod \
+    --services $svc --profile debuggai --region us-west-2 \
+    --query 'services[0].taskDefinition' --output text)
+  FAMILY=$(echo "$CURRENT" | rev | cut -d/ -f1 | rev | cut -d: -f1)
+  CURR_REV=$(echo "$CURRENT" | rev | cut -d: -f1 | rev)
+  PREV_REV=$((CURR_REV - 1))
   aws ecs update-service --cluster ss-debuggai-prod --service $svc \
-    --task-definition <pre-migration-$svc-task-def-arn> \
+    --task-definition "${FAMILY}:${PREV_REV}" \
     --profile debuggai --region us-west-2 &
 done
 wait
 
-# 2. Revert tfstate (atomic).
-cp ./terraform/<live>.tfstate.pre-migration ./terraform/<live>.tfstate
-
-# 3. Verify.
-aws ecs describe-services ... # confirm running counts at desired
-curl -s https://api.startsimpli.com/api/health/ # MUST return 200
+# Verify.
+curl -fsS https://api.startsimpli.com/api/health/   # MUST return 200
 ```
 
-DNS unchanged throughout. ALB import preserves the chain. SM secrets
-untouched (zero mutation by design).
+DNS unchanged. ALB unchanged. EFS untouched. SM secrets untouched. The
+rollback is just an ECS service update flipping the task-def pointer
+back.
 
 ---
 
-## Post-migration
+## Why we're NOT running terraform import today
 
-```bash
-# Commit v2-migration/ artifacts to start-simpli-api repo for audit trail.
-cp v2-migration/rc.yml.v2 ./rc.yml.v2
-git add rc.yml.v2 v2-migration/MIGRATION_SUMMARY.md v2-migration/runbook.json
-git commit -m "production cutover to rc v2 ($(date -u +%Y-%m-%d))"
+The original lifecycle plan included a `terraform import` phase to
+absorb the existing AWS resources into v2's terraform state. That phase
+is now opt-in (`--phase import_state`) and **deferred**:
 
-# After 7 days of clean operation, archive the v1 tfstate backup.
-mv /tmp/ss-debuggai-prod.tfstate.bak ./terraform/archive/
-```
+1. **v1 prod has no terraform state.** It was deployed imperatively.
+   There's nothing to import *into* a state file that doesn't exist.
+2. **v2 ECSProvider's terraform templates are designed for greenfield
+   deployments.** They emit `aws_subnet.public[count.index]`,
+   `aws_security_group.alb` (named role-based), `aws_acm_certificate.main`
+   (with cert-validation chain). Our prod has 5 SGs, 2 subnets without
+   public/private classification, an already-issued ACM cert with
+   externally-managed DNS validation. Importing those into v2's emitted
+   addresses would either fail or cause terraform to propose recreating
+   them.
+3. **Adding "BYO existing resources" support to v2 is a separate
+   feature** (~1-2 days work). Tracked as a follow-up: extend rc.yml
+   schema with `provider_config.ecs.existing.{vpc_id, subnets,
+   security_groups, alb_arn, certificate_arn, efs_file_system_ids}` and
+   make the v2 emitter emit `data` blocks instead of `resource` blocks
+   when those are set.
+
+The boto3-only cutover gets prod onto v2's task-def conventions
+**today**. Future `rc deploy` against the migrated stack will need the
+BYO-existing feature; for now, the stack stays manageable via the v1
+imperative tooling (which still works for `rc destroy`, manual
+redeploys, etc.) until the BYO feature ships.

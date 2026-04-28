@@ -152,8 +152,8 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
     click.echo(f"  wrote {summary_path}")
     click.echo(f"  wrote {out_dir/'runbook.json'}")
     click.echo(
-        "\n  Next: review MIGRATION_SUMMARY.md, then "
-        "`rc v1 migrate apply <v1_rc.yml> --sandbox-tfstate <path>`"
+        "\n  Next: review MIGRATION_SUMMARY.md, then\n"
+        f"  `rc v1 migrate apply {v1_rc_yml} --out {out_dir}`"
     )
 
 
@@ -174,9 +174,14 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
 )
 @click.option(
     "--sandbox-tfstate", "sandbox_tfstate",
-    required=True,
+    default=None,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Path to a cp -r copy of the live tfstate. Required for ImportStatePhase.",
+    help=(
+        "Path to a cp -r copy of the live tfstate. Required only for the "
+        "opt-in ImportStatePhase (--phase import_state). The default boto3-only "
+        "cutover (validate -> services_cutover -> decommission_v1) does not "
+        "need this since v1 prod is not terraform-managed."
+    ),
 )
 @click.option(
     "--inventory-snapshot", "inventory_snapshot",
@@ -190,14 +195,20 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
         "validate", "emit_v2_terraform", "import_state",
         "services_cutover", "decommission_v1",
     ]),
-    help="Run a single named phase. Default: full sequence with prompts.",
+    help=(
+        "Run a single named phase. Default: validate -> services_cutover -> "
+        "decommission_v1 (boto3-only). The terraform phases (emit_v2_terraform, "
+        "import_state) are opt-in."
+    ),
 )
 @click.option("--auto-approve", is_flag=True, help="Skip per-phase prompts (CI-only).")
 def migrate_apply(
     v1_rc_yml, out_dir, sandbox_tfstate, inventory_snapshot, single_phase,
     auto_approve,
 ):
-    """Run the apply phases. Each phase prompts unless --auto-approve."""
+    """Run the apply phases. Default: validate -> services_cutover ->
+    decommission_v1 (boto3-only). Each phase prompts unless --auto-approve.
+    """
     out_dir = Path(out_dir).resolve()
 
     aws_session = None
@@ -242,10 +253,30 @@ def migrate_apply(
         ),
     }
 
-    sequence = (
-        [single_phase] if single_phase
-        else [p.name for p in plan.phases]
-    )
+    # Default sequence: boto3-only cutover (no terraform phases).
+    # v1 prod stacks are deployed imperatively, so there's no
+    # terraform state to import. The terraform phases stay available
+    # via --phase for future "v2 takes over GitOps" work.
+    DEFAULT_BOTO3_SEQUENCE = ["validate", "services_cutover", "decommission_v1"]
+
+    if single_phase:
+        sequence = [single_phase]
+    else:
+        sequence = DEFAULT_BOTO3_SEQUENCE
+        click.echo(
+            "Default sequence: " + " -> ".join(sequence) + "\n"
+            "(boto3-only cutover — no terraform state mutation. To run "
+            "the optional terraform phases, use --phase emit_v2_terraform "
+            "or --phase import_state explicitly.)"
+        )
+
+    # Guard: import_state requires --sandbox-tfstate.
+    if "import_state" in sequence and sandbox_tfstate is None:
+        click.echo(
+            "import_state requires --sandbox-tfstate <path-to-cp-r-of-live-tfstate>",
+            err=True,
+        )
+        raise click.exceptions.Exit(3)
 
     entries: list[RunbookEntry] = []
     for name in sequence:

@@ -279,9 +279,69 @@ class ImportStatePhase(Phase):
 # ---------------------------------------------------------------------
 
 class ServicesCutoverPhase(Phase):
-    def __init__(self, plan: MigrationPlan, ecs_client: Any = None):
+    """The actual cutover.
+
+    For each ECS service in the v1 stack:
+      1. Read the existing task definition via boto3.
+      2. Preserve image, env (non-secret), mountPoints, volumes,
+         portMappings, logConfiguration, ephemeral_storage, networking,
+         IAM roles, and CPU/memory.
+      3. Replace the `secrets` array with ARN-by-key references to the
+         existing SM secrets (plan.secret_arn_map). Drop any env entries
+         whose keys overlap with the secret set, since ECS rejects
+         task defs that have the same key in both `environment` and
+         `secrets`.
+      4. Register the new revision.
+      5. update_service to point at the new revision (rolling deploy).
+
+    Same EFS, same SM, same ALB, same cert, same DNS — only the task
+    definition shape changes.
+    """
+
+    def __init__(
+        self,
+        plan: MigrationPlan,
+        ecs_client: Any = None,
+        v1_services: list[str] | None = None,
+    ):
         self.plan = plan
         self.ecs_client = ecs_client
+        self.v1_services = v1_services or []
+
+    def _v2_shape_task_def(self, src: dict) -> dict:
+        """Take an existing task def dict; return register_task_definition kwargs.
+
+        Strips revision-only fields (revision, status, registeredAt, etc.)
+        that boto3 returns but RegisterTaskDefinition rejects.
+        """
+        # Fields RegisterTaskDefinition accepts.
+        keep_top_level = {
+            "family", "taskRoleArn", "executionRoleArn", "networkMode",
+            "containerDefinitions", "volumes", "placementConstraints",
+            "requiresCompatibilities", "cpu", "memory", "tags",
+            "pidMode", "ipcMode", "proxyConfiguration",
+            "inferenceAccelerators", "ephemeralStorage", "runtimePlatform",
+        }
+        out = {k: v for k, v in src.items() if k in keep_top_level}
+        # Per-container surgery: replace secrets[], drop overlapping env keys.
+        secret_names = set(self.plan.secret_arn_map.keys())
+        new_containers = []
+        for c in out.get("containerDefinitions", []):
+            c = dict(c)  # shallow copy
+            c["secrets"] = [
+                {"name": k, "valueFrom": v}
+                for k, v in self.plan.secret_arn_map.items()
+            ]
+            # Drop env entries that collide with the secret set
+            # (ECS rejects task defs where same key is in both).
+            if "environment" in c:
+                c["environment"] = [
+                    e for e in c["environment"]
+                    if e.get("name") not in secret_names
+                ]
+            new_containers.append(c)
+        out["containerDefinitions"] = new_containers
+        return out
 
     def run(self) -> PhaseResult:
         start = time.time()
@@ -289,37 +349,75 @@ class ServicesCutoverPhase(Phase):
             self.plan.rc_v2_yml.get("provider_config", {})
             .get("ecs", {}).get("cluster", "")
         )
-        services_yaml = self.plan.rc_v2_yml.get("services", {})
-        registered: list[str] = []
-        for name in services_yaml:
-            family = f"{cluster}-{name}" if cluster else name
-            container_def = {
-                "name": name,
-                "image": f"placeholder/{name}:latest",
-                "secrets": [
-                    {"name": k, "valueFrom": v}
-                    for k, v in self.plan.secret_arn_map.items()
-                ],
-                "essential": True,
-            }
-            self.ecs_client.register_task_definition(
-                family=family,
-                containerDefinitions=[container_def],
-                executionRoleArn=self.plan.external_iam.get(
-                    "task_execution_role_arn", ""
-                ),
-                taskRoleArn=self.plan.external_iam.get("task_role_arn", ""),
-            )
-            self.ecs_client.update_service(
-                cluster=cluster,
-                service=name,
-                taskDefinition=family,
-            )
-            registered.append(family)
+
+        # Discover existing services if caller didn't pre-list them.
+        services = self.v1_services
+        if not services and self.ecs_client is not None:
+            try:
+                resp = self.ecs_client.list_services(cluster=cluster)
+                services = [
+                    arn.split("/")[-1]
+                    for arn in resp.get("serviceArns", [])
+                ]
+            except Exception as e:
+                return PhaseResult(
+                    name="services_cutover", ok=False,
+                    details=f"list_services failed: {e}",
+                    elapsed_sec=time.time() - start,
+                )
+
+        rolled: list[tuple[str, str]] = []
+        for svc_name in services:
+            try:
+                # Read current task def for this service.
+                desc = self.ecs_client.describe_services(
+                    cluster=cluster, services=[svc_name],
+                )
+                svcs = desc.get("services", [])
+                if not svcs:
+                    return PhaseResult(
+                        name="services_cutover", ok=False,
+                        details=f"service {svc_name} not found in {cluster}",
+                        elapsed_sec=time.time() - start,
+                    )
+                current_td_arn = svcs[0].get("taskDefinition")
+                td_resp = self.ecs_client.describe_task_definition(
+                    taskDefinition=current_td_arn,
+                )
+                src_td = td_resp.get("taskDefinition", {})
+
+                # v2-shape it.
+                new_td_kwargs = self._v2_shape_task_def(src_td)
+
+                # Register + update.
+                reg = self.ecs_client.register_task_definition(**new_td_kwargs)
+                new_td_arn = reg.get("taskDefinition", {}).get(
+                    "taskDefinitionArn", ""
+                )
+                self.ecs_client.update_service(
+                    cluster=cluster,
+                    service=svc_name,
+                    taskDefinition=new_td_arn,
+                )
+                rolled.append((svc_name, new_td_arn))
+            except Exception as e:
+                return PhaseResult(
+                    name="services_cutover", ok=False,
+                    details=(
+                        f"FAIL on service {svc_name!r}: {e}. "
+                        f"Rolled so far: {rolled}. "
+                        "Manual rollback: aws ecs update-service --task-definition <prev_arn> "
+                        "for each rolled service."
+                    ),
+                    elapsed_sec=time.time() - start,
+                )
 
         return PhaseResult(
             name="services_cutover", ok=True,
-            details=f"registered + rolled {len(registered)} services: {registered}",
+            details=(
+                f"registered + rolled {len(rolled)} services: "
+                + ", ".join(f"{n}->{a.rsplit('/', 1)[-1]}" for n, a in rolled)
+            ),
             elapsed_sec=time.time() - start,
         )
 

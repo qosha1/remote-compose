@@ -186,25 +186,10 @@ class TestCliPlan:
 # ---------------------------------------------------------------------
 
 class TestCliApply:
-    def test_apply_refuses_without_sandbox_tfstate(self, tmp_path):
+    def test_apply_import_state_requires_sandbox_tfstate(self, tmp_path):
+        # The terraform-import phase is opt-in and refuses without a
+        # sandbox-tfstate copy. Default cutover doesn't need it.
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "v1", "migrate", "apply",
-            str(V1_RC_YML),
-            "--out", str(tmp_path),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-        ])
-        # click reports the missing required option as exit code 2.
-        assert result.exit_code == 2
-        assert "sandbox" in result.output.lower()
-
-    def test_apply_validate_phase_only(self, tmp_path):
-        runner = CliRunner()
-        sandbox = tmp_path / "tfstate.copy"
-        sandbox.write_text(
-            '{"version": 4, "terraform_version": "1.6.0", "resources": []}'
-        )
-        # Pre-create out_dir since it must exist.
         out_dir = tmp_path / "out"
         out_dir.mkdir()
         result = runner.invoke(cli, [
@@ -212,7 +197,23 @@ class TestCliApply:
             str(V1_RC_YML),
             "--out", str(out_dir),
             "--inventory-snapshot", str(INVENTORY_JSON),
-            "--sandbox-tfstate", str(sandbox),
+            "--phase", "import_state",
+            "--auto-approve",
+        ])
+        assert result.exit_code == 3
+        assert "sandbox-tfstate" in result.output.lower()
+
+    def test_apply_validate_phase_only(self, tmp_path):
+        # The default boto3-only cutover means validate doesn't require
+        # sandbox-tfstate.
+        runner = CliRunner()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        result = runner.invoke(cli, [
+            "v1", "migrate", "apply",
+            str(V1_RC_YML),
+            "--out", str(out_dir),
+            "--inventory-snapshot", str(INVENTORY_JSON),
             "--phase", "validate",
             "--auto-approve",
         ])
