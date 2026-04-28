@@ -8,6 +8,8 @@ from pathlib import Path
 import click
 import yaml
 
+from ..defaults import VPC_CIDR_DEFAULT
+
 
 @click.group(name='fix')
 def fix_group():
@@ -117,7 +119,7 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
 
     click.echo(f"\nrc fix nginx-conf")
     click.echo(f"  project:    {project or '<unset>'}")
-    click.echo(f"  vpc_cidr:   {vpc_cidr or '10.0.0.0/16 (default)'}")
+    click.echo(f"  vpc_cidr:   {vpc_cidr or f'{VPC_CIDR_DEFAULT} (default)'}")
     click.echo(f"  upstreams:  " + ", ".join(
         f"{u.name}:{u.port}{' (django)' if u.django else ''}"
         for u in upstreams

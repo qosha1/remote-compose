@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Optional
 
 
-_VPC_CIDR_DEFAULT = "10.0.0.0/16"
+from .defaults import VPC_CIDR_DEFAULT as _VPC_CIDR_DEFAULT
 
 
 @dataclass(frozen=True)

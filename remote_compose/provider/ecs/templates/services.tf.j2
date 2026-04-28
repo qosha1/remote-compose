@@ -95,9 +95,9 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 {%- endfor %}
     ]
 {%- endif %}
-{%- if secrets %}
+{%- if svc.secrets %}
     secrets = [
-{%- for sec in secrets %}
+{%- for sec in svc.secrets %}
       {
         name      = "{{ sec.env_name }}"
         valueFrom = {{ sec.value_from_ref }}

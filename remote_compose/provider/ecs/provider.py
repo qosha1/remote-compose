@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from ...defaults import VPC_CIDR_DEFAULT
 from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
 from ...terraform.emitter import TerraformEmitter
@@ -149,7 +150,7 @@ class ECSProvider(Provider):
                 "ECS provider requires provider_config.ecs.region"
             )
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
-        vpc_cidr = ecs_cfg.get("vpc_cidr", "10.0.0.0/16")
+        vpc_cidr = ecs_cfg.get("vpc_cidr", VPC_CIDR_DEFAULT)
         aws_profile = ecs_cfg.get("aws_profile")
 
         default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
@@ -490,8 +491,22 @@ class ECSProvider(Provider):
             all_secret_arns.append(sec["arn"])
 
         # Attach secrets to every service view so each task def gets them.
+        # Filter per-service: when a service has a plaintext env override for
+        # a key that's also sourced from SM, drop the SM entry from THAT
+        # service's secrets[]. ECS rejects task defs where the same key
+        # appears in both environment[] and secrets[] ("The secret name
+        # must be unique and not shared with any new or existing environment
+        # variables"). The plaintext env wins on collision because the user
+        # set it explicitly in rc.yml services.<svc>.env. (rc-z30)
         for svc_view in services_view:
-            svc_view["secrets"] = secrets_view
+            override_keys = set(svc_view.get("env") or {})
+            if override_keys:
+                svc_view["secrets"] = [
+                    s for s in secrets_view
+                    if s["env_name"] not in override_keys
+                ]
+            else:
+                svc_view["secrets"] = secrets_view
         default_target_port = default_public["port"] if default_public else 80
         default_health_check_path = (
             (default_public or {}).get("health_check_path") or "/"

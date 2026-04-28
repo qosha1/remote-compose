@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from .defaults import VPC_CIDR_DEFAULT
+
 
 # Service-name heuristics for type inference. Names compared lowercased.
 _DB_HINTS = {
@@ -93,7 +95,7 @@ def scaffold_rc_yml(
         "provider_config": {"ecs": {
             "region": "us-west-2",
             "cluster": f"{project}-cluster",
-            "vpc_cidr": "10.0.0.0/16",
+            "vpc_cidr": VPC_CIDR_DEFAULT,
             "default_launch_type": "FARGATE",
         }},
         "terraform": {

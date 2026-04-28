@@ -379,7 +379,7 @@ def _scan_upstream_servers(text: str) -> list[tuple[str, str, int]]:
     return out
 
 
-_VPC_CIDR_DEFAULT = "10.0.0.0/16"
+from .defaults import VPC_CIDR_DEFAULT as _VPC_CIDR_DEFAULT
 
 
 def _resolver_ip_for(vpc_cidr: Optional[str]) -> str:
