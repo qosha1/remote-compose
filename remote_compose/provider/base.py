@@ -113,6 +113,14 @@ class DeployContext:
     # / `rc deploy --dev`. Production deploys leave this False — see
     # rc-e5u.45.8 for the full gating semantics.
     dev_mode: bool = False
+    # rc-5h8.11: when True, ECSProvider.deploy bypasses terraform entirely
+    # (no emit_terraform / init / apply / outputs) and goes straight to
+    # image build + push + force-roll. Used for hybrid stacks that have
+    # v2-shaped task defs but where the underlying VPC/ALB/EFS/SM are NOT
+    # under terraform management (e.g. v1-imperative-deployed legacy stacks).
+    # ECR repo URLs come from boto3 describe-repositories instead of tf
+    # outputs. Set by `rc deploy --no-state`.
+    skip_terraform: bool = False
 
 
 @dataclass

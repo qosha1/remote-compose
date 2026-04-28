@@ -77,8 +77,18 @@ def _print_service_table(context):
          'left some services stuck on older code. v2 rc.yml only. '
          'Mutually exclusive with --services / --tag. (rc-e5u.44.24)',
 )
+@click.option(
+    '--no-state', 'no_state', is_flag=True,
+    help='Skip terraform entirely. Only rebuild images + push to ECR + '
+         'force-roll ECS services. Use for hybrid stacks where the '
+         'infrastructure (VPC/ALB/EFS/SM) is NOT under terraform '
+         'management — typically v1-imperative legacy stacks cut over '
+         'to v2 task defs. Lets you deploy code from any box without '
+         'needing terraform state to exist locally. v2 rc.yml only. '
+         '(rc-5h8.11)',
+)
 @click.pass_context
-def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, dev_mode, reconcile):
+def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, dev_mode, reconcile, no_state):
     """Build images, push to ECR, and deploy all services."""
     services_list = None
     if selected_services:
@@ -128,6 +138,7 @@ def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, d
         handled = dispatch_if_v2(
             ctx.obj.get('config_path'), 'deploy',
             ttl=ttl, services=services_list, tag=tag, dev=dev_mode,
+            skip_terraform=no_state,
         )
     except TerraformError as exc:
         # Friendly rendering for the most common confusing failure: another

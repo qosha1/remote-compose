@@ -629,6 +629,24 @@ class ECSProvider(Provider):
         services_filter: Optional[list[str]] = None,
         tag: Optional[str] = None,
     ) -> DeployResult:
+        # Validate the filter early so a typo doesn't quietly skip all builds.
+        if services_filter is not None:
+            unknown = set(services_filter) - set(ctx.services.keys())
+            if unknown:
+                raise ValueError(
+                    f"--services lists service(s) not in this stack: {sorted(unknown)}. "
+                    f"Known: {sorted(ctx.services.keys())}"
+                )
+
+        # No-state deploy mode (rc-5h8.11): when ctx.skip_terraform is True,
+        # we bypass emit_terraform / init / apply / outputs entirely and just
+        # rebuild + push images + force-roll services. Used by hybrid
+        # v2-task-defs-on-v1-imperative-infra stacks (start-simpli-api today)
+        # where there is no terraform state to manage. ECR repo URLs come
+        # from boto3 describe-repositories instead of terraform outputs.
+        if getattr(ctx, "skip_terraform", False):
+            return self._deploy_no_state(ctx, services_filter, tag)
+
         start = time.monotonic()
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
@@ -639,14 +657,6 @@ class ECSProvider(Provider):
         outputs = runner.output()
 
         warnings: list[str] = []
-        # Validate the filter early so a typo doesn't quietly skip all builds.
-        if services_filter is not None:
-            unknown = set(services_filter) - set(ctx.services.keys())
-            if unknown:
-                raise ValueError(
-                    f"--services lists service(s) not in this stack: {sorted(unknown)}. "
-                    f"Known: {sorted(ctx.services.keys())}"
-                )
         pushed = self._build_and_push_images(
             ctx, outputs, warnings,
             services_filter=services_filter, requested_tag=tag,
@@ -660,6 +670,102 @@ class ECSProvider(Provider):
             services=sorted(services_filter) if services_filter else sorted(ctx.services.keys()),
             duration_s=time.monotonic() - start,
             terraform_outputs=outputs,
+            warnings=warnings,
+        )
+
+    def _deploy_no_state(
+        self,
+        ctx: DeployContext,
+        services_filter: Optional[list[str]],
+        tag: Optional[str],
+    ) -> DeployResult:
+        """Boto3-only deploy: rebuild + push images + force-roll services.
+
+        Skips every terraform step. Used for stacks where the infrastructure
+        is NOT under terraform management — typically v1-imperative stacks
+        that have been cut over to v2 task-def shape but where the underlying
+        VPC/ALB/EFS/SM resources are still managed externally. The user can
+        roll new code from any box because this path requires only AWS
+        credentials, not local terraform state.
+
+        ECR repo URLs are discovered via boto3 describe-repositories
+        filtered to repos whose names start with ``<project>/``. Falls back
+        to ``<project>-<service>`` for legacy single-flat-namespace setups.
+        """
+        start = time.monotonic()
+        warnings: list[str] = []
+
+        # Synthesize a terraform-outputs-shaped dict so _build_and_push_images
+        # can be reused unchanged. Keys: repo URL keyed by service name.
+        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        region = ecs_cfg.get("region")
+        session = self.session_factory(ctx)
+        ecr = session.client("ecr", region_name=region)
+
+        repo_urls: dict[str, str] = {}
+        # Query ECR for every repo we might use. Try several naming
+        # conventions in order:
+        #   1. <project>/<svc>        — v2 convention
+        #   2. <project>-<svc>        — v1 imperative flat
+        #   3. <cluster_prefix>/<svc> — legacy stacks where the rc.yml
+        #      project field was renamed (label change) but the AWS
+        #      resources (cluster + ECR) still carry the original prefix.
+        #      Cluster 'ss-debuggai-prod' → prefix 'ss-debuggai'.
+        cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
+        # Strip common env suffixes from the cluster to get the legacy
+        # project prefix.
+        cluster_prefix = cluster
+        for suffix in ("-prod", "-staging", "-dev", "-cluster"):
+            if cluster_prefix.endswith(suffix):
+                cluster_prefix = cluster_prefix[: -len(suffix)]
+                break
+        wanted_repos: dict[str, list[str]] = {}
+        for svc_name, spec in ctx.services.items():
+            if not spec.build_context:
+                continue
+            candidates = [
+                f"{ctx.project}/{svc_name}",
+                f"{ctx.project}-{svc_name}",
+            ]
+            if cluster_prefix and cluster_prefix != ctx.project:
+                candidates.append(f"{cluster_prefix}/{svc_name}")
+                candidates.append(f"{cluster_prefix}-{svc_name}")
+            wanted_repos[svc_name] = candidates
+
+        # Single describe call, paginate.
+        repo_index: dict[str, str] = {}
+        paginator = ecr.get_paginator("describe_repositories")
+        for page in paginator.paginate():
+            for repo in page.get("repositories") or []:
+                repo_index[repo["repositoryName"]] = repo["repositoryUri"]
+
+        for svc_name, candidates in wanted_repos.items():
+            for cand in candidates:
+                if cand in repo_index:
+                    repo_urls[svc_name] = repo_index[cand]
+                    break
+            else:
+                warnings.append(
+                    f"service {svc_name!r}: no ECR repo found "
+                    f"(tried {candidates}); skipping image build+push"
+                )
+
+        synthetic_outputs = {
+            "ecr_repositories": {"value": repo_urls},
+        }
+
+        pushed = self._build_and_push_images(
+            ctx, synthetic_outputs, warnings,
+            services_filter=services_filter, requested_tag=tag,
+        )
+        if pushed:
+            self._force_new_deployments(ctx, pushed)
+
+        return DeployResult(
+            revision_id=f"{ctx.project}-no-state-{int(start)}",
+            services=sorted(services_filter) if services_filter else sorted(ctx.services.keys()),
+            duration_s=time.monotonic() - start,
+            terraform_outputs={},
             warnings=warnings,
         )
 
@@ -993,12 +1099,34 @@ class ECSProvider(Provider):
             return (self._DEPLOY_ORDER.get(type_, 1), svc_name)
 
         ordered = sorted(services, key=priority)
+        # rc-5h8.11: legacy stacks may have ECS service names prefixed with
+        # the original project name (e.g. cluster 'ss-debuggai-prod' →
+        # services 'ss-debuggai-django') even after the rc.yml project
+        # label was renamed. Probe both: bare name first, then cluster-
+        # prefix-+ name.
+        cluster_prefix = cluster
+        for suffix in ("-prod", "-staging", "-dev", "-cluster"):
+            if cluster_prefix.endswith(suffix):
+                cluster_prefix = cluster_prefix[: -len(suffix)]
+                break
         for svc in ordered:
-            client.update_service(
-                cluster=cluster,
-                service=svc,
-                forceNewDeployment=True,
-            )
+            candidates = [svc]
+            if cluster_prefix and cluster_prefix != ctx.project:
+                candidates.append(f"{cluster_prefix}-{svc}")
+            last_err: Exception | None = None
+            for name in candidates:
+                try:
+                    client.update_service(
+                        cluster=cluster,
+                        service=name,
+                        forceNewDeployment=True,
+                    )
+                    last_err = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_err = exc
+            if last_err is not None:
+                raise last_err
 
     def destroy(self, ctx: DeployContext) -> None:
         out_dir = self._tf_dir(ctx)

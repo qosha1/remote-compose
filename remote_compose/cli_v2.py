@@ -952,6 +952,12 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
                 "  Dev mode: dev_volumes will be EFS-backed for hot reload via "
                 "`rc dev push`."
             )
+        if kwargs.get("skip_terraform"):
+            ctx.skip_terraform = True
+            click.echo(
+                "  No-state mode: skipping terraform entirely. "
+                "Will only rebuild images + force-roll services."
+            )
         ttl = kwargs.get("ttl")
         if ttl:
             from datetime import datetime, timezone
