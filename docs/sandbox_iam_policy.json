@@ -1,0 +1,99 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowAllActionsInTestRegion",
+      "Effect": "Allow",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"aws:RequestedRegion": "us-east-1"}
+      }
+    },
+    {
+      "Sid": "AllowIamActionsOnlyOnRcTestPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:PassRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/rc-test-*",
+        "arn:aws:iam::*:instance-profile/rc-test-*"
+      ]
+    },
+    {
+      "Sid": "AllowReadOnlyIamListingEverywhere",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListRoles",
+        "iam:ListInstanceProfiles",
+        "iam:ListPolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyAllMutationsOutsideTestRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "organizations:*",
+        "cloudfront:*",
+        "route53:*",
+        "support:*",
+        "trustedadvisor:*",
+        "health:*",
+        "ce:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {"aws:RequestedRegion": "us-east-1"}
+      }
+    },
+    {
+      "Sid": "AllowRoute53ReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "route53:List*",
+        "route53:Get*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowRoute53WritesOnlyOnTestHostedZones",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ChangeResourceRecordSets",
+        "route53:CreateHostedZone",
+        "route53:DeleteHostedZone",
+        "route53:ChangeTagsForResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "rc-test-*"
+        }
+      }
+    }
+  ]
+}

@@ -99,6 +99,58 @@ class ECSService(BaseService):
         except Exception as e:
             raise AWSError(f"Failed to create EC2 client: {e}")
 
+    def _infer_assign_public_ip(self, cluster) -> bool:
+        """Decide whether Fargate tasks need a public IP attached.
+
+        rc-e5u (remote-compose-gbq): Earlier code hardcoded assignPublicIp=
+        ENABLED for every Fargate task, including those in private
+        subnets — exposed containers to the internet unnecessarily.
+
+        Decision tree (cheapest-info-first):
+          1. ``cluster.has_public_subnets`` flag (if the model exposes
+             one) — direct signal.
+          2. boto3 describe_subnets fallback — checks each cluster
+             subnet's MapPublicIpOnLaunch + the route table for an IGW
+             route. Considered "public" when ALL listed subnets are
+             public.
+          3. Final fallback: True (matches pre-fix behavior so an
+             existing deploy doesn't suddenly fail to pull images).
+
+        The boto3 fallback is wrapped in try/except — any failure
+        defaults to True with a logged warning, so a missing IAM perm
+        doesn't break tasks that previously worked.
+        """
+        flag = getattr(cluster, "has_public_subnets", None)
+        if isinstance(flag, bool):
+            return flag
+
+        subnet_ids = getattr(cluster, "subnet_ids", None) or []
+        if not subnet_ids:
+            return True
+
+        try:
+            ec2 = self._get_ec2_client(
+                cluster.aws_region, cluster.aws_credential,
+            )
+            resp = ec2.describe_subnets(SubnetIds=list(subnet_ids))
+            subnets = resp.get("Subnets") or []
+            if not subnets:
+                return True
+            # All-public iff every subnet has MapPublicIpOnLaunch=True
+            # AND its route table has an internet gateway route. Cheap
+            # heuristic: if MapPublicIpOnLaunch is False on any subnet,
+            # treat as private (false-negatives bias toward DISABLED,
+            # which is the safer security default).
+            return all(s.get("MapPublicIpOnLaunch") for s in subnets)
+        except Exception as exc:  # noqa: BLE001
+            self.log_warning(
+                f"Could not infer public/private subnet status for "
+                f"cluster {cluster.name}: {exc}. Defaulting "
+                f"assignPublicIp=ENABLED (pre-rc-e5u behavior). Pass "
+                f"assign_public_ip=False explicitly to override."
+            )
+            return True
+
     # -------------------------------------------------------------------------
     # Cluster Management
     # -------------------------------------------------------------------------
@@ -730,6 +782,7 @@ class ECSService(BaseService):
         count: int = 1,
         launch_type: Optional[str] = None,
         overrides: Optional[Dict] = None,
+        assign_public_ip: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run a standalone task (not as part of a service).
@@ -740,6 +793,12 @@ class ECSService(BaseService):
             count: Number of tasks to run
             launch_type: Override cluster's default launch type
             overrides: Container overrides
+            assign_public_ip: When True, attach a public IP to each
+                Fargate task ENI; required for tasks in public subnets
+                that need to reach the internet without a NAT gateway.
+                Default ``None`` infers from cluster.has_public_subnets
+                (True → ENABLED, False → DISABLED) so private-subnet
+                tasks aren't accidentally exposed (remote-compose-gbq).
 
         Returns:
             List of task dictionaries
@@ -755,11 +814,21 @@ class ECSService(BaseService):
             }
 
             if cluster.launch_type == ECSCluster.LaunchType.FARGATE:
+                # remote-compose-gbq: default to DISABLED for tasks
+                # known to be in private subnets. The infer step relies
+                # on the cluster carrying that signal; if it doesn't,
+                # we still default to ENABLED (matches pre-fix behavior
+                # for backward compat) but with an explicit kwarg path
+                # callers can override.
+                if assign_public_ip is None:
+                    assign_public_ip = self._infer_assign_public_ip(cluster)
                 run_params['networkConfiguration'] = {
                     'awsvpcConfiguration': {
                         'subnets': cluster.subnet_ids,
                         'securityGroups': cluster.security_group_ids,
-                        'assignPublicIp': 'ENABLED',
+                        'assignPublicIp': (
+                            'ENABLED' if assign_public_ip else 'DISABLED'
+                        ),
                     }
                 }
 

@@ -1,0 +1,134 @@
+{%- if has_efs %}
+# ------------------------------------------------------------------
+# EFS file systems for persistent compose volumes
+# ------------------------------------------------------------------
+
+resource "aws_security_group" "efs" {
+  name        = "${var.project}-efs"
+  description = "EFS - NFS 2049 from ECS tasks only."
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 2049
+    to_port         = 2049
+    protocol        = "tcp"
+    security_groups = [aws_security_group.tasks.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+{%- for vol in efs_volumes %}
+# Encryption defaults to false: AWS rejects encrypted=true on accounts that
+# haven't initialized the aws/elasticfilesystem KMS key (rc-e5u.26). Production
+# users: set encrypted=true + provide kms_key_id once the key exists.
+resource "aws_efs_file_system" "{{ vol.tf_name }}" {
+  creation_token = "${var.project}-{{ vol.name }}"
+  encrypted      = false
+  performance_mode = "generalPurpose"
+  throughput_mode  = "bursting"
+
+  tags = {
+    Name   = "${var.project}-{{ vol.name }}"
+    Volume = "{{ vol.name }}"
+  }
+}
+
+resource "aws_efs_mount_target" "{{ vol.tf_name }}" {
+  # Tasks run in public subnets (rc-e5u.25) so mount targets live there too.
+  count           = local.public_subnet_count
+  file_system_id  = aws_efs_file_system.{{ vol.tf_name }}.id
+  subnet_id       = aws_subnet.public[count.index].id
+  security_groups = [aws_security_group.efs.id]
+}
+{%- endfor %}
+
+{%- for mount in service_volume_mounts %}
+resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
+  file_system_id = aws_efs_file_system.{{ mount.volume_tf_name }}.id
+
+  # uid/gid default to 1000; override per volume in rc.yml when the
+  # container runs as a non-standard user (postgres:16-alpine = 70,
+  # redis:7-alpine = 999, etc.).
+  posix_user {
+    uid = {{ mount.uid }}
+    gid = {{ mount.gid }}
+  }
+
+  root_directory {
+    path = "/{{ mount.service }}"
+    creation_info {
+      owner_uid   = {{ mount.uid }}
+      owner_gid   = {{ mount.gid }}
+      permissions = "{{ mount.mode }}"
+    }
+  }
+
+  tags = {
+    Service = "{{ mount.service }}"
+    Volume  = "{{ mount.volume }}"
+  }
+}
+{%- endfor %}
+
+{%- if has_dev_efs %}
+# ------------------------------------------------------------------
+# Dev-mode source mounts (rc-e5u.45.8). One shared EFS file system per
+# project, holding ./<service>__<dev_volume> trees that `rc dev push`
+# streams local source into for hot reload. DevMode=true tag lets out-
+# of-band tag scans / reapers identify these as ephemeral.
+# ------------------------------------------------------------------
+resource "aws_efs_file_system" "{{ dev_efs_volume.tf_name }}" {
+  # Already namespaced by project — the dev volume name IS "<project>-dev".
+  creation_token = "{{ dev_efs_volume.name }}"
+  encrypted      = false
+  performance_mode = "generalPurpose"
+  # Elastic throughput suits intermittent rc-dev-push spikes better than
+  # bursting (which exhausts credits on big seed pushes).
+  throughput_mode  = "elastic"
+
+  tags = {
+    Name    = "{{ dev_efs_volume.name }}"
+    Volume  = "{{ dev_efs_volume.name }}"
+    DevMode = "true"
+  }
+}
+
+resource "aws_efs_mount_target" "{{ dev_efs_volume.tf_name }}" {
+  count           = local.public_subnet_count
+  file_system_id  = aws_efs_file_system.{{ dev_efs_volume.tf_name }}.id
+  subnet_id       = aws_subnet.public[count.index].id
+  security_groups = [aws_security_group.efs.id]
+}
+
+{%- for mount in dev_volume_mounts %}
+resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
+  file_system_id = aws_efs_file_system.{{ mount.volume_tf_name }}.id
+
+  posix_user {
+    uid = {{ mount.uid }}
+    gid = {{ mount.gid }}
+  }
+
+  root_directory {
+    path = "{{ mount.ap_root_path }}"
+    creation_info {
+      owner_uid   = {{ mount.uid }}
+      owner_gid   = {{ mount.gid }}
+      permissions = "{{ mount.mode }}"
+    }
+  }
+
+  tags = {
+    Service    = "{{ mount.service }}"
+    DevVolume  = "{{ mount.dev_volume_name }}"
+    DevMode    = "true"
+  }
+}
+{%- endfor %}
+{%- endif %}
+{%- endif %}

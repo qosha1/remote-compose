@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from pathlib import Path
 
@@ -53,9 +54,23 @@ class ComposeToECSConverter(BaseService):
     - Volume mounts (EFS for Fargate)
     """
 
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        account_id: Optional[str] = None,
+        **kwargs,
+    ):
+        """
+        ``account_id`` is the AWS account that owns the Secrets Manager
+        entries referenced by compose ``secrets:`` blocks. Required to
+        emit valid ECS task-def ``valueFrom`` ARNs (remote-compose-9yo).
+        Earlier behavior wrote literal ``arn:aws:secretsmanager:REGION:
+        ACCOUNT:secret:<name>`` placeholders that ECS rejects at
+        register-task-definition time. When None, _convert_secrets
+        raises ComposeConversionError instead of emitting bogus ARNs.
+        """
         super().__init__(**kwargs)
         self._conversion_warnings = []
+        self._account_id = account_id
 
     @property
     def warnings(self) -> List[str]:
@@ -554,7 +569,9 @@ class ComposeToECSConverter(BaseService):
         container_def['environment'] = environment
 
         if 'secrets' in config:
-            container_def['secrets'] = self._convert_secrets(config['secrets'])
+            container_def['secrets'] = self._convert_secrets(
+                config['secrets'], region=region,
+            )
 
         if 'command' in config:
             container_def['command'] = self._convert_command(config['command'])
@@ -641,7 +658,9 @@ class ComposeToECSConverter(BaseService):
         container_def['environment'] = environment
 
         if 'secrets' in config:
-            container_def['secrets'] = self._convert_secrets(config['secrets'])
+            container_def['secrets'] = self._convert_secrets(
+                config['secrets'], region=region,
+            )
 
         if 'command' in config:
             container_def['command'] = self._convert_command(config['command'])
@@ -813,32 +832,70 @@ class ComposeToECSConverter(BaseService):
 
         return variables
 
-    def _convert_secrets(self, secrets: List) -> List[Dict[str, str]]:
-        """Convert secrets to ECS secrets (requires AWS Secrets Manager)."""
+    def _convert_secrets(
+        self,
+        secrets: List,
+        region: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Convert compose ``secrets:`` to ECS task-def ``secrets[]``.
+
+        Each entry's ``valueFrom`` must be a fully-qualified ARN — ECS
+        register-task-definition rejects placeholders. We need both
+        region (per-cluster) and account_id (per-converter, set in
+        __init__) to build the ARN. When account_id wasn't supplied,
+        raise ComposeConversionError so the caller knows to provide it
+        instead of silently emitting bogus values.
+
+        ``arn:aws:secretsmanager:<region>:<account>:secret:<name>``
+        """
         ecs_secrets = []
+        if not secrets:
+            return ecs_secrets
+
+        if not self._account_id:
+            raise ComposeConversionError(
+                "compose declares secrets but ComposeToECSConverter was "
+                "constructed without account_id; the resulting "
+                "valueFrom ARN cannot be generated. Pass account_id="
+                "<aws-account-id> to the converter constructor "
+                "(remote-compose-9yo)."
+            )
+        if not region:
+            raise ComposeConversionError(
+                "compose declares secrets but no region was passed to "
+                "_convert_secrets; the resulting valueFrom ARN cannot "
+                "be region-qualified (remote-compose-9yo)."
+            )
 
         for secret in secrets:
             if isinstance(secret, str):
                 self._conversion_warnings.append(
-                    f"Secret '{secret}' requires manual configuration in AWS Secrets Manager"
+                    f"Secret '{secret}' requires manual configuration "
+                    f"in AWS Secrets Manager"
                 )
             elif isinstance(secret, dict):
                 name = secret.get('source', secret.get('name', ''))
                 if name:
                     ecs_secrets.append({
                         'name': name.upper().replace('-', '_'),
-                        'valueFrom': f"arn:aws:secretsmanager:REGION:ACCOUNT:secret:{name}"
+                        'valueFrom': (
+                            f"arn:aws:secretsmanager:{region}:"
+                            f"{self._account_id}:secret:{name}"
+                        ),
                     })
-                    self._conversion_warnings.append(
-                        f"Secret '{name}' ARN must be updated with actual AWS Secrets Manager ARN"
-                    )
 
         return ecs_secrets
 
     def _convert_command(self, command: Any) -> List[str]:
-        """Convert command to list format."""
+        """Convert command to list format.
+
+        String form uses shlex.split so quoted args survive — ``sh -c
+        "echo hello"`` becomes ``['sh', '-c', 'echo hello']`` instead of
+        ``['sh', '-c', '"echo', 'hello"']`` (the str.split() bug from
+        remote-compose-l9o).
+        """
         if isinstance(command, str):
-            return command.split()
+            return shlex.split(command)
         elif isinstance(command, list):
             return [str(c) for c in command]
         return []

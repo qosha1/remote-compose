@@ -1,31 +1,556 @@
-# Django Remote Compose
+# remote-compose
 
-A robust Django reusable app for deploying Docker Compose applications to remote AWS EC2 servers via SSH. Features async deployments, health monitoring, multi-service orchestration, and comprehensive audit logging.
+**Deploy any `docker-compose.yml` to a real cloud stack with one command.**
 
-## Table of Contents
+```
+  docker-compose.yml  ──▶  Provider  ──▶  terraform HCL  ──▶  terraform apply  ──▶  running stack
+         +                (ecs / k8s / …)      │                      │
+   rc.yml (v2)                                 │                      └─▶ backend state (s3 / gcs / local)
+         +                                     │
+   ImageBuilder                                └─▶ self-contained module — you can `cd terraform/ && terraform apply`
+   ImagePusher                                     without rc, no lock-in
+```
 
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Usage Guide](#usage-guide)
-  - [Basic Deployment](#basic-deployment)
-  - [Async Deployments with Celery](#async-deployments-with-celery)
-  - [Health Monitoring](#health-monitoring)
-  - [Multi-Service Orchestration](#multi-service-orchestration)
-  - [Notifications and Webhooks](#notifications-and-webhooks)
-- [Management Commands](#management-commands)
-- [API Reference](#api-reference)
-- [Testing](#testing)
-- [Security](#security)
-- [License](#license)
+`rc` is a generator + convenience wrapper around terraform. It reads your
+existing `docker-compose.yml`, applies tuning from a small `rc.yml`, builds
+images, pushes to the registry, emits a complete terraform module, and runs
+it. Then it gives you everyday verbs (`rc deploy`, `rc lifecycle migrate`,
+`rc db push`, `rc destroy`) so you don't have to invent a playbook per
+project.
 
-## Features
+The active branch is **`portable-deploy`**. The legacy v1 (Django-app +
+SSH) is preserved below the portable section for users on `main`.
+
+> **Status: alpha, hand-tested against a real production-grade Django stack
+> (sentinal: postgres, redis, django, celery worker, celery beat, nginx
+> fronting two subdomains, full data restore from a 569 MB local dump).**
+> See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the validation
+> ladder. See [AGENTS.md](AGENTS.md) for how the project is developed.
+
+---
+
+## Why this exists
+
+Most deploy tooling forces you to choose:
+
+- **Cloud-specific knobs** (ECS task defs, Kubernetes manifests, Helm charts) — you write the same app config in three places.
+- **Magic black-box PaaS** (Heroku, Fly, Render) — opinionated, locked-in, hard to escape.
+- **Hand-rolled terraform** — flexible but a 500-line module per service.
+
+`remote-compose` takes a different bet: **your `docker-compose.yml` already
+describes the topology you want**. The deployer should consume that file
+verbatim, ask only for the few things compose can't express (CPU/mem,
+secrets, public hostname, EFS uid), and produce a clean terraform module
+you fully own.
+
+---
+
+## Quick start
+
+> **Bootstrapping a fresh machine?** Run
+> `bash scripts/bootstrap-from-zero.sh` instead of step 1 — it installs
+> terraform via the platform package manager (brew/apt/dnf), creates a
+> `.venv`, runs `pip install -e ".[ecs]"`, and verifies `rc doctor` is
+> all-green. Idempotent — safe to re-run.
+
+```bash
+# 1. Install (only ECS provider ships today — k8s is roadmap)
+pip install -e ".[ecs]"
+
+# 2. In your app repo (alongside docker-compose.yml)
+rc init --from-compose docker-compose.yml   # scaffold a v2 rc.yml from your compose
+$EDITOR rc.yml                              # tweak cpu/memory/health checks
+
+# 3. Configure cloud creds (ECS example)
+export AWS_PROFILE=myprofile
+
+# 4. One-shot: scaffold (if missing) → deploy → push secrets → ALB URL
+rc up --from-compose docker-compose.yml     # the lazy path, idempotent
+
+# 4b. Or step through it manually
+rc plan                            # show what terraform would create
+rc deploy                          # build images, terraform apply, force-rolls
+rc secrets push                    # upload .env files into AWS Secrets Manager
+rc lifecycle migrate               # run a named hook in a live container
+rc status                          # ECS service health table
+rc exec django -- /bin/bash        # interactive shell
+rc db push /tmp/local-dump.dump    # seed the deployed db from a local dump
+rc destroy --yes                   # tear it all down
+```
+
+To verify the documented commands exist as advertised, run
+`bash scripts/test-readme-quickstart.sh` — it audits `rc --help` against
+this section without touching AWS.
+
+Every command is **declarative + idempotent**. Re-running `rc deploy` after
+no changes prints `no changes — infrastructure matches config`.
+
+---
+
+## First-deploy walkthrough
+
+If you want to verify rc actually works end-to-end against real AWS
+before you commit to it, the repo ships a scripted acceptance trace
+that takes a clean account → a fully-running production-shape Django +
+celery + nginx stack → clean teardown. Single command, no aws-cli, no
+sed, no `/tmp` dance.
+
+```bash
+# Prereqs: terraform installed (or run scripts/bootstrap-from-zero.sh
+# first), an AWS profile with creds, and a Django+celery compose to
+# point at. We use start-simpli (private repo) — substitute your own
+# via the START_SIMPLI / COMPOSE_FILE / REGION / AWS_PROFILE_OVERRIDE
+# env vars at the top of the script.
+
+bash scripts/test-startsimpli-end-to-end.sh
+```
+
+What it does, step by step:
+
+1. **`rc destroy --all-ephemeral`** — clean slate. Removes any prior
+   ephemeral stacks from the local registry.
+2. **`rc up --from-compose docker-compose.local.yml --aws-profile X
+   --region Y --ttl 4h`** — single-command full deploy. Scaffolds an
+   rc.yml from your compose, auto-fixes nginx for ECS Cloud Map
+   (variable-based proxy_pass + VPC resolver), imports any orphan
+   Container Insights log group, runs terraform apply, builds + pushes
+   images, force-rolls services, pushes file-sourced secrets into
+   Secrets Manager, runs auto_on_deploy lifecycle hooks (e.g.
+   `python manage.py migrate --noinput`).
+3. **`rc status` polling** — waits for all services to reach
+   `health=healthy`.
+4. **Plain `curl http://<ALB>/api/v1/health/`** — no Host: header
+   rewrite, no `https`, no `--insecure`. The patient retry loop tolerates
+   the ~60-90s window where ECS marks the task healthy but Django is
+   still finishing migrations + collectstatic + runserver. When it
+   returns 200, the body is checked for `{"celery":"healthy"}` —
+   real workers responding to ping, not "no_workers".
+5. **`rc destroy --yes`** — clean teardown. Removes every AWS resource
+   tagged `Project=<this-stack>` and unregisters the entry from the
+   ephemeral registry.
+6. **`rc list --ephemeral`** — registry empty. No stale rows.
+
+Scripted. Repeatable. The tracking bead is
+[rc-e5u.46](.beads/issues.jsonl) (`bd show rc-e5u.46`).
+
+---
+
+## What rc.yml v2 looks like
+
+```yaml
+version: 2
+project: my-app
+compose_file: docker-compose.yml
+provider: ecs
+
+provider_config:
+  ecs:
+    cluster: my-app-prod
+    region: us-west-1
+    aws_profile: myprofile
+    vpc_cidr: 10.0.0.0/16
+    route53_zone: rctest.example.com   # override if zone != domain[-2:]
+
+terraform:
+  output_dir: ./terraform/${provider}
+  backend:
+    type: s3                           # or local
+    bucket: my-app-tf-state
+    key: ecs.tfstate
+    region: us-west-1
+
+# Auto-creates the backup S3 bucket via terraform with versioning + AES256
+# + 14-day expiration. Set bucket_managed: false to point at an existing
+# bucket you own elsewhere.
+backup:
+  bucket: my-app-backups
+  service: postgres                    # which container hosts pg_restore
+  retention_days: 14                   # or "never"
+
+# .env files become Secrets Manager JSON blobs; provider emits one
+# task-def `secrets[]` entry per KEY using arn:KEY:: selectors so each
+# key arrives as its own env var (vs one giant blob).
+secrets:
+  - name: django
+    source: file
+    path: .envs/.production/.django
+  - name: postgres
+    source: file
+    path: .envs/.production/.postgres
+
+# Compose-driven deploy set. Default: every compose service deploys with
+# sensible defaults; rc.yml services[] is for overrides. Use exclude/include
+# for dev-only services (ngrok, debug profiles, etc.).
+compose:
+  exclude: [ngrok]                     # mutually exclusive with include
+
+services:
+  postgres:
+    type: infrastructure
+    cpu: 512
+    memory: 1024
+    volumes:
+      - name: pgdata
+        mount: /var/lib/postgresql/data
+        # Per-service posix_user on the EFS access point so initdb
+        # can chown — postgres:17 alpine = uid 70, debian = 999.
+        uid: 999
+        gid: 999
+        mode: "0700"
+
+  django:
+    type: application
+    cpu: 1024
+    memory: 2048
+    port: 8001
+    health_check_path: /api/v1/health/
+    ephemeral_storage: 21              # GiB; FARGATE 21–200
+    lifecycle:
+      migrate:
+        command: ["python", "manage.py", "migrate", "--noinput"]
+        auto_on_deploy: true           # runs after every rc deploy
+      createsuperuser:
+        command: ["python", "manage.py", "createsuperuser", "--noinput"]
+        run_once: true                 # skips when probe exits 0
+        probe:
+          - python
+          - -c
+          - |
+            import os, django, sys
+            django.setup()
+            from django.contrib.auth import get_user_model
+            sys.exit(0 if get_user_model().objects.filter(
+                email=os.environ['DJANGO_SUPERUSER_EMAIL']
+            ).exists() else 1)
+      shell:
+        command: ["python", "manage.py", "shell"]
+        interactive: true              # forwards a TTY
+
+  nginx:
+    type: proxy
+    cpu: 256
+    memory: 512
+    port: 80
+    public: true
+    default_target: true               # catches anything the host rules don't
+    domain: app.example.com            # primary; this name routes here
+    aliases:                           # extra hostnames same service answers for
+      - api.app.example.com            #   (cert SANs + R53 records, no listener rules)
+    health_check_path: /health
+```
+
+Full schema reference: [ARCHITECTURE.md § rc.yml v2 at a glance](ARCHITECTURE.md#rcyml-v2-at-a-glance).
+
+---
+
+## Feature index
+
+What's built and live-verified on the `portable-deploy` branch:
+
+### Provider abstraction
+
+- **`Provider` ABC** — every cloud target (ECS today, K8s next) implements `emit_terraform`, `plan`, `deploy`, `redeploy`, `status`, `logs`, `exec`, `rollback`, `destroy` against a shared `DeployContext`.
+- **`FakeProvider`** for tests — every contract test runs against both `ECSProvider` and `FakeProvider` so adding a new provider is a copy-paste exercise.
+- **rc-test-* tag** — every project named `rc-test-*` gets `Environment=rc-test` tags + `force_destroy=true` on destructive resources, so test stacks always tear down clean.
+
+### ECS provider — what terraform we generate
+
+- VPC + 2 public + 2 private subnets, IGW, security groups, default routing
+- ECS cluster with Container Insights (log group terraform-managed)
+- Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
+- ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
+- EFS file system + access point per stateful volume; per-service posix uid/gid/mode
+- AWS Secrets Manager: one secret per `.env` file, JSON-blobbed, individual keys exposed via ECS `arn:KEY::` selectors
+- ECS Exec wired (task role gets `ssmmessages:*`); `enable_execute_command = true` on every service
+- ALB host-routing: per-service `domain` → ALB listener rule + per-service target group
+- Single fronting service: `aliases:` adds cert SANs + R53 records without listener rules
+- S3 backup bucket auto-created with versioning + lifecycle when `backup.bucket` is declared
+- Stateful services (any with EFS) auto-set `deployment_minimum_healthy_percent = 0` so rolling deploys can't race-corrupt postgres data
+
+### CLI
+
+| command | does |
+|---|---|
+| `rc init` | scaffold a v2 rc.yml |
+| `rc migrate --in rc.yml --out rc.v2.yml` | convert legacy v1 |
+| `rc plan` | terraform plan summary |
+| `rc deploy [--no-build]` | build, push, terraform apply, force-roll, run auto_on_deploy hooks |
+| `rc destroy --yes` | terraform destroy |
+| `rc status` | ECS service health table |
+| `rc exec <service> -- <cmd...>` | run a one-off command inside a live task; reliable stdout via sentinels; full TTY when stdin is a tty |
+| `rc lifecycle <hook> [<service>]` | run a named hook from rc.yml (resolves declarer; handles `run_once` probes) |
+| `rc secrets push [--rollout/--no-rollout]` | parse each `.env` file → upload as JSON to its SM secret → force-rolls every service |
+| `rc db backup` / `rc db restore` / `rc db list` | postgres backup round-trips through S3 (host-side presigned URLs; tasks just curl) |
+| `rc db push <file>` | upload a local dump → exec `pg_restore` inside the deployed container; auto-detects format from extension (`.dump`, `.tar.gz`, `.sql`); bootstraps `curl + ca-certificates` in containers that don't ship them |
+| `rc copilot import` | migrate an AWS Copilot app to rc.yml v2 + docker-compose; supports `--env <name>` for per-environment overrides ([guide](#aws-copilot-migration)) |
+| `rc doctor` | preflight: terraform/docker/python/boto/AWS creds checked |
+| `rc install` | platform package-manager fix for missing deps |
+
+### Compose feature support
+
+- `build:` with optional `target:` (multi-stage), `args:`, `dockerfile:` — relative dockerfile resolved against the build context (the natural compose semantic)
+- `image:` — pre-built image used verbatim, ECR push skipped
+- `command:` — overrides the container CMD
+- `environment:` (dict or list) AND `env_file:` (list or single string, paths relative to compose dir, multiple files merge in declaration order, `environment:` map wins on conflict)
+- `ports:` — when public, primary port goes to ALB target group; remaining ports become additional `containerPort`s in the task def, intra-VPC reachable via the existing tasks SG (use this for VNC, devtools, internal-only ports)
+- `volumes:` — EFS-backed when declared in rc.yml with explicit `mount:` and uid/gid
+
+### Lifecycle commands
+
+Declarative one-off operations live in rc.yml as `services[*].lifecycle.<hook>`:
+
+```yaml
+lifecycle:
+  migrate:
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    auto_on_deploy: true        # rc deploy runs this after rollout
+  createsuperuser:
+    command: ["python", "manage.py", "createsuperuser", "--noinput"]
+    run_once: true
+    probe: [python, -c, "import sys; sys.exit(0 if user_exists() else 1)"]
+  shell:
+    command: ["python", "manage.py", "shell"]
+    interactive: true           # TTY passthrough
+```
+
+`auto_on_deploy: true` runs the hook after every successful `rc deploy`,
+in declaration order, with hook failures surfaced as warnings (not deploy
+failures — rerun `rc lifecycle <hook>` for full output).
+
+`run_once: true` runs the `probe:` first; non-zero exit ⇒ "not yet
+done" ⇒ run the hook. Idempotent createsuperuser, fixture loading,
+schema bootstrap.
+
+### AWS Copilot migration
+
+AWS Copilot reaches **end-of-support on 2026-06-12**. Every team
+running on Copilot needs a path off it. `rc copilot import` is that
+path — it reads any `copilot/` directory tree (services, environments,
+addons, pipelines) and writes a working `rc.yml` v2 + `docker-compose.yml`
++ `IMPORT_SUMMARY.md`.
+
+```bash
+rc copilot import \
+    --from ./copilot \
+    --out  . \
+    --env  production \
+    --project my-app
+```
+
+**What translates today:**
+
+| Copilot construct | rc translation |
+|---|---|
+| `Backend Service` | private rc service (no public, no ALB) |
+| `Worker Service` | rc service `type: worker` |
+| `Load Balanced Web Service` | public rc service + port + `default_target` + domain (from `http.alias`) + aliases |
+| `image.build: { context, dockerfile, target, args }` | docker-compose `build:` block (multi-stage `target` honored) |
+| `image.location` | docker-compose `image:` (Copilot's `${TAG}` interpolation preserved) |
+| `cpu`, `memory`, `count` | rc.yml `cpu`, `memory`, `replicas` |
+| `storage.volumes.<n>: { path, efs: {uid, gid} }` | rc.yml `volumes` with EFS access-point uid/gid |
+| `variables: { KEY: value }` | docker-compose `environment:` |
+| `secrets: { KEY: { secretsmanager: arn } }` | rc.yml `secrets:` `source: aws_sm` |
+| `environments.<env>` overrides | deep-merged when `--env <env>` passed |
+| `${COPILOT_ENVIRONMENT_NAME}` | resolved when `--env` is passed; left literal otherwise |
+
+**What gets flagged for review** (typed warnings grouped in `IMPORT_SUMMARY.md`):
+
+| Copilot construct | warning |
+|---|---|
+| `Request-Driven Web Service` | `UnsupportedServiceTypeWarning` — App Runner is a different runtime; best-effort translated to public ECS for review |
+| `Static Site` | `UnsupportedServiceTypeWarning` — CloudFront+S3 has no ECS analogue; emitted to `compose.exclude` so it's not silently dropped |
+| `count: { range, cpu_percentage }` | `ScalingNotSupportedWarning` — autoscaling not yet emitted; replicas pinned to range floor |
+| `count: 0` | `ScalingNotSupportedWarning` — ECS doesn't scale-to-zero; replicas=1 |
+| `exec: false` | `ExecDisabledIgnoredWarning` — provider always enables ECS Exec |
+| `network.vpc.placement: private` | `PrivateSubnetUnsupportedWarning` — public-subnet Fargate today (rc-e5u.25 tracks the NAT variant) |
+| addons CFN templates | listed in summary — translate to terraform manually (P3 backlog) |
+
+Tested against [a corpus of real Copilot apps](tests/fixtures/copilot/README.md) including:
+- aws/copilot-cli e2e fixtures (canonical LBWS, app-with-domain, static-site)
+- a public external example (ShanikaEdiriweera/aws-copilot-example)
+- a 15-service production-grade app (sentinal: backend + workers + nginx + multi-env + secretsmanager refs)
+
+### Local-data seeding (`rc db push`)
+
+Spin up a test stack in a separate region, seed it with real data from a
+local Docker volume, validate, tear down. Repeat. The flow:
+
+```bash
+docker exec my_postgres pg_dump -Fc -U postgres my_db > /tmp/seed.dump
+rc deploy
+rc secrets push
+rc db push /tmp/seed.dump
+```
+
+`rc db push` uploads to the configured backup bucket via host-side boto3,
+generates a presigned GET URL, exec's a sentinel-bracketed restore script
+inside the deployed postgres container that downloads with curl (or
+bootstraps curl via apt-get when the image doesn't ship it), runs
+`pg_restore --no-owner --clean --if-exists`, and deletes the S3 staging
+object on success.
+
+---
+
+## Mental model in 5 lines
+
+1. **Compose is the topology.** Adding a service to `docker-compose.yml` deploys it (defaults: 256 CPU / 512 MB / `application` if it has ports, `worker` otherwise).
+2. **rc.yml is the tuning.** Override CPU, memory, port, public, domain, lifecycle, secrets, volumes, EFS uid, etc. per-service.
+3. **The provider is thin.** It generates a terraform module from the merged config; you can `cd terraform/ && terraform apply` without `rc` ever again.
+4. **Secrets are JSON in SM.** Each `.env` file becomes one secret; each KEY in that file becomes a separate task-def env var via ECS JSON-key selectors.
+5. **Test stacks are disposable.** `rc-test-*` projects auto-set `force_destroy=true` on every resource; `rc destroy` tears them down clean.
+
+---
+
+## Codebase map
+
+```
+remote_compose/
+├── cli.py                           # legacy v1 commands + v2 dispatch
+├── cli_v2.py                        # v2 CLI: load_rc_yml, build_deploy_context, dispatch_if_v2
+├── config/
+│   ├── v1_schema.py                 # legacy flat schema loader
+│   ├── v2_schema.py                 # ServiceV2, RcConfigV2, ComposeConfig, BackupConfig, ...
+│   └── migrate.py                   # v1 → v2 with warnings on stateful services
+├── envfile.py                       # standalone .env parser (used by provider + rc db push + lifecycle)
+├── copilot/
+│   ├── discover.py                  # walk copilot/ → typed CopilotApp model
+│   └── translate.py                 # 5 focused translators + composer + warning types
+├── provider/
+│   ├── base.py                      # Provider ABC, ServiceSpec, DeployContext, ExecResult, ...
+│   ├── fake.py                      # in-memory provider for the contract suite
+│   └── ecs/
+│       ├── provider.py              # ECSProvider implementation
+│       ├── autosize.py              # EC2 capacity provider sizing
+│       ├── ecr_auth.py              # ECR login for image push
+│       └── templates/
+│           ├── alb.tf.j2            # ALB + listeners + per-service target groups + host rules
+│           ├── backend.tf.j2        # terraform backend
+│           ├── backup.tf.j2         # S3 backup bucket + lifecycle
+│           ├── capacity.tf.j2       # EC2 capacity provider
+│           ├── cluster.tf.j2        # ECS cluster + container-insights log group
+│           ├── domain.tf.j2         # ACM cert (with SANs) + R53 records
+│           ├── efs.tf.j2            # EFS + access points (uid/gid/mode)
+│           ├── iam.tf.j2            # task-execution + task roles + ssmmessages policy
+│           ├── network.tf.j2        # VPC, subnets, IGW, route tables
+│           ├── outputs.tf.j2        # ECR repo URLs, ALB DNS
+│           ├── providers.tf.j2      # AWS provider block
+│           ├── secrets.tf.j2        # SM secret placeholders
+│           ├── security_groups.tf.j2
+│           ├── service_discovery.tf.j2  # Cloud Map private namespace
+│           ├── services.tf.j2       # ECS task def + service per compose service
+│           └── variables.tf.j2
+├── image/
+│   ├── builder.py                   # docker build wrapper (handles relative dockerfile)
+│   └── pusher.py                    # docker push to ECR/GCR/etc.
+└── terraform/
+    ├── backend.py                   # render_backend_block
+    ├── emitter.py                   # Jinja2-based directory render
+    └── runner.py                    # subprocess wrapper for terraform CLI
+
+tests/
+├── unit/                            # per-module unit tests
+├── contract/test_provider_contract.py   # runs against ECSProvider + FakeProvider
+├── integration/test_provider_ecs_terraform.py  # invokes real `terraform validate`
+├── e2e/                             # opt-in real-AWS tests (RC_E2E=1)
+└── fixtures/golden/ecs_minimal/     # byte-for-byte expected HCL output
+
+examples/
+├── demo-app/                        # FastAPI + worker + postgres + redis reference stack
+└── sample-app/                      # minimal hello-world
+```
+
+[ARCHITECTURE.md § Layers](ARCHITECTURE.md#layers) has the import-rule
+diagram.
+
+---
+
+## Build & test
+
+```bash
+# Dev install
+pip install -e ".[ecs]"
+pip install -r requirements/dev.txt
+
+# Fast (12s): unit + contract
+pytest tests/unit/ tests/contract/
+
+# Adds: real `terraform init -backend=false && terraform validate`
+pytest tests/integration/
+
+# Full opt-in real-AWS suite (~25 min, requires creds)
+RC_E2E=1 pytest -m e2e tests/e2e/
+
+# Regenerate the byte-identical golden HCL fixture
+python -m tests.unit.test_provider_ecs.test_golden --regenerate
+
+# Linters
+black remote_compose/
+flake8 remote_compose/
+```
+
+The contract suite is the heart of provider parity. Any new provider
+ships only when `pytest tests/contract/test_provider_contract.py` is
+green against it.
+
+---
+
+## Roadmap / open work
+
+Tracked in [beads](https://github.com/steveyegge/beads). To inspect:
+
+```bash
+bd ready                      # available work
+bd show rc-e5u                # the umbrella epic
+bd list --status=open         # everything still open
+```
+
+High-signal open items (as of this writing):
+
+- **Kubernetes provider** (`rc-e5u.8`) — proves the multi-cloud claim
+- **Private subnets + NAT** (`rc-e5u.25`) — currently public-subnet Fargate for cost
+- **EFS encryption on fresh accounts** (`rc-e5u.26`) — KMS key bootstrap
+- **`rc audit`** (`rc-e5u.37.4`) — post-destroy AWS-side cleanup verification
+- **`rc db dump-local`** (`rc-e5u.37.3`) — wraps `docker exec pg_dump` with port autodiscovery
+- **`rc compose import`** (`rc-e5u.41.3`) — scaffold rc.yml from a compose file
+- **Framework presets** (`rc-e5u.35.7`) — auto-default lifecycle hooks for django/rails/phoenix/laravel
+- **Provider auto-import of orphan log groups** (`rc-e5u.37.5`) — terraform import on first-run conflicts
+
+---
+
+## Design principles
+
+1. **Be a generator, not a runtime.** Every piece of state we own should also be readable as plain terraform / plain JSON. Users escape `rc` cleanly.
+2. **Compose is the contract.** Don't invent parallel config; consume the file the team already maintains.
+3. **Test against real clouds.** Unit tests catch shape regressions; the real validator is `terraform validate` + a live e2e against `rc-test-*` projects.
+4. **One-off operations get first-class commands.** Lifecycle hooks, db push, exec, secrets push — all CLI verbs, not bash scripts users have to copy.
+5. **Reproducible test stacks.** `rc-test-*` namespaces auto-tear-down; isolation is a property of the project name, not user discipline.
+6. **No backwards-compat ratchets in alpha.** When the right shape conflicts with the old shape, file a bead, change both at once. Backward-compat shims live only as long as we're sure they don't trap us.
+
+See [AGENTS.md](AGENTS.md) for the day-to-day workflow.
+
+---
+
+## Related docs
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — full design, validation ladder, dependency graph, e2e setup
+- [AGENTS.md](AGENTS.md) — workflow conventions for humans + AI agents
+- [examples/demo-app/README.md](examples/demo-app/README.md) — runnable reference stack
+- [CLAUDE.md](CLAUDE.md) — instructions for Claude Code when working in this repo
+
+---
+
+# Legacy v1 (pre-portable)
+
+The content below describes the v1 SSH/Django-app deploy path on `main`.
+The portable provider work above lives on `portable-deploy`. v1 still ships
+for users on the older path; v2 is the active line.
+
+## Features (v1)
 
 - **Docker Context Management**: Create and manage Docker contexts for remote deployment targets
 - **Docker Compose Deployment**: Deploy docker-compose.yml files to remote hosts via SSH
 - **AWS EC2 Integration**: Auto-discover EC2 instances and create deployment targets
-- **AWS ECS Integration**: Deploy to AWS ECS (Fargate or EC2) without SSH - automatically converts docker-compose to ECS task definitions
+- **AWS ECS Integration**: Deploy to AWS ECS (Fargate or EC2) without SSH
 - **Async Deployments**: Celery tasks for background deployment operations
 - **Health Monitoring**: Continuous health checks for targets and deployments
 - **Multi-Service Orchestration**: Deploy multiple services with sequential, parallel, rolling, or canary strategies
@@ -36,984 +561,10 @@ A robust Django reusable app for deploying Docker Compose applications to remote
 - **Webhooks & Notifications**: Slack, email, and custom webhook notifications
 - **Deployment History**: Full deployment tracking with rollback capability
 
-## Installation
-
-### From source:
-
-```bash
-git clone https://github.com/your-org/remote-compose.git
-cd remote-compose
-pip install -e .
-```
-
-### Install with Celery support (for async deployments):
-
-```bash
-pip install -e ".[celery]"
-```
-
-### Install development dependencies:
-
-```bash
-pip install -r requirements/dev.txt
-```
-
-## Quick Start
-
-### 1. Add to Django settings
-
-```python
-INSTALLED_APPS = [
-    # ... your apps
-    'remote_compose',
-]
-
-# Generate encryption key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-REMOTE_COMPOSE = {
-    'ENCRYPTION_KEY': 'your-fernet-key-here',  # REQUIRED
-}
-```
-
-### 2. Run migrations
-
-```bash
-python manage.py migrate remote_compose
-```
-
-### 3. Create a deployment target
-
-```bash
-# Using management command
-python manage.py create_target \
-    --name prod-server \
-    --host ec2-54-123-45-67.compute-1.amazonaws.com \
-    --user ubuntu \
-    --ssh-key ~/.ssh/prod.pem
-
-# Or via Python
-from remote_compose.services import TargetService
-
-target_service = TargetService()
-target = target_service.create_target(
-    name='prod-server',
-    host='54.123.45.67',
-    username='ubuntu',
-    ssh_key_path='/path/to/key.pem',
-    validate_connection=True,  # Test SSH connection
-)
-```
-
-### 4. Deploy your application
-
-```bash
-# Using management command
-python manage.py deploy \
-    --target prod-server \
-    --compose-file docker-compose.yml \
-    --project myapp \
-    --version v1.0.0
-
-# Or via Python
-from remote_compose.services import DeploymentService
-
-deployment_service = DeploymentService()
-deployment = deployment_service.deploy(
-    target=target,
-    compose_file_path='./docker-compose.yml',
-    project_name='myapp',
-    version='v1.0.0',
-    environment={'DEBUG': 'false'},
-    deployed_by='admin',
-)
-
-print(f"Deployment {deployment.id} status: {deployment.status}")
-```
-
-## Configuration
-
-Add these settings to your Django `settings.py` under `REMOTE_COMPOSE`:
-
-```python
-REMOTE_COMPOSE = {
-    # ===================
-    # REQUIRED SETTINGS
-    # ===================
-
-    # Fernet encryption key for credential storage
-    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    'ENCRYPTION_KEY': 'your-32-byte-url-safe-base64-key',
-
-    # ===================
-    # SSH SETTINGS
-    # ===================
-
-    'SSH_CONNECTION_TIMEOUT': 30,      # Connection timeout (seconds)
-    'SSH_COMMAND_TIMEOUT': 300,        # Command execution timeout (seconds)
-    'SSH_RETRY_ATTEMPTS': 3,           # Retry attempts for failed connections
-    'SSH_RETRY_DELAY': 5,              # Delay between retries (seconds)
-    'SSH_AUTO_ADD_HOSTS': False,       # Auto-add unknown hosts (ONLY for trusted networks!)
-
-    # ===================
-    # DEPLOYMENT SETTINGS
-    # ===================
-
-    'DEPLOYMENT_TIMEOUT': 600,         # Overall deployment timeout (seconds)
-    'MAX_CONCURRENT_DEPLOYMENTS': 5,   # Max parallel deployments per target
-    'DEPLOYMENT_LOG_RETENTION_DAYS': 90,
-    'ENABLE_ROLLBACK': True,
-
-    # ===================
-    # DOCKER SETTINGS
-    # ===================
-
-    'DOCKER_COMPOSE_COMMAND': 'docker compose',  # or 'docker-compose' for older versions
-    'DOCKER_COMMAND': 'docker',
-
-    # ===================
-    # AWS SETTINGS
-    # ===================
-
-    'AWS_DEFAULT_REGION': 'us-east-1',
-    'EC2_SYNC_INTERVAL': 3600,         # EC2 discovery interval (seconds)
-
-    # ===================
-    # RATE LIMITING
-    # ===================
-
-    'RATE_LIMIT_ENABLED': True,
-    'RATE_LIMIT_DEPLOYMENTS_PER_MINUTE': 10,   # Global limit
-    'RATE_LIMIT_DEPLOYMENTS_PER_TARGET': 5,    # Per target
-    'RATE_LIMIT_DEPLOYMENTS_PER_USER': 20,     # Per user (5 min window)
-    'RATE_LIMIT_ROLLBACKS_PER_MINUTE': 5,
-
-    # ===================
-    # AUDIT LOGGING
-    # ===================
-
-    'AUDIT_LOG_ENABLED': True,
-    'AUDIT_LOG_TO_DATABASE': True,
-    'AUDIT_LOG_FILE': '/var/log/remote-compose/audit.log',  # Optional file logging
-    'AUDIT_LOG_RETENTION_DAYS': 365,
-
-    # ===================
-    # NOTIFICATIONS
-    # ===================
-
-    'NOTIFICATION_CHANNELS': ['webhook', 'slack'],  # Enabled channels
-    'NOTIFICATION_WEBHOOK_URLS': [
-        'https://your-app.com/webhooks/deployment',
-    ],
-    'SLACK_WEBHOOK_URL': 'https://hooks.slack.com/services/xxx/yyy/zzz',
-    'WEBHOOK_ALLOW_ALL_DOMAINS': False,  # Set True only for testing
-    'WEBHOOK_ALLOWED_DOMAINS': {'your-app.com', 'hooks.slack.com'},
-
-    # ===================
-    # HEALTH CHECKS
-    # ===================
-
-    'HEALTH_CHECK_INTERVAL': 300,      # 5 minutes
-    'HEALTH_CHECK_TIMEOUT': 30,
-    'HEALTH_CHECK_ENABLED': True,
-
-    # ===================
-    # ORCHESTRATION
-    # ===================
-
-    'ORCHESTRATION_MAX_PARALLEL': 5,   # Max parallel deployments in orchestration
-    'ORCHESTRATION_BATCH_SIZE': 2,     # Batch size for rolling deployments
-
-    # ===================
-    # CELERY (for async)
-    # ===================
-
-    'CELERY_TASK_QUEUE': 'remote_compose',
-    'CELERY_TASK_RETRY_DELAY': 30,
-    'CELERY_TASK_MAX_RETRIES': 3,
-
-    # ===================
-    # SECURITY
-    # ===================
-
-    'ENCRYPT_CREDENTIALS': True,
-    'MASK_SENSITIVE_LOGS': True,
-
-    # ===================
-    # HOOKS
-    # ===================
-
-    'PRE_DEPLOY_HOOK': 'myapp.hooks.pre_deploy',   # dotted path to callable
-    'POST_DEPLOY_HOOK': 'myapp.hooks.post_deploy',
-    'ON_FAILURE_HOOK': 'myapp.hooks.on_failure',
-}
-```
-
-## Usage Guide
-
-### Basic Deployment
-
-```python
-from remote_compose.services import (
-    TargetService,
-    DeploymentService,
-    CredentialService,
-)
-
-# =====================
-# 1. Store SSH Key Securely
-# =====================
-credential_service = CredentialService()
-
-ssh_credential = credential_service.create_ssh_key(
-    name='prod-ssh-key',
-    key_path='/path/to/private/key.pem',
-    description='Production server SSH key',
-    created_by='admin',
-)
-
-# =====================
-# 2. Create Deployment Target
-# =====================
-target_service = TargetService()
-
-target = target_service.create_target(
-    name='prod-web-server',
-    host='54.123.45.67',
-    username='ubuntu',
-    port=22,
-    ssh_key=ssh_credential,  # Use stored credential
-    validate_connection=True,
-    tags={'environment': 'production', 'role': 'web'},
-)
-
-# =====================
-# 3. Deploy Application
-# =====================
-deployment_service = DeploymentService()
-
-deployment = deployment_service.deploy(
-    target=target,
-    compose_file_path='./docker-compose.prod.yml',
-    project_name='myapp',
-    version='v1.2.3',
-    environment={
-        'DATABASE_URL': 'postgres://...',
-        'REDIS_URL': 'redis://...',
-    },
-    deployed_by='admin@example.com',
-    pull_images=True,
-    build_images=False,
-)
-
-print(f"Deployment ID: {deployment.id}")
-print(f"Status: {deployment.status}")
-print(f"Duration: {deployment.duration}s")
-
-# =====================
-# 4. Check Status
-# =====================
-status = deployment_service.get_status(deployment)
-print(f"Container IDs: {status['container_ids']}")
-print(f"Services: {status['service_status']}")
-
-# =====================
-# 5. Get Logs
-# =====================
-logs = deployment_service.get_logs(deployment, tail=100)
-print(logs)
-
-# =====================
-# 6. Rollback if needed
-# =====================
-if something_went_wrong:
-    rollback = deployment_service.rollback(
-        deployment=previous_deployment,
-        deployed_by='admin@example.com',
-    )
-```
-
-### Async Deployments with Celery
-
-First, configure Celery in your Django project:
-
-```python
-# celery.py
-from celery import Celery
-
-app = Celery('myproject')
-app.config_from_object('django.conf:settings', namespace='CELERY')
-app.autodiscover_tasks()
-```
-
-Then use async tasks:
-
-```python
-from remote_compose.tasks import (
-    deploy_async,
-    rollback_async,
-    check_deployment_health,
-    cleanup_old_deployments,
-)
-
-# =====================
-# Async Deployment
-# =====================
-result = deploy_async.delay(
-    target_id=target.id,
-    compose_file_path='/app/docker-compose.yml',
-    project_name='myapp',
-    version='v1.2.3',
-    environment={'DEBUG': 'false'},
-    deployed_by='admin',
-    webhook_url='https://myapp.com/webhooks/deploy',  # Optional notification
-)
-
-# Check task status
-print(f"Task ID: {result.id}")
-print(f"Status: {result.status}")
-
-# Get result when ready
-if result.ready():
-    deployment_result = result.get()
-    print(f"Deployment ID: {deployment_result['deployment_id']}")
-
-# =====================
-# Async Rollback
-# =====================
-rollback_result = rollback_async.delay(
-    deployment_id=deployment.id,
-    deployed_by='admin',
-)
-
-# =====================
-# Schedule Health Checks (in Celery Beat)
-# =====================
-# celerybeat_schedule.py
-CELERY_BEAT_SCHEDULE = {
-    'check-all-targets-health': {
-        'task': 'remote_compose.tasks.check_all_targets_health',
-        'schedule': 300.0,  # Every 5 minutes
-    },
-    'cleanup-old-deployments': {
-        'task': 'remote_compose.tasks.cleanup_old_deployments',
-        'schedule': 86400.0,  # Daily
-        'kwargs': {'retention_days': 90},
-    },
-    'monitor-stale-deployments': {
-        'task': 'remote_compose.tasks.monitor_stale_deployments',
-        'schedule': 3600.0,  # Hourly
-        'kwargs': {'max_running_hours': 24},
-    },
-}
-```
-
-### Health Monitoring
-
-```python
-from remote_compose.services import HealthService
-
-health_service = HealthService()
-
-# =====================
-# Check Single Target
-# =====================
-result = health_service.check_target_health(target)
-print(f"Healthy: {result.healthy}")
-print(f"Message: {result.message}")
-
-# =====================
-# Check All Targets
-# =====================
-report = health_service.check_all_targets_health()
-print(f"Total: {report.total_checked}")
-print(f"Healthy: {report.healthy_count}")
-print(f"Unhealthy: {report.unhealthy_count}")
-
-for result in report.results:
-    if not result.healthy:
-        print(f"  UNHEALTHY: {result.target_name} - {result.message}")
-
-# =====================
-# Check Deployment Health
-# =====================
-deployment_health = health_service.check_deployment_health(deployment)
-print(f"All services running: {deployment_health.healthy}")
-print(f"Services: {deployment_health.details['services']}")
-
-# =====================
-# Find Unhealthy Targets
-# =====================
-unhealthy = health_service.get_unhealthy_targets()
-for target in unhealthy:
-    print(f"Target {target.name} is unhealthy: {target.health_message}")
-
-# =====================
-# Find Stale Deployments
-# =====================
-stale = health_service.get_stale_deployments(max_running_hours=24)
-for deployment in stale:
-    print(f"Deployment {deployment.id} has been running for too long")
-
-# =====================
-# Custom Health Check
-# =====================
-result = health_service.run_custom_health_check(
-    deployment=deployment,
-    command='curl -f http://localhost:8080/health',
-    expected_exit_code=0,
-)
-```
-
-### Multi-Service Orchestration
-
-Deploy multiple services across multiple targets with dependency management:
-
-```python
-from remote_compose.services import (
-    OrchestrationService,
-    ServiceDeployment,
-    DeploymentStrategy,
-)
-
-orchestration = OrchestrationService()
-
-# =====================
-# Define Services
-# =====================
-services = [
-    # Database must be deployed first
-    ServiceDeployment(
-        target_id=db_target.id,
-        compose_file_path='./database/docker-compose.yml',
-        project_name='database',
-        version='v1.0.0',
-        priority=0,  # Highest priority (deploys first)
-    ),
-    # API depends on database
-    ServiceDeployment(
-        target_id=api_target.id,
-        compose_file_path='./api/docker-compose.yml',
-        project_name='api',
-        version='v1.0.0',
-        depends_on=['database'],  # Wait for database
-        environment={'DATABASE_URL': 'postgres://...'},
-    ),
-    # Frontend depends on API
-    ServiceDeployment(
-        target_id=web_target.id,
-        compose_file_path='./frontend/docker-compose.yml',
-        project_name='frontend',
-        version='v1.0.0',
-        depends_on=['api'],
-    ),
-]
-
-# =====================
-# Sequential Deployment
-# =====================
-result = orchestration.deploy_multiple(
-    services=services,
-    strategy=DeploymentStrategy.SEQUENTIAL,
-    deployed_by='admin',
-    rollback_on_failure=True,  # Rollback all if any fails
-)
-
-print(f"Success: {result.success}")
-print(f"Deployed: {result.successful_count}/{result.total_services}")
-print(f"Duration: {result.duration_seconds}s")
-
-# =====================
-# Parallel Deployment (no dependencies)
-# =====================
-result = orchestration.deploy_multiple(
-    services=independent_services,
-    strategy=DeploymentStrategy.PARALLEL,
-    deployed_by='admin',
-)
-
-# =====================
-# Rolling Deployment
-# =====================
-result = orchestration.deploy_multiple(
-    services=services,
-    strategy=DeploymentStrategy.ROLLING,
-    deployed_by='admin',
-    batch_size=2,  # Deploy 2 at a time
-)
-
-# =====================
-# Canary Deployment
-# =====================
-result = orchestration.deploy_multiple(
-    services=all_services,
-    strategy=DeploymentStrategy.CANARY,
-    deployed_by='admin',
-    canary_target_id=canary_server.id,  # Deploy here first
-)
-
-# =====================
-# Deploy Same Service to Multiple Targets
-# =====================
-result = orchestration.deploy_to_target_group(
-    target_ids=[server1.id, server2.id, server3.id],
-    compose_file_path='./docker-compose.yml',
-    project_name='myapp',
-    version='v1.0.0',
-    strategy=DeploymentStrategy.ROLLING,
-    batch_size=1,  # One at a time for zero-downtime
-)
-
-# =====================
-# Preview Deployment Plan
-# =====================
-plan = orchestration.create_deployment_plan(
-    services=services,
-    strategy=DeploymentStrategy.SEQUENTIAL,
-)
-print("Deployment order:")
-for step in plan['deployment_order']:
-    print(f"  {step['order']}. {step['project_name']} -> {step['target']}")
-```
-
-### Notifications and Webhooks
-
-```python
-from remote_compose.tasks import (
-    send_deployment_notification,
-    send_webhook,
-)
-
-# =====================
-# Send Notification After Deployment
-# =====================
-send_deployment_notification.delay(
-    deployment_id=deployment.id,
-    event='deployment.completed',
-    channels=['webhook', 'slack'],  # Or omit for all configured
-)
-
-# =====================
-# Send Custom Webhook
-# =====================
-send_webhook.delay(
-    webhook_url='https://myapp.com/webhooks/custom',
-    event='custom.event',
-    payload={
-        'message': 'Something happened',
-        'data': {'key': 'value'},
-    },
-)
-
-# =====================
-# Webhook Payload Format
-# =====================
-# Your webhook endpoint will receive:
-{
-    "event": "deployment.completed",
-    "timestamp": "2024-01-15T10:30:00Z",
-    "data": {
-        "deployment_id": 123,
-        "project_name": "myapp",
-        "version": "v1.0.0",
-        "status": "success",
-        "target": {
-            "id": 1,
-            "name": "prod-server",
-            "host": "54.123.45.67"
-        },
-        "deployed_by": "admin",
-        "duration_seconds": 45.2
-    }
-}
-```
-
-### Audit Logging
-
-```python
-from remote_compose.services import AuditService, AuditAction
-
-audit = AuditService()
-
-# =====================
-# Manual Audit Logging
-# =====================
-audit.log(
-    action=AuditAction.DEPLOYMENT_STARTED,
-    actor='admin@example.com',
-    resource_type='deployment',
-    resource_id=deployment.id,
-    resource_name=deployment.project_name,
-    ip_address='192.168.1.100',
-    details={'version': 'v1.0.0'},
-)
-
-# =====================
-# Query Audit Logs
-# =====================
-logs = audit.query_logs(
-    action='deployment.completed',
-    actor='admin@example.com',
-    start_date=timezone.now() - timedelta(days=7),
-    limit=100,
-)
-
-for log in logs:
-    print(f"{log.timestamp} - {log.action} by {log.actor}")
-
-# =====================
-# Activity Summary
-# =====================
-summary = audit.get_activity_summary(hours=24)
-print(f"Total events: {summary['total_events']}")
-print(f"Success: {summary['success_count']}")
-print(f"Failures: {summary['failure_count']}")
-print(f"Actions: {summary['action_counts']}")
-
-# =====================
-# Cleanup Old Logs
-# =====================
-deleted = audit.cleanup_old_logs(retention_days=365)
-print(f"Deleted {deleted} old audit logs")
-```
-
-### Rate Limiting
-
-```python
-from remote_compose.services import DeploymentRateLimiter, RateLimitExceeded
-
-rate_limiter = DeploymentRateLimiter()
-
-# =====================
-# Check Before Deploying
-# =====================
-status = rate_limiter.check_deploy_allowed(
-    target_id=target.id,
-    user='admin',
-)
-
-print(f"Per-target remaining: {status['per_target'].remaining}")
-print(f"Per-user remaining: {status['per_user'].remaining}")
-print(f"Global remaining: {status['global'].remaining}")
-
-# =====================
-# Use with Deployment
-# =====================
-try:
-    # This will raise RateLimitExceeded if limit reached
-    rate_limiter.consume_deploy(
-        target_id=target.id,
-        user='admin',
-    )
-
-    # Proceed with deployment
-    deployment = deployment_service.deploy(...)
-
-except RateLimitExceeded as e:
-    print(f"Rate limited! Retry after {e.retry_after} seconds")
-```
-
-### AWS ECS Deployments
-
-Deploy docker-compose applications to AWS ECS (Fargate or EC2) without requiring SSH access. The library automatically converts your docker-compose.yml to ECS task definitions.
-
-```python
-from remote_compose.services import ECSService, ECSDeploymentService
-from remote_compose.models import ECSCluster
-
-# Create or import an ECS cluster
-ecs_service = ECSService()
-
-# Create a new Fargate cluster
-cluster = ecs_service.create_cluster(
-    name='my-app-cluster',
-    region='us-east-1',
-    capacity_providers=['FARGATE', 'FARGATE_SPOT'],
-)
-
-# Or import an existing cluster
-cluster = ecs_service.import_cluster(
-    cluster_name_or_arn='existing-cluster',
-    region='us-east-1',
-)
-
-# Deploy a docker-compose application to ECS
-deployment_service = ECSDeploymentService()
-
-deployment = deployment_service.deploy(
-    cluster=cluster,
-    compose_file_path='/path/to/docker-compose.yml',
-    project_name='myapp',
-    desired_count=2,  # Run 2 tasks
-    cpu='512',        # Fargate CPU units
-    memory='1024',    # Memory in MB
-    wait_for_stable=True,
-    timeout=300,
-)
-
-print(f"Deployed to ECS: {deployment.metadata['service_arn']}")
-```
-
-#### Using the ECS Deploy Script
-
-```bash
-# List ECS clusters
-python scripts/deploy_to_ecs.py --list-clusters --env-file .django
-
-# Create a new Fargate cluster
-python scripts/deploy_to_ecs.py --create-cluster my-cluster --env-file .django
-
-# Deploy to an existing cluster
-python scripts/deploy_to_ecs.py examples/sample-app \
-    --cluster my-cluster \
-    --env-file .django
-
-# Deploy with custom resources and multiple tasks
-python scripts/deploy_to_ecs.py examples/sample-app \
-    --cluster my-cluster \
-    --cpu 512 \
-    --memory 1024 \
-    --desired-count 2 \
-    --env-file .django
-```
-
-#### ECS Management Commands
-
-```bash
-# Manage clusters
-python manage.py ecs_cluster list
-python manage.py ecs_cluster create my-cluster --region us-east-1
-python manage.py ecs_cluster import existing-cluster --region us-east-1
-python manage.py ecs_cluster show my-cluster
-python manage.py ecs_cluster delete my-cluster --delete-aws
-
-# Deploy to ECS
-python manage.py ecs_deploy \
-    --cluster my-cluster \
-    --compose-file docker-compose.yml \
-    --project-name myapp \
-    --desired-count 2
-
-# Manage services
-python manage.py ecs_service list --cluster my-cluster
-python manage.py ecs_service show myapp --cluster my-cluster
-python manage.py ecs_service scale myapp --cluster my-cluster --count 3
-python manage.py ecs_service restart myapp --cluster my-cluster
-python manage.py ecs_service delete myapp --cluster my-cluster
-```
-
-#### Compose to ECS Conversion
-
-The library automatically handles:
-- Converting docker-compose services to ECS container definitions
-- Port mappings, environment variables, and health checks
-- Resource allocation (rounds up to valid Fargate CPU/memory combinations)
-- Container dependencies (depends_on)
-- CloudWatch Logs configuration
-
-Limitations:
-- Build contexts require pre-built images pushed to a registry (ECR, Docker Hub)
-- Host volume mounts are not supported in Fargate (use EFS instead)
-- Some docker-compose features have no ECS equivalent
-
-## Management Commands
-
-```bash
-# Create a deployment target
-python manage.py create_target \
-    --name prod-server \
-    --host 54.123.45.67 \
-    --user ubuntu \
-    --ssh-key ~/.ssh/key.pem \
-    --port 22 \
-    --tags environment=production,role=web
-
-# List all targets
-python manage.py list_targets
-python manage.py list_targets --status healthy
-python manage.py list_targets --environment production
-
-# Test target connection
-python manage.py test_target prod-server
-
-# Deploy
-python manage.py deploy \
-    --target prod-server \
-    --compose-file docker-compose.yml \
-    --project myapp \
-    --version v1.0.0 \
-    --env DEBUG=false \
-    --env DATABASE_URL=postgres://...
-
-# List deployments
-python manage.py list_deployments
-python manage.py list_deployments --target prod-server
-python manage.py list_deployments --status success
-
-# View deployment logs
-python manage.py deployment_logs 123  # deployment ID
-python manage.py deployment_logs 123 --level error
-
-# Rollback
-python manage.py rollback 120  # rollback to deployment ID 120
-```
-
-## Testing
-
-### Local Testing with Docker Compose
-
-Test the library locally with your own docker-compose applications:
-
-```bash
-# Deploy a local repo using direct docker-compose (no SSH required)
-python scripts/local_test.py /path/to/your/repo --direct
-
-# Use a specific compose file
-python scripts/local_test.py /path/to/your/repo -f docker-compose.dev.yml --direct
-
-# With project name and version
-python scripts/local_test.py /path/to/your/repo -p myapp --version v1.0.0 --direct
-
-# Pass environment variables
-python scripts/local_test.py /path/to/your/repo -e DEBUG=true -e API_KEY=test --direct
-
-# Stop a deployment
-python scripts/local_test.py --stop myapp
-
-# Test with the included sample app
-python scripts/local_test.py examples/sample-app --direct -p test-app
-```
-
-To use the full library mode (with SSH to localhost):
-1. Enable Remote Login in System Preferences > Sharing (macOS) or ensure `sshd` is running
-2. Add your SSH key: `ssh-copy-id localhost`
-3. Run without `--direct` flag: `python scripts/local_test.py /path/to/repo`
-
-### Run All Tests
-
-```bash
-# Install test dependencies
-pip install -r requirements/dev.txt
-
-# Run tests
-python -m pytest tests/ -v
-
-# Run with coverage
-python -m pytest tests/ --cov=remote_compose --cov-report=html
-
-# Run specific test file
-python -m pytest tests/unit/test_services/test_compose_service.py -v
-
-# Run only security tests
-python -m pytest tests/unit/test_services/test_compose_service.py::TestComposeServiceSecurity -v
-```
-
-### Test Configuration
-
-Tests use a separate settings file (`tests/settings.py`):
-
-```python
-# The test settings automatically configure:
-# - In-memory SQLite database
-# - Test encryption key
-# - SSH auto-add hosts (mocked anyway)
-```
-
-### Writing Tests
-
-```python
-import pytest
-from unittest.mock import MagicMock, patch
-from remote_compose.services import DeploymentService
-
-@pytest.mark.django_db
-class TestMyFeature:
-
-    @pytest.fixture
-    def mock_ssh(self, mocker):
-        """Mock SSH client for all tests."""
-        mock = mocker.patch('remote_compose.services.target_service.SSHClient')
-        instance = mock.return_value
-        instance.test_connection.return_value = (True, 'Success')
-        instance.execute.return_value = MagicMock(success=True, stdout='OK')
-        return mock
-
-    def test_deployment(self, mock_ssh):
-        service = DeploymentService()
-        # ... test implementation
-```
-
-## Security
-
-### SSH Host Key Verification
-
-By default, the library uses strict host key verification:
-
-```python
-# Host must be in ~/.ssh/known_hosts or connection fails
-REMOTE_COMPOSE = {
-    'SSH_AUTO_ADD_HOSTS': False,  # Default - strict mode
-}
-
-# For trusted networks (e.g., private VPC), you can enable auto-add:
-REMOTE_COMPOSE = {
-    'SSH_AUTO_ADD_HOSTS': True,  # Only in trusted networks!
-}
-```
-
-### Credential Encryption
-
-All credentials are encrypted using Fernet symmetric encryption:
-
-```python
-# Generate a key
-from cryptography.fernet import Fernet
-print(Fernet.generate_key().decode())
-
-# Store in settings (use environment variable in production!)
-REMOTE_COMPOSE = {
-    'ENCRYPTION_KEY': os.environ['REMOTE_COMPOSE_ENCRYPTION_KEY'],
-}
-```
-
-### Log Sanitization
-
-Sensitive data is automatically masked in logs:
-
-```python
-# Automatically masked:
-# - Passwords, secrets, tokens
-# - SSH private keys
-# - AWS credentials
-# - JWT tokens
-# - URLs with credentials
-
-# The sanitizer can be extended:
-from remote_compose.services import LogSanitizer
-
-sanitizer = LogSanitizer()
-sanitizer.add_sensitive_field('my_custom_secret')
-sanitizer.add_pattern(r'CUSTOM_\d{4}', '[REDACTED]')
-```
-
-### Command Injection Prevention
-
-All user inputs are validated to prevent command injection:
-
-- Project names must match Docker Compose naming rules
-- Paths are validated for traversal attacks
-- Environment variables are validated and protected vars cannot be overridden
-- Shell values are properly escaped using `shlex.quote()`
-
-### Webhook Security
-
-Webhooks are protected against SSRF attacks:
-
-```python
-REMOTE_COMPOSE = {
-    'WEBHOOK_ALLOW_ALL_DOMAINS': False,  # Default
-    'WEBHOOK_ALLOWED_DOMAINS': {'hooks.slack.com', 'your-app.com'},
-}
-```
+For the full v1 reference (Django settings, management commands, API
+viewsets, etc.) see the file history of this README in `git log` —
+the prior version is preserved at `git show main:README.md`.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT — see [LICENSE](LICENSE) for terms.

@@ -1,0 +1,101 @@
+{
+  "_comment": "Mocked boto3 inventory of the live ss-debuggai-prod stack as of 2026-04-27. Used by test_v1_migrate to drive translator tests without hitting real AWS. Regenerate with scripts/snapshot-v1-prod.sh (TODO).",
+  "region": "us-west-2",
+  "account_id": "033937118837",
+  "ecs_cluster": {
+    "name": "ss-debuggai-prod",
+    "arn": "arn:aws:ecs:us-west-2:033937118837:cluster/ss-debuggai-prod",
+    "active_services_count": 7,
+    "running_tasks_count": 7
+  },
+  "ecs_services": [
+    {"name": "ss-debuggai-postgres", "task_def_family": "ss-debuggai-postgres", "desired_count": 1},
+    {"name": "ss-debuggai-redis", "task_def_family": "ss-debuggai-redis", "desired_count": 1},
+    {"name": "ss-debuggai-django", "task_def_family": "ss-debuggai-django", "desired_count": 1},
+    {"name": "ss-debuggai-nginx", "task_def_family": "ss-debuggai-nginx", "desired_count": 1},
+    {"name": "ss-debuggai-celery-beat", "task_def_family": "ss-debuggai-celery-beat", "desired_count": 1},
+    {"name": "ss-debuggai-celery-worker", "task_def_family": "ss-debuggai-celery-worker", "desired_count": 1},
+    {"name": "ss-debuggai-celery-worker-linkedin", "task_def_family": "ss-debuggai-celery-worker-linkedin", "desired_count": 1}
+  ],
+  "efs": {
+    "file_system_id": "fs-0e8a2f9d1e006af95",
+    "name": "ss-debuggai-prod-ss-debuggai-efs",
+    "size_bytes": 133022818304,
+    "lifecycle_state": "available",
+    "access_points": [
+      {"ap_id": "fsap-004097e867c7bb755", "name": "ss-debuggai-postgres_data", "path": "/ss-debuggai/postgres_data", "uid": 0, "gid": 0, "live_postgres_mount": true},
+      {"ap_id": "fsap-0bf98b513ff6effd8", "name": "ss-debuggai-saas-postgres-prod-data", "path": "/ss-debuggai/saas-postgres-prod-data", "uid": 0, "gid": 0},
+      {"ap_id": "fsap-0efeb8b65b68830b5", "name": "ss-debuggai-postgres17-data", "path": "/ss-debuggai/postgres17-data", "uid": 999, "gid": 999},
+      {"ap_id": "fsap-0027054fe47e721f1", "name": "ss-debuggai-startsimpli-api-static-prod", "path": "/ss-debuggai/startsimpli-api-static-prod", "uid": 0, "gid": 0},
+      {"ap_id": "fsap-0362f7de366c47fcb", "name": "ss-debuggai-startsimpli-api-redis-prod-data", "path": "/ss-debuggai/startsimpli-api-redis-prod-data", "uid": 0, "gid": 0},
+      {"ap_id": "fsap-0e4ba11af76eb33b3", "name": "ss-debuggai-startsimpli-api-media-prod", "path": "/ss-debuggai/startsimpli-api-media-prod", "uid": 0, "gid": 0},
+      {"ap_id": "fsap-0f9c315d09eb71b3f", "name": "ss-debuggai-linkedin-chrome-profiles", "path": "/ss-debuggai/linkedin-chrome-profiles", "uid": 0, "gid": 0}
+    ]
+  },
+  "alb": {
+    "name": "ss-debuggai-prod-alb",
+    "arn": "arn:aws:elasticloadbalancing:us-west-2:033937118837:loadbalancer/app/ss-debuggai-prod-alb/5a6266dc3229a35d",
+    "dns_name": "ss-debuggai-prod-alb-378155331.us-west-2.elb.amazonaws.com",
+    "scheme": "internet-facing",
+    "listeners": [
+      {"arn": "arn:aws:elasticloadbalancing:us-west-2:033937118837:listener/app/ss-debuggai-prod-alb/5a6266dc3229a35d/PLACEHOLDER_HTTP", "port": 80, "protocol": "HTTP", "default_action_type": "redirect"},
+      {"arn": "arn:aws:elasticloadbalancing:us-west-2:033937118837:listener/app/ss-debuggai-prod-alb/5a6266dc3229a35d/PLACEHOLDER_HTTPS", "port": 443, "protocol": "HTTPS", "default_action_type": "forward", "certificate_arn": "arn:aws:acm:us-west-2:033937118837:certificate/bd16f1ce-386e-4175-94d3-91191d7847f9"}
+    ],
+    "target_groups": [
+      {"name": "ss-debuggai-prod-default", "arn": "arn:aws:elasticloadbalancing:us-west-2:033937118837:targetgroup/ss-debuggai-prod-default/19bd9855b88d5ede", "port": 80, "health_check_path": "/health"},
+      {"name": "ss-debuggai-prod-nginx", "arn": "arn:aws:elasticloadbalancing:us-west-2:033937118837:targetgroup/ss-debuggai-prod-nginx/fa79df79ee9ba881", "port": 80, "health_check_path": "/health"}
+    ]
+  },
+  "acm_cert": {
+    "arn": "arn:aws:acm:us-west-2:033937118837:certificate/bd16f1ce-386e-4175-94d3-91191d7847f9",
+    "domain_name": "api.startsimpli.com",
+    "status": "ISSUED"
+  },
+  "route53_zone": {
+    "_comment": "Subzone exists in this account but only NS+SOA. The actual A/CNAME for api.startsimpli.com lives at the registrar, OUTSIDE this AWS account. Migration must NOT modify DNS.",
+    "id": "Z00022951OO3UQJSGC9FG",
+    "name": "api.startsimpli.com.",
+    "records": [
+      {"name": "api.startsimpli.com.", "type": "NS", "ttl": 172800},
+      {"name": "api.startsimpli.com.", "type": "SOA", "ttl": 900}
+    ]
+  },
+  "sm_secrets": [
+    {"name": "ss-debuggai-prod/USE_DOCKER", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/USE_DOCKER-YAXJLy"},
+    {"name": "ss-debuggai-prod/ENVIRONMENT", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/ENVIRONMENT-ScEBfj"},
+    {"name": "ss-debuggai-prod/IPYTHONDIR", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/IPYTHONDIR-Nr4vuX"},
+    {"name": "ss-debuggai-prod/REDIS_URL", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/REDIS_URL-djDEad"},
+    {"name": "ss-debuggai-prod/CELERY_BROKER_URL", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/CELERY_BROKER_URL-FdEnoC"},
+    {"name": "ss-debuggai-prod/POSTGRES_HOST", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/POSTGRES_HOST-atAFgS"},
+    {"name": "ss-debuggai-prod/POSTGRES_PORT", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/POSTGRES_PORT-0BjAJU"},
+    {"name": "ss-debuggai-prod/POSTGRES_DB", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/POSTGRES_DB-3HG3MY"},
+    {"name": "ss-debuggai-prod/POSTGRES_USER", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/POSTGRES_USER-9ZqOT5"},
+    {"name": "ss-debuggai-prod/POSTGRES_PASSWORD", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/POSTGRES_PASSWORD-fseTI0"},
+    {"name": "ss-debuggai-prod/SECRET_KEY", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/SECRET_KEY-gNKORd"},
+    {"name": "ss-debuggai-prod/ALLOWED_HOSTS", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/ALLOWED_HOSTS-GwrAB3"},
+    {"name": "ss-debuggai-prod/SECURE_SSL_REDIRECT", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/SECURE_SSL_REDIRECT-VizM3q"},
+    {"name": "ss-debuggai-prod/DJANGO_SETTINGS_MODULE", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/DJANGO_SETTINGS_MODULE-lnwHI4"},
+    {"name": "ss-debuggai-prod/INTERNAL_SERVICE_KEY", "arn": "arn:aws:secretsmanager:us-west-2:033937118837:secret:ss-debuggai-prod/INTERNAL_SERVICE_KEY-mPBmaC"},
+    {"_truncated_for_brevity": "16 more entries; full set has 32 secrets including OPENAI_API_KEY, ANTHROPIC_API_KEY, SENDGRID_API_KEY, AWS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc."}
+  ],
+  "vpc": {
+    "id": "vpc-053d0dfca255b6219",
+    "cidr_block": "10.0.0.0/16",
+    "tags": {"Name": "ss-debuggai-prod-vpc", "remote-compose:cluster": "ss-debuggai-prod", "remote-compose:managed": "true"},
+    "subnets": ["subnet-0619ef0a9867ddb0b", "subnet-0e3829a4cd1f125f3"],
+    "security_groups": ["sg-0555600900904cc9a", "sg-0bc111e1d3cd9b9eb", "sg-07ced6dfd97e71c01", "sg-0a9dd488475a1b0ae", "sg-079aac2fdc6d16f6b"]
+  },
+  "iam": {
+    "task_execution_role_arn": "arn:aws:iam::033937118837:role/ecsTaskExecutionRole",
+    "task_role_arn": "arn:aws:iam::033937118837:role/ecsTaskRole",
+    "_comment": "Account-wide; not project-managed. v2 rc.yml references by ARN, doesn't manage."
+  },
+  "ecr_repositories": [
+    {"name": "ss-debuggai/django", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/django"},
+    {"name": "ss-debuggai/celery-worker", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/celery-worker"},
+    {"name": "ss-debuggai/celery-beat", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/celery-beat"},
+    {"name": "ss-debuggai/celery-worker-linkedin", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/celery-worker-linkedin"},
+    {"name": "ss-debuggai/nginx", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/nginx"},
+    {"name": "ss-debuggai/app", "uri": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/app"}
+  ]
+}

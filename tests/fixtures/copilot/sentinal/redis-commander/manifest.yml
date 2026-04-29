@@ -1,0 +1,70 @@
+# The manifest for the "redis-commander" service.
+# Read the full specification for the "Backend Service" type at:
+#  https://aws.github.io/copilot-cli/docs/manifest/backend-service/
+
+# Your service name will be used in naming your resources like log groups, ECS services, etc.
+name: redis-commander
+type: Backend Service
+
+# Configuration for your containers and service.
+image:
+  location: rediscommander/redis-commander:latest
+  port: 8081
+
+cpu: 256 # Number of CPU units for the task.
+memory: 512 # Amount of memory in MiB used by the task.
+count: 1 # Number of tasks that should be running in your service.
+exec: true # Enable running commands in your container.
+
+network:
+  connect: true # Enable Service Connect for intra-environment traffic between services.
+
+# Secrets from AWS Secrets Manager
+secrets:
+  REDIS_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:REDIS_PASSWORD::'
+  HTTP_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:REDIS_COMMANDER_PASSWORD::'
+
+# Environment variables
+variables:
+  NODE_ENV: production
+  PORT: 8081
+  HTTP_USER: admin
+  REDIS_HOSTS: redis:6379
+  URL_PREFIX: /redis-commander
+
+# Health check
+healthcheck:
+  path: /redis-commander
+  port: 8081
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  grace_period: 60s
+
+# You can override any of the values defined above by environment.
+environments:
+  production:
+    cpu: 256
+    memory: 512
+    count: 1
+    variables:
+      NODE_ENV: production
+      REDIS_HOSTS: redis.${COPILOT_ENVIRONMENT_NAME}.${COPILOT_APPLICATION_NAME}.local:6379
+  
+  staging:
+    cpu: 256
+    memory: 512
+    count: 1
+    variables:
+      NODE_ENV: staging
+      REDIS_HOSTS: redis.${COPILOT_ENVIRONMENT_NAME}.${COPILOT_APPLICATION_NAME}.local:6379
+  
+  dev:
+    cpu: 256
+    memory: 512
+    count: 1
+    variables:
+      NODE_ENV: development
+      REDIS_HOSTS: redis.${COPILOT_ENVIRONMENT_NAME}.${COPILOT_APPLICATION_NAME}.local:6379

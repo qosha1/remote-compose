@@ -101,6 +101,10 @@ class SecurityGroupService(BaseService):
         )
         return sg_ids
 
+    # remote-compose-jzp: bounded retries on the find/create race so a
+    # broken find path can't recurse to stack overflow.
+    _MAX_DUPLICATE_RETRIES = 3
+
     def _create_or_get_sg(
         self,
         name: str,
@@ -114,7 +118,11 @@ class SecurityGroupService(BaseService):
         """
         Create a security group if it does not already exist.
 
-        Uses the Name tag to check for an existing security group.
+        Uses the Name tag to check for an existing security group. When
+        create races against another caller and AWS returns
+        ``InvalidGroup.Duplicate``, the find/create loop retries up to
+        ``_MAX_DUPLICATE_RETRIES`` times — bounded so a misbehaving find
+        path can't recurse forever.
 
         Args:
             name: Security group name.
@@ -133,22 +141,54 @@ class SecurityGroupService(BaseService):
         """
         ec2 = self.aws_factory.get_client('ec2', region=region, credential=credential)
 
-        # Check for existing SG by name in this VPC
-        try:
-            response = ec2.describe_security_groups(
-                Filters=[
-                    {'Name': 'vpc-id', 'Values': [vpc_id]},
-                    {'Name': 'tag:Name', 'Values': [name]},
-                    {'Name': 'tag:remote-compose:managed', 'Values': ['true']},
-                ]
-            )
-            existing = response.get('SecurityGroups', [])
-            if existing:
-                sg_id = existing[0]['GroupId']
-                self.log_info(f"Found existing security group {name}: {sg_id}")
+        last_duplicate_error: Optional[ClientError] = None
+        for attempt in range(self._MAX_DUPLICATE_RETRIES):
+            # Check for existing SG by name in this VPC.
+            try:
+                response = ec2.describe_security_groups(
+                    Filters=[
+                        {'Name': 'vpc-id', 'Values': [vpc_id]},
+                        {'Name': 'tag:Name', 'Values': [name]},
+                        {'Name': 'tag:remote-compose:managed', 'Values': ['true']},
+                    ]
+                )
+                existing = response.get('SecurityGroups', [])
+                if existing:
+                    sg_id = existing[0]['GroupId']
+                    self.log_info(f"Found existing security group {name}: {sg_id}")
+                    SecurityGroupConfig.objects.get_or_create(
+                        cluster=cluster,
+                        purpose=purpose,
+                        defaults={
+                            'security_group_id': sg_id,
+                            'vpc_id': vpc_id,
+                        },
+                    )
+                    return sg_id
+            except ClientError as e:
+                self.log_warning(
+                    f"Error searching for security group {name}: {e}"
+                )
 
-                # Ensure database record exists
-                SecurityGroupConfig.objects.get_or_create(
+            # Try to create.
+            try:
+                response = ec2.create_security_group(
+                    GroupName=name,
+                    Description=description,
+                    VpcId=vpc_id,
+                    TagSpecifications=[{
+                        'ResourceType': 'security-group',
+                        'Tags': [
+                            {'Key': 'Name', 'Value': name},
+                            {'Key': 'remote-compose:cluster', 'Value': cluster.name},
+                            {'Key': 'remote-compose:managed', 'Value': 'true'},
+                            {'Key': 'remote-compose:purpose', 'Value': purpose},
+                        ],
+                    }],
+                )
+                sg_id = response['GroupId']
+                self.log_info(f"Created security group {name}: {sg_id}")
+                SecurityGroupConfig.objects.update_or_create(
                     cluster=cluster,
                     purpose=purpose,
                     defaults={
@@ -157,52 +197,24 @@ class SecurityGroupService(BaseService):
                     },
                 )
                 return sg_id
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                if error_code != 'InvalidGroup.Duplicate':
+                    raise SecurityGroupProvisioningError(
+                        f"Failed to create security group {name}: {e}",
+                        security_group_id=None,
+                    )
+                # Lost a create race — find should pick it up next pass.
+                last_duplicate_error = e
+                continue
 
-        except ClientError as e:
-            self.log_warning(f"Error searching for security group {name}: {e}")
-
-        # Create new security group
-        try:
-            response = ec2.create_security_group(
-                GroupName=name,
-                Description=description,
-                VpcId=vpc_id,
-                TagSpecifications=[{
-                    'ResourceType': 'security-group',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': name},
-                        {'Key': 'remote-compose:cluster', 'Value': cluster.name},
-                        {'Key': 'remote-compose:managed', 'Value': 'true'},
-                        {'Key': 'remote-compose:purpose', 'Value': purpose},
-                    ],
-                }],
-            )
-            sg_id = response['GroupId']
-            self.log_info(f"Created security group {name}: {sg_id}")
-
-            # Persist to database
-            SecurityGroupConfig.objects.update_or_create(
-                cluster=cluster,
-                purpose=purpose,
-                defaults={
-                    'security_group_id': sg_id,
-                    'vpc_id': vpc_id,
-                },
-            )
-
-            return sg_id
-
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', '')
-            if error_code == 'InvalidGroup.Duplicate':
-                # Race condition -- try to find it again
-                return self._create_or_get_sg(
-                    name, description, vpc_id, purpose, cluster, region, credential,
-                )
-            raise SecurityGroupProvisioningError(
-                f"Failed to create security group {name}: {e}",
-                security_group_id=None,
-            )
+        raise SecurityGroupProvisioningError(
+            f"Failed to create security group {name} after "
+            f"{self._MAX_DUPLICATE_RETRIES} retries — find/create kept "
+            f"racing without converging. Last error: "
+            f"{last_duplicate_error}",
+            security_group_id=None,
+        )
 
     def _configure_rules(
         self,

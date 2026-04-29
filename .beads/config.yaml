@@ -6,7 +6,14 @@
 # Issue prefix for this repository (used by bd init)
 # If not set, bd init will auto-detect from directory name
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-# issue-prefix: ""
+issue-prefix: "rc"
+# bd's runtime config layer reads `issue_prefix` (underscore), distinct
+# from the bd-init-time `issue-prefix` (hyphen) above. The dolt-backed
+# runtime config does NOT round-trip cleanly through git, so a fresh
+# checkout may see `issue_prefix` unset and `bd create` fails with
+# "database not initialized: issue_prefix config is missing".
+# Workaround if you hit it: bd config set issue_prefix remote-compose
+issue_prefix: "remote-compose"
 
 # Use no-db mode: load from JSONL, no SQLite, write back after each command
 # When true, bd will use .beads/issues.jsonl as the source of truth
@@ -60,3 +67,5 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+sync.remote: "git+https://github.com/qosha1/remote-compose.git"

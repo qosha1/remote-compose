@@ -309,7 +309,21 @@ class SetupIAMRolesStep(PipelineStep):
             )
 
         except Exception as e:
+            # remote-compose-j06: secrets-access IAM update is
+            # load-bearing — when secrets are configured, services
+            # CRASH AT STARTUP if the execution role can't read them
+            # (ResourceInitializationError, container exits before
+            # task healthcheck). Earlier behavior returned StepResult.
+            # ok() on failure, so the pipeline continued, created the
+            # services, and the user got a confusing crash-loop with
+            # no breadcrumb pointing at IAM. Fail fast instead — the
+            # user can fix IAM and re-deploy with a fresh task def.
             context.add_warning(f"IAM policy update failed: {e}")
-            return StepResult.ok(
-                f"IAM setup warning: {e} (deployment will continue)"
+            return StepResult.fail(
+                f"IAM policy update failed for execution role "
+                f"{role_name!r}: {e}. Services depending on "
+                f"{len(secret_arns)} secret(s) would fail to start. "
+                f"Verify the role exists and the calling identity "
+                f"has iam:PutRolePolicy. (remote-compose-j06)",
+                error=e,
             )

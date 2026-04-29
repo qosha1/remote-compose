@@ -126,23 +126,65 @@ class SecureCredentialCreateSerializer(serializers.ModelSerializer):
             'metadata',
         ]
 
+    # remote-compose-58y: required keys per credential type. The earlier
+    # serializer used .get() unchecked, so AWS creds with no
+    # access_key_id and SSH creds with no private_key would silently
+    # land in the DB encrypted-as-None and produce mysterious failures
+    # at deploy time. validate() rejects these at API boundary.
+    _REQUIRED_KEYS_BY_TYPE = {
+        SecureCredential.CredentialType.AWS_ACCESS_KEY: (
+            "access_key_id", "secret_access_key",
+        ),
+        SecureCredential.CredentialType.SSH_KEY: ("private_key",),
+    }
+
+    def validate(self, attrs):
+        cred_type = attrs.get("credential_type")
+        cred_value = attrs.get("credential_value")
+        if not isinstance(cred_value, dict):
+            raise serializers.ValidationError({
+                "credential_value": "must be a JSON object",
+            })
+        required = self._REQUIRED_KEYS_BY_TYPE.get(cred_type)
+        if required is None:
+            raise serializers.ValidationError({
+                "credential_type": (
+                    f"unsupported type {cred_type!r}; supported: "
+                    f"{sorted(self._REQUIRED_KEYS_BY_TYPE)}"
+                ),
+            })
+        missing = [
+            k for k in required
+            if not cred_value.get(k) or not str(cred_value[k]).strip()
+        ]
+        if missing:
+            raise serializers.ValidationError({
+                "credential_value": (
+                    f"missing required key(s) for credential_type "
+                    f"{cred_type!r}: {missing}"
+                ),
+            })
+        return attrs
+
     def create(self, validated_data):
         credential_value = validated_data.pop('credential_value')
         from ..services import CredentialService
         credential_service = CredentialService()
 
-        # Create based on type
+        # Create based on type. validate() guarantees the required keys
+        # are present + non-empty, so .get() here is just for the
+        # optional-with-default fields (description, username).
         if validated_data.get('credential_type') == SecureCredential.CredentialType.AWS_ACCESS_KEY:
             return credential_service.create_aws_credential(
                 name=validated_data['name'],
-                access_key_id=credential_value.get('access_key_id'),
-                secret_access_key=credential_value.get('secret_access_key'),
+                access_key_id=credential_value['access_key_id'],
+                secret_access_key=credential_value['secret_access_key'],
                 description=validated_data.get('description', ''),
             )
         elif validated_data.get('credential_type') == SecureCredential.CredentialType.SSH_KEY:
             return credential_service.create_ssh_credential(
                 name=validated_data['name'],
-                private_key=credential_value.get('private_key'),
+                private_key=credential_value['private_key'],
                 username=credential_value.get('username', 'ubuntu'),
                 description=validated_data.get('description', ''),
             )

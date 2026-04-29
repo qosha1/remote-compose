@@ -1,0 +1,30 @@
+# The manifest for the "dev" environment.
+# Read the full specification for the "Environment" type at:
+#  https://aws.github.io/copilot-cli/docs/manifest/environment/
+
+# Your environment name will be used in naming your resources like VPC, cluster, etc.
+name: dev
+type: Environment
+
+# Import your own VPC and subnets or configure how they should be created.
+network:
+  vpc:
+    id: vpc-0e1919086248e7161
+    subnets:
+      public:
+        - id: subnet-030c2f708404c13a8
+        - id: subnet-048f3c5d25d160bd7
+      private:
+        - id: subnet-06dc1889698c3e7aa
+        - id: subnet-02b457787d6a8071d
+
+# Configure the load balancers in your environment, once created.
+http:
+  public:
+    certificates:
+      - arn:aws:acm:us-east-2:061008833801:certificate/a106054d-fca0-4539-886d-edad69ed25d2
+#   private:
+
+# Configure observability for your environment resources.
+observability:
+  container_insights: false

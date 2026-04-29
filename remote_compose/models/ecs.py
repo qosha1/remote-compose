@@ -569,13 +569,26 @@ class ECSService(TimestampedModel):
             },
         }
 
-        # Add network configuration for Fargate
+        # Add network configuration for Fargate.
+        # remote-compose-gbq: assignPublicIp now mirrors the cluster's
+        # public/private subnet shape via the has_public_subnets flag
+        # (when set) — defaults to ENABLED only when the cluster's
+        # subnets are public. Tasks in private subnets behind a NAT
+        # don't need (and shouldn't get) a public IP.
         if self.cluster.launch_type == ECSCluster.LaunchType.FARGATE:
+            cluster_public = getattr(self.cluster, 'has_public_subnets', None)
+            if not isinstance(cluster_public, bool):
+                # Default ENABLED preserves pre-fix behavior on legacy
+                # clusters that don't carry the flag — paired with the
+                # ECSService.run_task path's describe_subnets fallback.
+                cluster_public = True
             service_def['networkConfiguration'] = {
                 'awsvpcConfiguration': {
                     'subnets': self.cluster.subnet_ids,
                     'securityGroups': self.cluster.security_group_ids,
-                    'assignPublicIp': 'ENABLED',  # Can be configurable
+                    'assignPublicIp': (
+                        'ENABLED' if cluster_public else 'DISABLED'
+                    ),
                 }
             }
 

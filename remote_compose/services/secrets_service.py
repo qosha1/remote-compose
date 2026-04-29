@@ -32,6 +32,10 @@ class SecretsService(BaseService):
     # Public API
     # -------------------------------------------------------------------------
 
+    # remote-compose-jzp: bounded retries on the describe/create race so
+    # a broken describe path can't recurse to stack overflow.
+    _MAX_DUPLICATE_RETRIES = 3
+
     def get_or_create_secret(
         self,
         cluster,
@@ -45,6 +49,11 @@ class SecretsService(BaseService):
 
         If the secret already exists, its value is updated. The secret name
         is namespaced as ``{cluster.name}/{name}``.
+
+        Race handling: when create races against another caller and AWS
+        returns ResourceExistsException, the describe/create loop
+        retries up to ``_MAX_DUPLICATE_RETRIES`` times — bounded so a
+        misbehaving describe path can't recurse forever.
 
         Args:
             cluster: ECSCluster model instance.
@@ -62,81 +71,79 @@ class SecretsService(BaseService):
         sm = self.aws_factory.get_client('secretsmanager', region=region, credential=credential)
         secret_name = f"{cluster.name}/{name}"
 
-        # Try to update existing secret
-        try:
-            response = sm.describe_secret(SecretId=secret_name)
-            secret_arn = response['ARN']
+        last_exists_error: Optional[ClientError] = None
+        for attempt in range(self._MAX_DUPLICATE_RETRIES):
+            # Try to update existing secret.
+            try:
+                response = sm.describe_secret(SecretId=secret_name)
+                secret_arn = response['ARN']
+                sm.put_secret_value(
+                    SecretId=secret_name,
+                    SecretString=value,
+                )
+                self.log_info(f"Updated existing secret: {secret_name}")
+                SecretConfig.objects.update_or_create(
+                    cluster=cluster,
+                    env_var_name=name,
+                    defaults={
+                        'secret_arn': secret_arn,
+                        'secret_name': secret_name,
+                    },
+                )
+                return secret_arn
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                if error_code != 'ResourceNotFoundException':
+                    raise SecretProvisioningError(
+                        f"Failed to describe secret {secret_name}: {e}",
+                        secret_name=secret_name,
+                    )
 
-            # Update the value
-            sm.put_secret_value(
-                SecretId=secret_name,
-                SecretString=value,
-            )
-
-            self.log_info(f"Updated existing secret: {secret_name}")
-
-            # Ensure database record exists
-            SecretConfig.objects.update_or_create(
-                cluster=cluster,
-                env_var_name=name,
-                defaults={
-                    'secret_arn': secret_arn,
-                    'secret_name': secret_name,
-                },
-            )
-
-            return secret_arn
-
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', '')
-            if error_code != 'ResourceNotFoundException':
-                raise SecretProvisioningError(
-                    f"Failed to describe secret {secret_name}: {e}",
+            # Create new secret.
+            try:
+                response = sm.create_secret(
+                    Name=secret_name,
+                    SecretString=value,
+                    Tags=[
+                        {'Key': 'remote-compose:cluster', 'Value': cluster.name},
+                        {'Key': 'remote-compose:managed', 'Value': 'true'},
+                        {'Key': 'remote-compose:env-var', 'Value': name},
+                    ],
+                )
+                secret_arn = response['ARN']
+                self.log_info(f"Created secret: {secret_name}")
+                SecretConfig.objects.update_or_create(
+                    cluster=cluster,
+                    env_var_name=name,
+                    defaults={
+                        'secret_arn': secret_arn,
+                        'secret_name': secret_name,
+                    },
+                )
+                self.notify_observers(
+                    'secret_created',
+                    cluster_name=cluster.name,
                     secret_name=secret_name,
                 )
+                return secret_arn
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                if error_code != 'ResourceExistsException':
+                    raise SecretProvisioningError(
+                        f"Failed to create secret {secret_name}: {e}",
+                        secret_name=secret_name,
+                    )
+                # Lost a create race — describe should pick it up next pass.
+                last_exists_error = e
+                continue
 
-        # Create new secret
-        try:
-            response = sm.create_secret(
-                Name=secret_name,
-                SecretString=value,
-                Tags=[
-                    {'Key': 'remote-compose:cluster', 'Value': cluster.name},
-                    {'Key': 'remote-compose:managed', 'Value': 'true'},
-                    {'Key': 'remote-compose:env-var', 'Value': name},
-                ],
-            )
-
-            secret_arn = response['ARN']
-            self.log_info(f"Created secret: {secret_name}")
-
-            # Persist to database
-            SecretConfig.objects.update_or_create(
-                cluster=cluster,
-                env_var_name=name,
-                defaults={
-                    'secret_arn': secret_arn,
-                    'secret_name': secret_name,
-                },
-            )
-
-            self.notify_observers(
-                'secret_created',
-                cluster_name=cluster.name,
-                secret_name=secret_name,
-            )
-
-            return secret_arn
-
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', '')
-            if error_code == 'ResourceExistsException':
-                # Race condition -- secret was created between describe and create
-                return self.get_or_create_secret(cluster, name, value, region, credential)
-            raise SecretProvisioningError(
-                f"Failed to create secret {secret_name}: {e}",
-                secret_name=secret_name,
-            )
+        raise SecretProvisioningError(
+            f"Failed to get_or_create secret {secret_name} after "
+            f"{self._MAX_DUPLICATE_RETRIES} retries — describe/create "
+            f"kept racing without converging. Last error: "
+            f"{last_exists_error}",
+            secret_name=secret_name,
+        )
 
     def push_env_file(
         self,

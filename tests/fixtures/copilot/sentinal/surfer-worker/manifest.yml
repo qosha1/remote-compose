@@ -1,0 +1,68 @@
+name: surfer-worker
+type: Backend Service
+
+# Number of tasks - easily adjustable for scaling
+# count:
+#   min: 2
+#   max: 20
+#   scale_on_cpu: 70
+#   scale_on_memory: 80
+
+cpu: 2048
+memory: 4096
+
+# Docker configuration
+image:
+  location: 123456789012.dkr.ecr.us-east-2.amazonaws.com/copilot-debugg-ai-web-production-surfer-worker:latest
+  # build: 
+    # dockerfile: ./compose/production/Dockerfile
+    # context: .
+
+# Secrets
+secrets:
+  REDIS_PASSWORD:
+    secretsmanager: '${COPILOT_ENVIRONMENT_NAME}/debugg-ai-web/creds:REDIS_PASSWORD::'
+
+# Environment configuration
+environments:
+  production:
+    cpu: 2048
+    memory: 4096
+    # Environment variables
+    env:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      # Worker configuration
+      WORKER_MODE: true
+      WORKER_ID: surfer-worker-1
+      WORKER_URL: "http://surfer-worker.production.debugg-ai-web.local:3000"
+      # Browser settings
+      MAX_CONCURRENT_BROWSERS: 5
+      BROWSER_HEADLESS: false
+      BROWSER_TIMEOUT: 60000
+      SESSION_TIMEOUT: 300000
+      CLEANUP_INTERVAL: 30000
+      # Display settings
+      DISPLAY_RESOLUTION: 1920x1080x24
+      VIEWPORT_WIDTH: 1920
+      VIEWPORT_HEIGHT: 1080
+      # VNC settings
+      VNC_ENABLED: true
+      NOVNC_ENABLED: true
+      VNC_PASSWORD: defaultVncPassword
+      # CDP settings
+      CDP_ENABLED: true
+      CDP_BASE_PORT: 9500
+      CDP_PORT_RANGE: 50
+      # Monitoring
+      MONITORING_ENABLED: true
+      # Redis will be constructed at runtime using REDIS_PASSWORD and Copilot env vars
+
+# Health check
+healthcheck:
+  path: /api/health
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  grace_period: 60s

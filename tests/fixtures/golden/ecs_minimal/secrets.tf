@@ -1,0 +1,30 @@
+
+# ------------------------------------------------------------------
+# Secrets Manager placeholders for source=file secrets.
+#
+# Secret VALUES are never stored in this terraform module. `rc secrets push`
+# (or `aws secretsmanager put-secret-value`) uploads the actual contents
+# after apply. Tasks reference these by ARN via containerDefinitions.secrets.
+# ------------------------------------------------------------------
+resource "aws_secretsmanager_secret" "django" {
+  name                    = "${var.project}/django"
+  description             = "Managed by remote-compose; value uploaded out-of-band via `rc secrets push`."
+  recovery_window_in_days = 0
+
+  tags = {
+    Secret = "django"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "django_placeholder" {
+  secret_id     = aws_secretsmanager_secret.django.id
+  # Placeholder only. `rc secrets push` overwrites this immediately after
+  # apply. Until then, any container referencing this secret will fail to
+  # start — that is by design: we never want real secret material in
+  # terraform state.
+  secret_string = jsonencode({ PLACEHOLDER = "run-rc-secrets-push" })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

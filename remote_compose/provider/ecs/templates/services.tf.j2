@@ -1,0 +1,205 @@
+{%- if has_build_context_service %}
+# BuildKit registry-backed layer cache (rc-e5u.45.2). One shared repo per
+# project; per-service cache lives at tag <svc>-cache. `docker buildx build
+# --cache-from / --cache-to type=registry` reads/writes here so layer cache
+# survives across machines + CI runs (a fresh laptop or CI runner gets the
+# same cache the previous deploy populated). Untagged manifests expire
+# after 7 days so the repo doesn't grow unbounded.
+resource "aws_ecr_repository" "buildcache" {
+  name                 = "${var.project}/buildcache"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = false
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache" {
+  repository = aws_ecr_repository.buildcache.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Expire untagged BuildKit cache layers after 7 days"
+      selection = {
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 7
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+{%- endif %}
+
+{%- for svc in services %}
+resource "aws_ecr_repository" "{{ svc.tf_name }}" {
+  name                 = "${var.project}/{{ svc.name }}"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
+  family                   = "${var.project}-{{ svc.name }}"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["{{ svc.launch_type }}"]
+  cpu                      = "{{ svc.cpu }}"
+  memory                   = "{{ svc.memory }}"
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([{
+    name      = "{{ svc.name }}"
+{%- if svc.has_build_context %}
+    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+{%- elif svc.compose_image %}
+    image     = "{{ svc.compose_image }}"
+{%- else %}
+    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+{%- endif %}
+    essential = true
+{%- if svc.command %}
+    command = {{ svc.command | tojson }}
+{%- endif %}
+{%- if svc.env %}
+    environment = [
+{%- for k, v in svc.env.items() %}
+      { name = "{{ k }}", value = "{{ v | replace('\\', '\\\\') | replace('"', '\\"') | replace('$', '$$') }}" }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+{%- if svc.port or svc.extra_ports %}
+    portMappings = [
+{%- if svc.port %}
+      { containerPort = {{ svc.port }}, protocol = "tcp" }{% if svc.extra_ports %},{% endif %}
+{%- endif %}
+{%- for ep in svc.extra_ports %}
+      { containerPort = {{ ep }}, protocol = "tcp" }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+{%- if svc.mounts %}
+    mountPoints = [
+{%- for m in svc.mounts %}
+      {
+        sourceVolume  = "{{ m.volume }}"
+        containerPath = "{{ m.mount_path }}"
+        readOnly      = false
+      }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+{%- if svc.secrets %}
+    secrets = [
+{%- for sec in svc.secrets %}
+      {
+        name      = "{{ sec.env_name }}"
+        valueFrom = {{ sec.value_from_ref }}
+      }{% if not loop.last %},{% endif %}
+{%- endfor %}
+    ]
+{%- endif %}
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.tasks.name
+        "awslogs-region"        = var.region
+        "awslogs-stream-prefix" = "{{ svc.name }}"
+      }
+    }
+  }])
+
+{%- if svc.ephemeral_storage %}
+  ephemeral_storage {
+    size_in_gib = {{ svc.ephemeral_storage }}
+  }
+{%- endif %}
+
+{%- for m in svc.mounts %}
+  volume {
+    name = "{{ m.volume }}"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.{{ m.volume_tf_name }}.id
+      transit_encryption = "ENABLED"
+
+      authorization_config {
+        access_point_id = aws_efs_access_point.{{ m.access_point_tf_name }}.id
+        iam             = "DISABLED"
+      }
+    }
+  }
+{%- endfor %}
+}
+
+resource "aws_ecs_service" "{{ svc.tf_name }}" {
+  name            = "{{ svc.name }}"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.{{ svc.tf_name }}.arn
+  desired_count   = {{ svc.replicas }}
+  # Required for `aws ecs execute-command` (rc exec / db backup / restore).
+  # Task role carries ssmmessages:* perms (see iam.tf).
+  enable_execute_command = true
+{%- if svc.stateful %}
+  # Service mounts EFS: stop the old task before starting the replacement,
+  # otherwise two containers briefly share the same data directory and
+  # stateful engines (postgres initdb) can wipe each other.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+  # Newer ECS APIs default availability_zone_rebalancing=ENABLED, which
+  # actively redistributes tasks across AZs - the OPPOSITE of what a
+  # stateful EFS-mounting workload wants (it deliberately keeps a single
+  # task at a time on the data dir). The combo also gets rejected at
+  # deploy time: "availability_zone_rebalancing does not support
+  # maximumPercent <= 100". Pin it OFF for stateful services.
+  availability_zone_rebalancing = "DISABLED"
+{%- endif %}
+{%- if svc.launch_type == "EC2" %}
+
+  capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.ec2.name
+    weight            = 1
+    base              = 1
+  }
+{%- else %}
+  launch_type     = "FARGATE"
+{%- endif %}
+
+  network_configuration {
+    # Fargate in public subnets with public IPs so tasks can pull images from
+    # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
+    # only permits inbound from the ALB SG + self, so the public IP is not
+    # an exposure - it is just an egress path. Private-subnet + NAT variant
+    # is tracked in rc-e5u.25.
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.tasks.id]
+    assign_public_ip = true
+  }
+
+{%- if has_service_discovery %}
+  service_registries {
+    registry_arn = aws_service_discovery_service.{{ svc.tf_name }}.arn
+  }
+{%- endif %}
+
+{%- if svc.public %}
+  load_balancer {
+{%- if svc.domain %}
+    # service-specific TG attached via aws_lb_listener_rule (host-header)
+    target_group_arn = aws_lb_target_group.{{ svc.tf_name }}.arn
+{%- else %}
+    target_group_arn = aws_lb_target_group.default.arn
+{%- endif %}
+    container_name   = "{{ svc.name }}"
+    container_port   = {{ svc.port }}
+  }
+
+  depends_on = [aws_lb_listener.http]
+{%- endif %}
+}
+{% endfor %}

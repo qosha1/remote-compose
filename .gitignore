@@ -45,12 +45,32 @@ nosetests.xml
 # Django
 *.sqlite3
 *.db
-.django/
-.postgres/
 db.sqlite3
 media/
 staticfiles/
 static_collected/
+
+# Environment files — NEVER commit.
+# Real credentials previously leaked via .django + .postgres bare files
+# at repo root (history rewritten + creds rotated 2026-04-25). The old
+# patterns `.django/` and `.postgres/` only matched DIRECTORIES, which
+# is why bare files slipped through. New patterns cover both.
+.django
+.postgres
+.django/
+.postgres/
+.env
+.env.*
+!.env.example
+.envs/
+**/.envs/
+**/secrets.yml
+**/secrets.yaml
+*.env.local
+*.env.production
+*.env.staging
+*.env.test-staging
+*.env.secret
 
 # Secrets and credentials — NEVER commit these
 *.pem
