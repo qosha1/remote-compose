@@ -131,6 +131,5 @@ dmypy.json
 .ruff_cache/
 .pytype/
 
-# Beads / Dolt files (added by bd init)
+# Dolt database files (added by bd init)
 .dolt/
-.beads-credential-key

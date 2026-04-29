@@ -1,7 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "rc",
-  "project_id": "60a9e2a6-6593-4a07-8f20-88e8edabf5ed"
+  "dolt_mode": "server",
+  "dolt_database": "beads",
+  "project_id": "589e4a21-fd6f-4a23-a046-29c7cef8012a"
 }
