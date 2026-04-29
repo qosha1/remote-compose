@@ -3,42 +3,51 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "django-remote-compose"
+name = "remote-compose"
 version = "0.2.0"
-description = "Django app for deploying Docker Compose to remote hosts via SSH"
+description = "Deploy docker-compose stacks to AWS ECS — terraform-backed, multi-cloud-ready"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Quinn", email = "quinnosha@gmail.com"}
 ]
-keywords = ["django", "docker", "compose", "deployment", "aws", "ec2", "ssh"]
+keywords = ["docker", "compose", "deployment", "aws", "ecs", "terraform", "infrastructure"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Framework :: Django",
-    "Framework :: Django :: 4.2",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Systems Administration",
 ]
 dependencies = [
+    "boto3>=1.26.0",
+    "click>=8.0",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+    # The legacy v1 imperative path bootstraps Django lazily inside
+    # cli_commands/_legacy.py:_bootstrap_django. v2 deploys (rc deploy
+    # --no-state, rc up, rc v1 migrate) don't import it. Kept as a
+    # core dep for v0.1.x to preserve v1 compatibility; planned to
+    # move under [django] extra once v1 is fully deprecated.
     "Django>=4.2,<5.0",
     "paramiko>=3.0.0",
     "cryptography>=41.0.0",
-    "boto3>=1.26.0",
-    "pyyaml>=6.0",
-    "click>=8.0",
 ]
 
 [project.optional-dependencies]
 celery = ["celery>=5.3.0", "redis>=5.0.0"]
 ecs = [
     "python-hcl2>=4.3",
-    "jinja2>=3.1",
 ]
 dev = [
     "pytest>=7.4.0",
@@ -48,23 +57,30 @@ dev = [
     "factory-boy>=3.3.0",
     "black>=23.7.0",
     "flake8>=6.1.0",
-    # Provider validation tooling (Phase 6b.7)
     "python-hcl2>=4.3",
-    "moto[ecs,secretsmanager,logs]>=5.0",
-    "jinja2>=3.1",
+    "moto[ecs,secretsmanager,logs,ec2,efs,elbv2,acm]>=5.0",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
 [project.scripts]
 rc = "remote_compose.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/django-remote-compose"
-Documentation = "https://github.com/yourusername/django-remote-compose#readme"
-Repository = "https://github.com/yourusername/django-remote-compose"
-Issues = "https://github.com/yourusername/django-remote-compose/issues"
+Homepage = "https://github.com/qosha1/remote-compose"
+Documentation = "https://github.com/qosha1/remote-compose#readme"
+Repository = "https://github.com/qosha1/remote-compose"
+Issues = "https://github.com/qosha1/remote-compose/issues"
 
 [tool.setuptools.packages.find]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+remote_compose = [
+    "provider/ecs/templates/*.j2",
+    "v1_migrate/*.md",
+    "templates/*",
+]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
