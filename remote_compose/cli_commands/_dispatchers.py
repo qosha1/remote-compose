@@ -122,7 +122,7 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     if not compose_path.is_absolute():
         compose_path = (path.parent / compose_path).resolve()
     compose_services = _parse_compose_services(compose_path) if compose_path.exists() else {}
-    expanded_secrets, _ = _expand_env_file_auto(
+    expanded_secrets, _, _ = _expand_env_file_auto(
         list(v2.secrets or []), compose_services, compose_path,
     )
     file_secrets = [s for s in expanded_secrets if s.source == "file"]

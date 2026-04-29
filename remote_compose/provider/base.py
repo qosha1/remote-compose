@@ -89,6 +89,13 @@ class ServiceSpec:
     # mount. Provider only materializes these when ctx.dev_mode is True
     # (see rc-e5u.45.8) — production deploys ignore the field entirely.
     dev_volumes: list[dict[str, Any]] = field(default_factory=list)
+    # rc-12d: auto-discovered SM secret names sourced from this service's
+    # compose env_file directives. ECSProvider.emit_terraform filters
+    # task-def secrets[] per service against this list so a service that
+    # only references env_file X doesn't inherit keys from env_file Y.
+    # Empty list = service has no compose env_file directives. Names
+    # match entries in DeployContext.secrets (file-sourced).
+    env_file_secret_names: list[str] = field(default_factory=list)
 
 
 @dataclass

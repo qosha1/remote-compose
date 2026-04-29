@@ -246,11 +246,12 @@ def _service_build_info_full(svc_compose, compose_path):
 
 
 class TestComposeEnvFile:
-    """Compose 'env_file: [path1, path2]' is the canonical way to ship
-    env into a service. Provider must read each file and merge into
-    ServiceSpec.env, with compose 'environment:' map values winning."""
+    """Compose 'env_file: [path1, path2]' values are auto-promoted to
+    SM secrets per rc-12d (no longer plaintext env). Each file becomes
+    a secret entry in DeployContext.secrets, scoped to the services
+    that reference it via env_file_secret_names."""
 
-    def test_single_env_file_parsed(self, tmp_path, monkeypatch):
+    def test_single_env_file_routes_to_secrets_not_plaintext(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
         env = tmp_path / ".env.api"
         env.write_text("FOO=1\nBAR=two\n")
@@ -266,10 +267,16 @@ class TestComposeEnvFile:
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
-        assert ctx.services["api"].env["FOO"] == "1"
-        assert ctx.services["api"].env["BAR"] == "two"
+        # rc-12d: env_file keys MUST NOT be plaintext.
+        assert "FOO" not in ctx.services["api"].env
+        assert "BAR" not in ctx.services["api"].env
+        # They land in ctx.secrets as a file-source secret.
+        file_secrets = [s for s in ctx.secrets if s.source == "file"]
+        assert len(file_secrets) == 1
+        # And the service is wired to that secret.
+        assert len(ctx.services["api"].env_file_secret_names) == 1
 
-    def test_multiple_env_files_merge_in_order(self, tmp_path, monkeypatch):
+    def test_multiple_env_files_each_become_their_own_secret(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
         e1 = tmp_path / ".env.1"; e1.write_text("FOO=from1\nA=alpha\n")
         e2 = tmp_path / ".env.2"; e2.write_text("FOO=from2\nB=beta\n")
@@ -285,11 +292,21 @@ class TestComposeEnvFile:
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
-        assert ctx.services["api"].env["FOO"] == "from2"  # later file wins
-        assert ctx.services["api"].env["A"] == "alpha"
-        assert ctx.services["api"].env["B"] == "beta"
+        # rc-12d: no plaintext leaks.
+        for k in ("FOO", "A", "B"):
+            assert k not in ctx.services["api"].env
+        # Two distinct file secrets created (one per unique env_file).
+        file_secrets = [s for s in ctx.secrets if s.source == "file"]
+        assert len(file_secrets) == 2
+        assert len(ctx.services["api"].env_file_secret_names) == 2
 
-    def test_environment_map_overrides_env_file(self, tmp_path, monkeypatch):
+    def test_environment_map_overrides_env_file_in_plaintext(self, tmp_path, monkeypatch):
+        # When compose has BOTH env_file: (now SM-secret-routed) AND
+        # environment: { FOO: ... } (still plaintext), the plaintext
+        # `environment:` entry wins for FOO. The env_file's FOO
+        # resolves to the same SM secret, but the per-service plaintext
+        # filter strips its key from secrets[] (rc-z30), letting the
+        # plaintext `environment:` value land verbatim.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
         e1 = tmp_path / ".env"; e1.write_text("FOO=from_file\n")
         compose = tmp_path / "docker-compose.yml"
@@ -307,7 +324,7 @@ class TestComposeEnvFile:
         ctx = build_deploy_context(v2, raw, rc)
         assert ctx.services["api"].env["FOO"] == "from_environment"
 
-    def test_env_file_string_form_accepted(self, tmp_path, monkeypatch):
+    def test_env_file_string_form_routes_to_secrets(self, tmp_path, monkeypatch):
         # Compose accepts 'env_file: ./path' as a shortcut for a single file.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
         e = tmp_path / ".env"; e.write_text("FOO=ok\n")
@@ -323,9 +340,10 @@ class TestComposeEnvFile:
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
-        assert ctx.services["api"].env["FOO"] == "ok"
+        assert "FOO" not in ctx.services["api"].env
+        assert any(s.source == "file" for s in ctx.secrets)
 
-    def test_env_file_relative_path_resolves_against_compose_dir(self, tmp_path, monkeypatch):
+    def test_env_file_relative_path_resolves_and_routes_to_secret(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
         envs = tmp_path / ".envs" / ".local"; envs.mkdir(parents=True)
         (envs / ".django").write_text("DJANGO_SETTING=ok\n")
@@ -342,7 +360,11 @@ class TestComposeEnvFile:
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
-        assert ctx.services["api"].env["DJANGO_SETTING"] == "ok"
+        assert "DJANGO_SETTING" not in ctx.services["api"].env
+        # And the resolved path matches what the env_file pointed at.
+        file_secrets = [s for s in ctx.secrets if s.source == "file"]
+        assert len(file_secrets) == 1
+        assert ".django" in file_secrets[0].path
 
 
 class TestComposePortsArray:

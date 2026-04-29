@@ -361,64 +361,133 @@ def _expand_env_file_auto(
     secrets: list,
     compose_services: dict[str, dict],
     compose_path: Path,
-) -> tuple[list, set[str]]:
-    """Expand `source: env_file_auto` SecretRefV2 entries.
+) -> tuple[list, set[str], dict[str, list[str]]]:
+    """Always-on auto-promotion of compose env_file directives to SM secrets.
 
-    For each env_file_auto entry, walks every compose service's `env_file:`
-    list, resolves paths against the compose file's dir, and produces one
-    `source: file` SecretRef per unique env_file. The original auto entry
-    is dropped from the returned list.
+    rc-12d: previously this fired only when rc.yml declared `source:
+    env_file_auto`. Default rc.yml configs (source=file per secret) skipped
+    this path entirely, leaving compose env_file values to land in the task
+    def `environment[]` as plaintext. Now runs for every deploy.
 
-    Returns: (new_secrets_list, set_of_env_keys_now_in_sm). The keys set
-    is used by build_deploy_context to strip env_file values from each
-    service's task-def `environment[]` so the same value isn't shipped as
-    both plaintext env and an SM secret reference.
+    Walks every compose service's ``env_file:`` list, resolves paths against
+    the compose file's dir, and produces one ``source: file`` SecretRef per
+    unique env_file (auto-named via _auto_secret_name_for).
+
+    rc.yml secrets[] precedence (R3): when a discovered auto-name collides
+    with an rc.yml-declared secret name, the rc.yml entry wins — its
+    ``path:`` is the SM-content source. The compose-side path is still
+    used to determine which service references which secret (R2 routing).
+
+    Returns:
+      (expanded_secrets, suppressed_env_keys, per_service_secret_names)
+
+      expanded_secrets: rc.yml secrets[] entries (with env_file_auto
+        entries replaced by file entries) plus discovered auto-name
+        entries that don't collide with any rc.yml-declared name.
+      suppressed_env_keys: union of every key across every discovered
+        env_file. Kept for backwards compat with callers that need
+        a global suppression set; build_deploy_context uses the
+        per_service_secret_names map for actual per-service routing.
+      per_service_secret_names: dict mapping compose service name →
+        list of secret names whose source path matches one of THAT
+        service's env_file references. ECSProvider.emit_terraform
+        filters task-def secrets[] per service against this list (R2).
     """
     from .config.v2_schema import SecretRefV2 as _SecRefV2
     from .envfile import EnvFileError, keys as _env_keys
 
-    has_auto = any(getattr(s, "source", None) == "env_file_auto" for s in secrets)
-    if not has_auto:
-        return list(secrets), set()
-
     compose_dir = compose_path.parent
-    discovered: dict[str, Path] = {}  # secret-name -> absolute env_file path
-    for svc_compose in compose_services.values():
+
+    # 1. Discover every compose env_file referenced by any service. Track
+    #    BOTH the auto-name and the (per-service) list of auto-names so we
+    #    can route per-service later. Also build a basename → set-of-services
+    #    index used in step 2 to link rc.yml-declared file secrets that
+    #    refer to the same logical file under a different path (e.g. rc.yml
+    #    points at .test/.django while compose points at .local/.django).
+    discovered: dict[str, Path] = {}  # auto-name -> abs path
+    per_service: dict[str, list[str]] = {}
+    basename_to_services: dict[str, set[str]] = {}
+    for svc_name, svc_compose in compose_services.items():
         env_files_raw = svc_compose.get("env_file")
         if env_files_raw is None:
+            per_service[svc_name] = []
             continue
         entries = (
             [env_files_raw] if isinstance(env_files_raw, str) else list(env_files_raw)
         )
+        names_for_this_svc: list[str] = []
         for ref in entries:
             ref_path = Path(ref)
             if not ref_path.is_absolute():
                 ref_path = (compose_dir / ref_path).resolve()
-            name = _auto_secret_name_for(ref_path, compose_dir)
-            # First-seen wins. Two compose services that share an env_file
-            # collapse to one secret.
-            discovered.setdefault(name, ref_path)
+            auto_name = _auto_secret_name_for(ref_path, compose_dir)
+            # First-seen wins for the global discovered map (two services
+            # sharing an env_file collapse to one secret).
+            discovered.setdefault(auto_name, ref_path)
+            if auto_name not in names_for_this_svc:
+                names_for_this_svc.append(auto_name)
+            basename_to_services.setdefault(ref_path.name, set()).add(svc_name)
+        per_service[svc_name] = names_for_this_svc
 
-    suppressed_keys: set[str] = set()
+    # 2. Merge with rc.yml secrets[]. rc.yml-declared names WIN (R3) — keep
+    #    the rc.yml entry as-is, drop the auto-discovered duplicate.
+    #    rc-12d: ALSO link rc.yml file secrets to compose services by
+    #    BASENAME of the secret's path. This lets a user declare
+    #    `secrets:[{name: django, path: .test/.django}]` and have it
+    #    auto-scope to compose services whose env_file uses .django
+    #    (any path), avoiding the global-broadcast leak that put
+    #    REDIS_URL on postgres in the sentinal repro.
     expanded: list = []
+    rc_yml_names: set[str] = set()
     for sec in secrets:
-        if getattr(sec, "source", None) == "env_file_auto":
-            continue  # drop; replaced by per-file entries below
+        src = getattr(sec, "source", None)
+        if src == "env_file_auto":
+            continue  # legacy opt-in marker; replaced unconditionally below
         expanded.append(sec)
+        rc_yml_names.add(getattr(sec, "name", None))
+        # Basename-link: when the rc.yml file-secret's path basename
+        # matches a compose env_file's basename, scope this secret to
+        # those services so it's NOT broadcast globally.
+        if src == "file":
+            sec_path_str = getattr(sec, "path", None)
+            if sec_path_str:
+                basename = Path(sec_path_str).name
+                linked_svcs = basename_to_services.get(basename) or set()
+                for linked_svc in linked_svcs:
+                    if sec.name not in per_service.get(linked_svc, []):
+                        per_service.setdefault(linked_svc, []).append(sec.name)
+
+    # 3. Append auto-discovered entries that don't collide with rc.yml names.
     for name, abs_path in discovered.items():
+        if name in rc_yml_names:
+            continue
         expanded.append(_SecRefV2(
             name=name, source="file", path=str(abs_path),
         ))
+
+    # 4. Compute suppressed_keys (union across every discovered env_file)
+    #    so legacy callers still get a global set. Per-service routing in
+    #    build_deploy_context uses per_service.
+    suppressed_keys: set[str] = set()
+    for abs_path in discovered.values():
         try:
             for k in _env_keys(abs_path):
                 suppressed_keys.add(k)
         except EnvFileError:
-            # Same lenience as _service_env: a missing env_file still
-            # produces a secret entry (for terraform), but we skip key
-            # suppression so we don't mask a typo by deleting nothing.
             pass
+    # Plus rc.yml-declared file-sourced secrets — those keys are also in SM.
+    for sec in secrets:
+        if getattr(sec, "source", None) == "file" and getattr(sec, "path", None):
+            sec_path = Path(sec.path)
+            if not sec_path.is_absolute():
+                sec_path = (compose_path.parent / sec_path).resolve()
+            try:
+                for k in _env_keys(sec_path):
+                    suppressed_keys.add(k)
+            except EnvFileError:
+                pass
 
-    return expanded, suppressed_keys
+    return expanded, suppressed_keys, per_service
 
 
 def build_deploy_context(
@@ -438,8 +507,8 @@ def build_deploy_context(
     # set is available — without this, env_file values land in the task-def
     # environment[] AND in secrets[], duplicating the data and defeating
     # the point of using SM.
-    v2_secrets_expanded, suppressed_env_keys = _expand_env_file_auto(
-        list(v2.secrets), compose_services, compose_path,
+    v2_secrets_expanded, suppressed_env_keys, per_service_secret_names = (
+        _expand_env_file_auto(list(v2.secrets), compose_services, compose_path)
     )
 
     # Resolve the deploy set: union of compose services + rc.yml services,
@@ -475,10 +544,50 @@ def build_deploy_context(
         bc, bargs, dfile, img, target = _service_build_info(svc_compose, compose_path)
         all_compose_ports = _service_compose_ports(svc_compose)
         env = _service_env(svc_compose, compose_path)
-        if suppressed_env_keys:
-            # env_file_auto: drop any key now sourced from SM so the task def
-            # doesn't leak the same value via plaintext environment[].
-            env = {k: v for k, v in env.items() if k not in suppressed_env_keys}
+        # rc-12d: per-service plaintext suppression. Drop any key that THIS
+        # service now sources via SM (either through compose env_file
+        # auto-promotion or through an rc.yml-declared file secret), so
+        # the task def doesn't ship the same value as both plaintext env
+        # and a secrets[] reference. Per-service (not global) so a key
+        # that only exists in service A's env_file isn't also stripped
+        # from service B's plaintext env when B sets it via compose
+        # `environment:`. Keys explicitly set via compose `environment:`
+        # (or rc.yml's services.<svc>.env override) MUST survive — those
+        # are user-intended plaintext overrides that win on collision.
+        from .envfile import EnvFileError as _EFE, keys as _ekeys
+        explicit_plaintext_keys: set[str] = set()
+        compose_environment = svc_compose.get("environment")
+        if isinstance(compose_environment, dict):
+            explicit_plaintext_keys.update(str(k) for k in compose_environment.keys())
+        elif isinstance(compose_environment, list):
+            for entry in compose_environment:
+                if "=" in str(entry):
+                    explicit_plaintext_keys.add(str(entry).split("=", 1)[0])
+        svc_secret_names = set(per_service_secret_names.get(name, []))
+        # Also include rc.yml-declared file secrets that match a name in
+        # this service's env_file_secret_names — rc.yml's path wins on
+        # collision (R3) so we use the rc.yml path's key set.
+        svc_suppressed: set[str] = set()
+        for sec in v2_secrets_expanded:
+            if getattr(sec, "name", None) not in svc_secret_names:
+                continue
+            if getattr(sec, "source", None) != "file":
+                continue
+            sec_path_str = getattr(sec, "path", None)
+            if not sec_path_str:
+                continue
+            sec_path = Path(sec_path_str)
+            if not sec_path.is_absolute():
+                sec_path = (project_dir / sec_path).resolve()
+            try:
+                for k in _ekeys(sec_path):
+                    svc_suppressed.add(k)
+            except _EFE:
+                pass
+        # Preserve explicit plaintext overrides on collision.
+        svc_suppressed -= explicit_plaintext_keys
+        if svc_suppressed:
+            env = {k: v for k, v in env.items() if k not in svc_suppressed}
         cmd = _service_command(svc_compose)
         compose_named_mounts = _compose_named_volume_mounts(svc_compose)
         if svc is not None:
@@ -547,6 +656,7 @@ def build_deploy_context(
                 ),
                 domain=svc.domain,
                 aliases=list(svc.aliases or []),
+                env_file_secret_names=list(per_service_secret_names.get(name, [])),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker
@@ -577,6 +687,7 @@ def build_deploy_context(
                 extra_ports=extras,
                 env=env,
                 command=cmd,
+                env_file_secret_names=list(per_service_secret_names.get(name, [])),
             )
 
     secrets = [
@@ -704,7 +815,9 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
     if not compose_path.is_absolute():
         compose_path = (Path(rc_path).parent / compose_path).resolve()
     compose_services = _parse_compose_services(compose_path)
-    expanded, _suppressed = _expand_env_file_auto(secrets, compose_services, compose_path)
+    expanded, _suppressed, _per_svc = _expand_env_file_auto(
+        secrets, compose_services, compose_path,
+    )
     file_secrets = [s for s in expanded if getattr(s, "source", None) == "file"]
     if not file_secrets:
         return

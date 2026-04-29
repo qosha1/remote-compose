@@ -454,6 +454,9 @@ class ECSProvider(Provider):
                             f'"${{aws_secretsmanager_secret.{tf_sec_name}.arn}}'
                             f':{key}::"'
                         ),
+                        # rc-12d: track which rc.yml secret this entry came
+                        # from so per-service env_file scoping can filter.
+                        "source_secret_name": sec.name,
                     })
             elif sec.source == "aws_sm":
                 if not sec.arn:
@@ -470,6 +473,10 @@ class ECSProvider(Provider):
                 secrets_view.append({
                     "env_name": _env_name_for_secret(sec.name),
                     "value_from_ref": f'"{sec.arn}"',
+                    # rc-12d: aws_sm secrets are global (rc.yml-declared,
+                    # not per-service env_file scoped) — None means
+                    # "attach to every service".
+                    "source_secret_name": None,
                 })
             elif sec.source in {"k8s_secret", "gcp_sm"}:
                 # Not applicable to the ECS provider — silently skip. Another
@@ -491,22 +498,84 @@ class ECSProvider(Provider):
             all_secret_arns.append(sec["arn"])
 
         # Attach secrets to every service view so each task def gets them.
-        # Filter per-service: when a service has a plaintext env override for
-        # a key that's also sourced from SM, drop the SM entry from THAT
-        # service's secrets[]. ECS rejects task defs where the same key
-        # appears in both environment[] and secrets[] ("The secret name
-        # must be unique and not shared with any new or existing environment
-        # variables"). The plaintext env wins on collision because the user
-        # set it explicitly in rc.yml services.<svc>.env. (rc-z30)
+        # Three filters apply per service:
+        #
+        #   (rc-z30) plaintext-env override: when a service has a plaintext
+        #   env entry for a key that's also sourced from SM, drop the SM
+        #   entry from THAT service's secrets[]. ECS rejects task defs
+        #   where the same key appears in both environment[] and secrets[].
+        #   The plaintext env wins on collision because the user set it
+        #   explicitly in rc.yml services.<svc>.env.
+        #
+        #   (rc-12d) env_file scoping for AUTO-DISCOVERED secrets: a
+        #   secret whose name was auto-derived from a compose env_file
+        #   directive should ONLY attach to services that ACTUALLY
+        #   reference that env_file. Without this, postgres got django-
+        #   only keys (REDIS_URL etc.) because every secret entry was
+        #   broadcast to every service. Tracked via the union of every
+        #   ServiceSpec.env_file_secret_names — names appearing there
+        #   are auto-scoped; names NOT in that union are rc.yml-only
+        #   declarations that remain global (backward compat for users
+        #   whose compose has no env_file directives).
+        #
+        #   (rc-12d) aws_sm secrets stay global regardless. Marked via
+        #   source_secret_name=None.
+        scoped_secret_names: set[str] = set()
+        for spec in ctx.services.values():
+            for n in getattr(spec, "env_file_secret_names", []) or []:
+                scoped_secret_names.add(n)
+
         for svc_view in services_view:
+            svc_name = svc_view["name"]
+            spec = ctx.services.get(svc_name)
+            allowed_env_file_names = set(
+                getattr(spec, "env_file_secret_names", []) or []
+            )
             override_keys = set(svc_view.get("env") or {})
+            scoped_entries: list[dict[str, Any]] = []
+            global_entries: list[dict[str, Any]] = []
+            for s in secrets_view:
+                src_name = s.get("source_secret_name")
+                # Global (aws_sm) — always attach.
+                if src_name is None:
+                    global_entries.append(s)
+                    continue
+                # File-sourced AND name participates in env_file scoping —
+                # only attach if THIS service references it.
+                if src_name in scoped_secret_names:
+                    if src_name in allowed_env_file_names:
+                        scoped_entries.append(s)
+                    continue
+                # File-sourced but NAME isn't matched to any compose
+                # env_file — treat as global (backward compat for
+                # rc.yml-only stacks with no compose env_file).
+                global_entries.append(s)
+            # rc-12d: de-dupe by env_name. ECS rejects task defs with
+            # duplicate secret names. Two layers of preference:
+            #   (a) within scoped entries: when the same KEY comes from
+            #       multiple sources that all attach to this service
+            #       (e.g. rc.yml secret with basename-linked scope AND
+            #       auto-discovered compose env_file secret), keep the
+            #       first occurrence — secrets_view is built rc.yml-first
+            #       (R4: rc.yml wins on collision).
+            #   (b) scoped wins over global on cross-tier collision.
+            seen_in_scoped: set[str] = set()
+            scoped_unique: list[dict[str, Any]] = []
+            for s in scoped_entries:
+                if s["env_name"] in seen_in_scoped:
+                    continue
+                seen_in_scoped.add(s["env_name"])
+                scoped_unique.append(s)
+            filtered: list[dict[str, Any]] = list(scoped_unique)
+            for s in global_entries:
+                if s["env_name"] in seen_in_scoped:
+                    continue
+                filtered.append(s)
             if override_keys:
-                svc_view["secrets"] = [
-                    s for s in secrets_view
-                    if s["env_name"] not in override_keys
+                filtered = [
+                    s for s in filtered if s["env_name"] not in override_keys
                 ]
-            else:
-                svc_view["secrets"] = secrets_view
+            svc_view["secrets"] = filtered
         default_target_port = default_public["port"] if default_public else 80
         default_health_check_path = (
             (default_public or {}).get("health_check_path") or "/"

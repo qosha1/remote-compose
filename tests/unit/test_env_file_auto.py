@@ -78,14 +78,14 @@ class TestExpand:
     def test_no_auto_secret_returns_input_unchanged(self, tmp_path):
         compose, _ = _setup(tmp_path, "services: {api: {image: x}}", {})
         secrets = [SecretRefV2(name="manual", source="file", path=str(tmp_path / "x"))]
-        out, suppressed = _expand_env_file_auto(secrets, {"api": {}}, compose)
+        out, suppressed, _ = _expand_env_file_auto(secrets, {"api": {}}, compose)
         assert out == secrets
         assert suppressed == set()
 
     def test_auto_with_no_env_files_drops_auto_entry(self, tmp_path):
         compose, _ = _setup(tmp_path, "services: {api: {image: x}}", {})
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
-        out, suppressed = _expand_env_file_auto(secrets, {"api": {}}, compose)
+        out, suppressed, _ = _expand_env_file_auto(secrets, {"api": {}}, compose)
         assert out == []
         assert suppressed == set()
 
@@ -102,7 +102,7 @@ class TestExpand:
             "worker": {"env_file": ".envs/.local/.django"},
         }
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
-        out, suppressed = _expand_env_file_auto(secrets, compose_services, compose)
+        out, suppressed, _ = _expand_env_file_auto(secrets, compose_services, compose)
         # 2 unique env_files, no original entries other than the dropped auto
         assert len(out) == 2
         names = {s.name for s in out}
@@ -125,7 +125,7 @@ class TestExpand:
                              path=str(tmp_path / ".envs/.local/.django"))
         secrets = [manual, SecretRefV2(name="env", source="env_file_auto")]
         compose_services = {"api": {"env_file": ".envs/.local/.django"}}
-        out, suppressed = _expand_env_file_auto(secrets, compose_services, compose)
+        out, suppressed, _ = _expand_env_file_auto(secrets, compose_services, compose)
         # Manual entry kept; auto entry replaced by 1 file entry
         assert manual in out
         assert any(s.source == "file" and s.name == "local-django" for s in out)
@@ -135,7 +135,7 @@ class TestExpand:
         compose, _ = _setup(tmp_path, "services: {api: {image: x}}", {})
         compose_services = {"api": {"env_file": ".envs/.local/.django"}}  # not on disk
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
-        out, suppressed = _expand_env_file_auto(secrets, compose_services, compose)
+        out, suppressed, _ = _expand_env_file_auto(secrets, compose_services, compose)
         # We still emit a SecretRef so terraform creates the SM placeholder
         assert len(out) == 1
         assert out[0].source == "file"
@@ -187,7 +187,7 @@ class TestSecretNamingOutsideComposeDir:
             "api": {"env_file": str(proj_root / ".envs/.local/.django")},
         }
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
-        out, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
+        out, _, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
         names = sorted(s.name for s in out)
         assert names == ["local-django"]
 
@@ -208,7 +208,7 @@ class TestSecretNamingOutsideComposeDir:
             ]},
         }
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
-        out, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
+        out, _, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
         names = sorted(s.name for s in out)
         assert names == ["local-django", "staging-django"]
         # No collisions
@@ -227,7 +227,7 @@ class TestSecretNamingOutsideComposeDir:
         compose_a = proj_root / "docker-compose.yml"
         compose_a.write_text("services: {api: {image: x}}")
         services_a = {"api": {"env_file": ".envs/.local/.django"}}
-        out_a, _ = _expand_env_file_auto(
+        out_a, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
             services_a, compose_a,
         )
@@ -238,7 +238,7 @@ class TestSecretNamingOutsideComposeDir:
         compose_b.parent.mkdir()
         compose_b.write_text("services: {api: {image: x}}")
         services_b = {"api": {"env_file": env_abs}}
-        out_b, _ = _expand_env_file_auto(
+        out_b, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
             services_b, compose_b,
         )
@@ -257,7 +257,7 @@ class TestSecretNamingOutsideComposeDir:
         compose.parent.mkdir()
         compose.write_text("services: {api: {image: x}}")
         services = {"api": {"env_file": str(ep)}}
-        out, _ = _expand_env_file_auto(
+        out, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
             services, compose,
         )
@@ -323,9 +323,9 @@ def test_build_deploy_context_strips_env_file_keys_when_auto_present(tmp_path):
     assert ctx.secrets[0].name == "django"  # from .envs/.django -> 'django'
 
 
-def test_build_deploy_context_without_env_file_auto_keeps_old_behavior(tmp_path):
-    """Without the auto declaration, env_file values DO inline (for backwards
-    compat). Users who explicitly want the leak get the leak."""
+def test_build_deploy_context_auto_promotes_env_file_without_optin(tmp_path):
+    """rc-12d: env_file values are NEVER plaintext env, even without an
+    `env_file_auto` opt-in. compose env_file → SM secret is the default."""
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".envs").mkdir()
@@ -356,6 +356,15 @@ def test_build_deploy_context_without_env_file_auto_keeps_old_behavior(tmp_path)
     ctx = build_deploy_context(v2, raw, rc_yml)
 
     api = ctx.services["api"]
-    # Old behavior: env_file values inline as plaintext env
-    assert api.env.get("AWS_KEY") == "secret-value"
-    assert ctx.secrets == []
+    # New default: env_file values are auto-promoted to SM, NOT plaintext.
+    assert "AWS_KEY" not in api.env, (
+        f"rc-12d: env_file values must not appear in plaintext env. "
+        f"Got: {sorted(api.env)}"
+    )
+    # An SM secret was auto-created from the discovered env_file.
+    assert any(s.source == "file" and s.name == "django" for s in ctx.secrets), (
+        f"expected auto-discovered file secret named 'django'; "
+        f"got: {[(s.name, s.source) for s in ctx.secrets]}"
+    )
+    # The api service is wired to that secret.
+    assert "django" in api.env_file_secret_names
