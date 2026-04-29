@@ -958,6 +958,12 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
                 "  No-state mode: skipping terraform entirely. "
                 "Will only rebuild images + force-roll services."
             )
+        if kwargs.get("skip_force_roll"):
+            # rc-1bk: caller (today: rc up) wants to handle the rollout
+            # itself after pushing secrets. Build + push images here, but
+            # don't update_service so tasks aren't rolled with placeholder
+            # secrets.
+            ctx.skip_force_roll = True
         ttl = kwargs.get("ttl")
         if ttl:
             from datetime import datetime, timezone

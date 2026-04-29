@@ -650,6 +650,10 @@ class ECSProvider(Provider):
         start = time.monotonic()
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
+        # rc-ysh: detect held local state lock BEFORE invoking terraform so
+        # we surface the holder PID in <1s instead of inheriting terraform's
+        # subprocess-output buffering and retry loops.
+        self._check_local_state_lock(out_dir, ctx)
         runner = self.runner_factory(out_dir)
         runner.init()
         self._reconcile_orphan_log_groups(ctx, runner)
@@ -661,8 +665,11 @@ class ECSProvider(Provider):
             ctx, outputs, warnings,
             services_filter=services_filter, requested_tag=tag,
         )
-        if pushed:
+        if pushed and not getattr(ctx, "skip_force_roll", False):
             # ECS won't pull a new :latest automatically — force it.
+            # rc-1bk: rc up sets skip_force_roll=True so the rollout happens
+            # AFTER `rc secrets push` populates SM, avoiding the cold-start
+            # CannotPullSecrets cascade.
             self._force_new_deployments(ctx, pushed)
 
         return DeployResult(
@@ -796,13 +803,28 @@ class ECSProvider(Provider):
             allowed = set(services_filter)
             to_build = [s for s in to_build if s.name in allowed]
         if not to_build:
+            # rc-8q4: don't silently return — surface why the build phase
+            # produced nothing so the user knows whether tasks will pull
+            # pre-existing images or fail with CannotPullContainerError.
+            buildable = sum(1 for s in ctx.services.values() if s.build_context)
+            if buildable == 0:
+                self._emit(
+                    "  No images to build (no services declare build context)."
+                )
+            else:
+                self._emit(
+                    f"  No matched services to build "
+                    f"(filter excludes all {buildable} build_context service(s))."
+                )
             return []
 
         repos = (outputs.get("ecr_repositories") or {}).get("value") or {}
         if not repos:
-            warnings.append(
+            msg = (
                 "terraform outputs missing ecr_repositories — skipping image build+push"
             )
+            warnings.append(msg)
+            self._emit(f"  WARN: {msg}")
             return []
 
         # Shared BuildKit cache repo (rc-e5u.45.2). Optional — older stacks
@@ -845,9 +867,11 @@ class ECSProvider(Provider):
         for spec in to_build:
             repo_url = repos.get(spec.name)
             if not repo_url:
-                warnings.append(
+                msg = (
                     f"service {spec.name!r}: no ECR repo in terraform outputs"
                 )
+                warnings.append(msg)
+                self._emit(f"  WARN: {msg}; skipping image build+push")
                 continue
             # ECR repo URL: <account>.dkr.ecr.<region>.amazonaws.com/<repo_path>
             # repo_path can include slashes (e.g., 'test-proj/django') so strip
@@ -959,6 +983,49 @@ class ECSProvider(Provider):
             return
         import sys
         print(message, file=sys.stderr)
+
+    def _check_local_state_lock(
+        self, out_dir: Path, ctx: DeployContext,
+    ) -> None:
+        """Pre-flight: surface a held local terraform state lock fast.
+
+        rc-ysh: when a previous rc invocation crashed or is in flight in
+        the same dir, terraform's lock-acquire retry loop can hang for
+        10+ minutes with stderr buffered. Stat the lock file ourselves
+        and raise a TerraformError with the holder PID inside 1ms so the
+        user knows immediately whether to wait or force-unlock.
+
+        Only applies to the local backend; s3+dynamodb already produces
+        a clear error via terraform's stock 'state lock' message that
+        cli_commands/deploy.py converts to a friendly ClickException.
+        """
+        backend_type = (ctx.tf_backend_config or {}).get("type", "local")
+        if backend_type != "local":
+            return
+        lock_file = out_dir / ".terraform.tfstate.lock.info"
+        if not lock_file.exists():
+            return
+        import json as _json
+        try:
+            info = _json.loads(lock_file.read_text())
+        except (OSError, _json.JSONDecodeError):
+            info = {}
+        pid = info.get("PID", "?")
+        who = info.get("Who", "unknown")
+        created = info.get("Created", "unknown")
+        lock_id = info.get("ID", "")
+        raise TerraformError(
+            cmd=["terraform", "apply"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"terraform state lock held by PID {pid} ({who}, since "
+                f"{created}). Another rc deploy is in flight in this dir; "
+                f"wait for it to finish, or `terraform -chdir={out_dir} "
+                f"force-unlock {lock_id}` if you're SURE no concurrent "
+                f"apply is running."
+            ),
+        )
 
     def _reconcile_orphan_log_groups(
         self, ctx: DeployContext, runner: TerraformRunner,

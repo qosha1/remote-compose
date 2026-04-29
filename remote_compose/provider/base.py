@@ -122,6 +122,13 @@ class DeployContext:
     # outputs. Set by `rc deploy --no-state`.
     skip_terraform: bool = False
 
+    # rc-1bk: when True, deploy() builds + pushes images but does NOT call
+    # _force_new_deployments. Used by `rc up` so the rollout happens AFTER
+    # `rc secrets push` populates SM, avoiding the cold-start failure where
+    # rolled tasks can't pull placeholder secrets and the wait/exec hooks
+    # then hang for 30+ minutes.
+    skip_force_roll: bool = False
+
 
 @dataclass
 class ServiceStatus:

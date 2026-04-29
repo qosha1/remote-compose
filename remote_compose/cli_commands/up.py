@@ -187,6 +187,12 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
     if not dispatch_if_v2(
         str(target), 'deploy',
         ttl=ttl, dev=dev_mode, defer_lifecycle_hooks=True,
+        # rc-1bk: defer the force-roll until after _secrets_push_v2 below
+        # populates SM. Otherwise the deploy rolls services with
+        # placeholder secrets and tasks fail to start, which then hangs
+        # the run_auto_on_deploy_hooks wait_for_stable + exec polls for
+        # 30+ minutes.
+        skip_force_roll=True,
     ):
         raise click.ClickException(
             f"{target} is not a v2 rc.yml. `rc up` only supports v2 — "
