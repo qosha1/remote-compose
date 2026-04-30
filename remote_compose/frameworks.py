@@ -74,6 +74,49 @@ class Framework:
     testing_defaults_env: dict[str, str] = field(default_factory=dict)
     testing_defaults_marker_keys: tuple[str, ...] = ()
     host_header_rewrite: Optional[str] = None
+    # rc-32x: env vars to auto-inject when the service has a domain wired
+    # (rc.yml services.<svc>.domain set, typically by `rc up --domain`).
+    # Each value is a Python format string with ``{domain}`` and
+    # ``{aliases_csv}`` placeholders. cli_v2.build_deploy_context fills them
+    # in at deploy time and merges the result UNDER the user's rc.yml.env
+    # (user override wins on collision).
+    #
+    # Django: ALLOWED_HOSTS rejects unknown Host headers (400 SuspiciousOp);
+    # CSRF middleware rejects POSTs whose Origin doesn't match. Both must
+    # know about the ALB-fronted hostname or admin login + every CSRF-
+    # protected endpoint 403s.
+    domain_env_template: dict[str, str] = field(default_factory=dict)
+
+    def domain_env(
+        self, domain: str, aliases: tuple[str, ...] = (),
+    ) -> dict[str, str]:
+        """rc-32x: render domain_env_template with the deploy's domain + aliases.
+
+        Substitutions:
+          {domain}              — primary FQDN
+          {aliases_csv}         — leading comma + comma-separated aliases
+                                  (empty when no aliases)
+          {https_aliases_csv}   — leading comma + comma-separated
+                                  https://<alias> URLs (empty when no aliases)
+
+        Returns an empty dict when the framework has no template OR domain
+        is falsy. Caller merges the result UNDER the user's rc.yml.env so
+        explicit overrides win.
+        """
+        if not self.domain_env_template or not domain:
+            return {}
+        aliases_csv = ("," + ",".join(aliases)) if aliases else ""
+        https_aliases_csv = (
+            ("," + ",".join(f"https://{a}" for a in aliases)) if aliases else ""
+        )
+        out: dict[str, str] = {}
+        for k, v in self.domain_env_template.items():
+            out[k] = v.format(
+                domain=domain,
+                aliases_csv=aliases_csv,
+                https_aliases_csv=https_aliases_csv,
+            )
+        return out
     # rc-e5u.35.7: per-framework lifecycle hooks injected when a service
     # declares ``framework: <name>`` (or detect_framework matches via
     # Dockerfile markers). Each entry is ``hook_name -> argv``; cli_v2
@@ -108,6 +151,15 @@ DJANGO = Framework(
     },
     testing_defaults_marker_keys=("DJANGO_ALLOWED_HOSTS",),
     host_header_rewrite="localhost",
+    # rc-32x: when --domain is set, inject these so admin login + CSRF
+    # work over the new hostname. The hostnames go in ALLOWED_HOSTS;
+    # CSRF needs the full https:// scheme. SECURE_PROXY_SSL_HEADER lives
+    # in settings.py (env injection can't construct a tuple), so we
+    # only patch what env can reach.
+    domain_env_template={
+        "DJANGO_ALLOWED_HOSTS": "{domain}{aliases_csv}",
+        "CSRF_TRUSTED_ORIGINS": "https://{domain}{https_aliases_csv}",
+    },
     lifecycle_hooks={
         # `rc lifecycle createsuperuser <svc>` for one-off admin user.
         # --noinput honors DJANGO_SUPERUSER_EMAIL / _USERNAME / _PASSWORD
@@ -149,6 +201,10 @@ RAILS = Framework(
     },
     testing_defaults_marker_keys=("RAILS_HOSTS",),
     host_header_rewrite=None,
+    # rc-32x: domain → RAILS_HOSTS so config.hosts accepts it in production.
+    domain_env_template={
+        "RAILS_HOSTS": "{domain}{aliases_csv}",
+    },
     lifecycle_hooks={
         "console": ("bundle", "exec", "rails", "console"),
         "dbconsole": ("bundle", "exec", "rails", "dbconsole"),
@@ -176,6 +232,12 @@ PHOENIX = Framework(
     },
     testing_defaults_marker_keys=("PHX_HOST",),
     host_header_rewrite=None,
+    # rc-32x: PHX_HOST is single-valued in Phoenix, so we use just the
+    # primary domain. Aliases are dropped here — they'd need an Endpoint
+    # check_origin patch that env can't reach.
+    domain_env_template={
+        "PHX_HOST": "{domain}",
+    },
     lifecycle_hooks={
         # `iex -S mix` — the canonical Phoenix REPL.
         "console": ("iex", "-S", "mix"),

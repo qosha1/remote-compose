@@ -601,6 +601,19 @@ def build_deploy_context(
             # — these aren't secrets, they're host-validation knobs).
             if svc.env:
                 env = {**env, **{k: str(v) for k, v in svc.env.items()}}
+            # rc-32x: when --domain is wired (rc.yml services.<svc>.domain
+            # set), inject framework-aware host/CSRF env vars so the deploy
+            # works over the new hostname without hand-editing settings.
+            # Examples: Django gets DJANGO_ALLOWED_HOSTS + CSRF_TRUSTED_ORIGINS;
+            # Rails gets RAILS_HOSTS; Phoenix gets PHX_HOST. setdefault means
+            # explicit user values in rc.yml.env / compose env override.
+            if svc.domain:
+                from .frameworks import detect_framework as _detect_fw
+                fw = _detect_fw(svc_compose, compose_path)
+                if fw is not None:
+                    aliases_tup = tuple(svc.aliases or ())
+                    for k, v in fw.domain_env(svc.domain, aliases_tup).items():
+                        env.setdefault(k, v)
             primary_port = svc.port or (all_compose_ports[0] if all_compose_ports else None)
             extras = [p for p in all_compose_ports if p != primary_port]
             # rc-e5u.46.1: rc.yml services.<svc>.dockerfile overrides compose's

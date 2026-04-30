@@ -17,8 +17,12 @@ def fix_group():
 
     \b
     Subcommands:
-      rc fix nginx-conf   Emit an ECS-ready nginx.conf + Dockerfile
-                          (rc-e5u.44.21).
+      rc fix nginx-conf            Emit an ECS-ready nginx.conf + Dockerfile
+                                   (rc-e5u.44.21).
+      rc fix bake-bind-mount-source <service>
+                                   Append COPY <host> <container> to a
+                                   service's Dockerfile so /app exists in
+                                   the built image (rc-bys).
     """
 
 
@@ -138,4 +142,81 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
     click.echo(
         "\n  Then `rc deploy --services nginx` should produce a healthy "
         "ALB target on first attempt — no resolver/FQDN/Host iteration loop."
+    )
+
+
+@fix_group.command(name='bake-bind-mount-source')
+@click.argument('service')
+@click.option('--force', is_flag=True,
+              help='Append the COPY line even if a similar one already exists.')
+@click.pass_context
+def fix_bake_bind_mount_source_cmd(ctx, service, force):
+    """Patch a service's Dockerfile so its bind-mount source dirs are baked in.
+
+    \b
+    Local docker-compose stacks commonly use:
+        services:
+          django:
+            build: { context: ., dockerfile: compose/local/django/Dockerfile }
+            volumes:
+              - ./backend:/app
+
+    The bind mount overrides whatever's in /app at runtime — so the local
+    Dockerfile typically does NOT `COPY ./backend /app`. ECS has no bind
+    mounts; the running container's /app is empty; manage.py is missing;
+    the start script crashes.
+
+    This subcommand parses the service's compose volumes, finds the
+    HOST_DIR:CONTAINER_DIR pairs (skipping system mounts like /tmp/.X11-unix
+    and absolute system paths), and appends a `COPY <host> <container>`
+    line to the matching Dockerfile so the same image works for ECS.
+
+    \b
+    Local docker-compose still bind-mounts at runtime (overrides the COPY)
+    so hot-reload keeps working for local dev.
+
+    \b
+    Examples:
+      rc fix bake-bind-mount-source django
+      rc fix bake-bind-mount-source celeryworker --force
+    """
+    from remote_compose.fix_bake_bind import bake_bind_mount_source
+
+    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    rc_path = Path(config_path)
+    if not rc_path.exists():
+        raise click.ClickException(f"{rc_path} not found.")
+
+    rc_raw = yaml.safe_load(rc_path.read_text()) or {}
+    compose_field = rc_raw.get("compose_file") or "docker-compose.yml"
+    compose_path = Path(compose_field)
+    if not compose_path.is_absolute():
+        compose_path = (rc_path.parent / compose_path).resolve()
+    if not compose_path.exists():
+        raise click.ClickException(
+            f"compose file {compose_path} not found (rc.yml.compose_file = "
+            f"{compose_field!r})."
+        )
+
+    try:
+        result = bake_bind_mount_source(
+            compose_path, service, force=force,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if result.skipped_reason:
+        click.echo(f"  rc fix bake-bind-mount-source {service}: "
+                   f"{result.skipped_reason}")
+        return
+
+    click.echo(f"\nrc fix bake-bind-mount-source {service}")
+    click.echo(f"  dockerfile:  {result.dockerfile_path}")
+    click.echo(f"  added COPY:")
+    for host, container in result.copies_added:
+        click.echo(f"    COPY {host} {container}")
+    click.echo(
+        "\n  Local docker-compose still bind-mounts these paths at runtime "
+        "(the bind mount overrides the COPY), so local hot-reload keeps "
+        "working. ECS deploys (no bind mounts) now have the source baked in."
     )

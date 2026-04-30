@@ -706,6 +706,84 @@ def detect_localhost_host_in_env_file(
     return warnings
 
 
+# rc-562: capture every `resolver <IP> [opts]` directive so we can compare
+# the configured IP against the IP that matches rc.yml.vpc_cidr today.
+_RESOLVER_IP_RE = re.compile(
+    r"^\s*resolver\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b",
+    re.MULTILINE,
+)
+
+
+def detect_stale_nginx_resolver_ip(
+    compose: dict,
+    compose_path: Path,
+    rc_v2_raw: Optional[dict] = None,
+) -> list[str]:
+    """rc-562: warn when an nginx config file has ``resolver <IP>`` baked
+    in with an IP that doesn't match the VPC's current resolver.
+
+    `rc fix nginx-conf` writes the resolver IP derived from
+    rc.yml.provider_config.ecs.vpc_cidr at GENERATION time. If the user
+    later changes vpc_cidr (e.g. moves to a new VPC) without re-running
+    `rc fix nginx-conf`, the baked-in resolver IP belongs to the OLD VPC
+    and Fargate tasks fail every Cloud Map lookup → 502s.
+
+    We scan compose-build-context config files for resolver directives,
+    extract the IP, and compare against the IP derived from current
+    rc.yml.vpc_cidr (network base + 2). Mismatches → warn with the
+    expected IP + the suggested re-run.
+    """
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict) or not services:
+        return warnings
+    rc_raw = rc_v2_raw or {}
+    ecs_cfg = ((rc_raw.get("provider_config") or {}).get("ecs") or {})
+    vpc_cidr = ecs_cfg.get("vpc_cidr")
+    expected_ip = _resolver_ip_for(vpc_cidr)
+    seen: set[tuple[str, str]] = set()
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        ctx_path = _resolve_build_context(svc_compose, compose_path)
+        if ctx_path is None or not ctx_path.exists() or not ctx_path.is_dir():
+            continue
+        candidates: list[Path] = []
+        for pattern in _CONFIG_GLOBS:
+            for p in ctx_path.glob(pattern):
+                if p in candidates:
+                    continue
+                candidates.append(p)
+                if len(candidates) >= _MAX_FILES_PER_CONTEXT:
+                    break
+            if len(candidates) >= _MAX_FILES_PER_CONTEXT:
+                break
+        for fpath in candidates:
+            try:
+                if fpath.stat().st_size > _MAX_FILE_BYTES:
+                    continue
+                content = fpath.read_text(errors="replace")
+            except OSError:
+                continue
+            for m in _RESOLVER_IP_RE.finditer(content):
+                found_ip = m.group(1)
+                if found_ip == expected_ip:
+                    continue
+                key = (str(fpath), found_ip)
+                if key in seen:
+                    continue
+                seen.add(key)
+                warnings.append(
+                    f"service {svc_name!r}: {fpath} has 'resolver "
+                    f"{found_ip}' but rc.yml.vpc_cidr = "
+                    f"{vpc_cidr or 'default'} → expected resolver IP "
+                    f"is {expected_ip}. Cloud Map lookups will fail "
+                    f"in this VPC. Re-run `rc fix nginx-conf` to "
+                    f"regenerate the conf with the right IP."
+                )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -724,4 +802,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_nginx_upstream_resolver(compose, compose_path, rc_v2_raw))
     out.extend(detect_django_allowed_hosts(compose, compose_path, rc_v2_raw))
     out.extend(detect_localhost_host_in_env_file(compose, compose_path))
+    out.extend(detect_stale_nginx_resolver_ip(compose, compose_path, rc_v2_raw))
     return out
