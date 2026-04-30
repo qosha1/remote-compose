@@ -802,6 +802,37 @@ def _human_bytes(n: int) -> str:
     return f"{n}B"
 
 
+def _load_dockerignore(ctx_path: Path) -> set[str]:
+    """Parse .dockerignore at ``ctx_path``/`.dockerignore` and return a
+    set of relative top-level paths to skip during the size walk.
+
+    Limited to the subset that's common in the wild: exact paths
+    (``backend/media``), simple top-level dir names (``data``), and
+    explicit segments (``backend/backend/media``). Glob patterns
+    (``**/__pycache__``, ``*.pyc``) are NOT honored — those are
+    ubiquitous-small and not worth the complexity. We just want to
+    avoid the giant-dir false-positives.
+    """
+    skip: set[str] = set()
+    df = ctx_path / ".dockerignore"
+    if not df.is_file():
+        return skip
+    try:
+        text = df.read_text(errors="replace")
+    except OSError:
+        return skip
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        # Drop trailing slash + glob suffixes for matching.
+        clean = line.rstrip("/").rstrip("*").rstrip("/")
+        if not clean or "*" in clean:
+            continue
+        skip.add(clean)
+    return skip
+
+
 def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
     """Sum file sizes under ``ctx_path``. Return (total, sorted top-level entries).
 
@@ -809,24 +840,42 @@ def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
     ``_MAX_ENTRIES_PER_SUBTREE`` files to bound the worst case. Returns the
     top-level entry sizes sorted descending so callers can quote the
     heaviest dirs in a warning.
+
+    Honors a ``.dockerignore`` at the context root (best-effort, exact
+    paths only — glob patterns are ignored). Without this, the walk
+    overcounts by including dirs that docker build would have skipped,
+    producing false-positive 'multi-GB context' blocks.
     """
     if not ctx_path.exists() or not ctx_path.is_dir():
         return 0, []
+    ignored = _load_dockerignore(ctx_path)
     sizes: dict[str, int] = {}
     try:
         entries = list(os.scandir(ctx_path))
     except OSError:
         return 0, []
     for entry in entries:
+        # Top-level skip: exact name match.
+        if entry.name in ignored:
+            continue
         try:
             if entry.is_file(follow_symlinks=False):
                 sizes[entry.name] = entry.stat().st_size
             elif entry.is_dir(follow_symlinks=False):
                 total = 0
                 count = 0
-                for root, _dirs, files in os.walk(
+                for root, dirs, files in os.walk(
                     entry.path, followlinks=False,
                 ):
+                    # Apply .dockerignore to nested paths too. Compute
+                    # the path relative to ctx_path and check membership.
+                    rel = os.path.relpath(root, ctx_path)
+                    # Prune ignored subdirs in-place so os.walk doesn't
+                    # descend into them.
+                    dirs[:] = [
+                        d for d in dirs
+                        if os.path.join(rel, d).replace(os.sep, "/") not in ignored
+                    ]
                     for f in files:
                         try:
                             total += os.lstat(os.path.join(root, f)).st_size
