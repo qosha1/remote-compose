@@ -872,13 +872,31 @@ class ECSProvider(Provider):
             allowed = set(services_filter)
             to_build = [s for s in to_build if s.name in allowed]
         if not to_build:
-            # rc-8q4: don't silently return — surface why the build phase
-            # produced nothing so the user knows whether tasks will pull
-            # pre-existing images or fail with CannotPullContainerError.
+            # rc-8q4 + rc-3kr: don't silently return — emit per-service
+            # diagnostic so the user can see WHY each service was
+            # excluded. start-simpli session reported "Deploy complete"
+            # in 39s with zero builds, even though compose had build:
+            # blocks; without a per-service breakdown the user couldn't
+            # see whether build_context was None for every service or
+            # whether a filter excluded everything.
             buildable = sum(1 for s in ctx.services.values() if s.build_context)
             if buildable == 0:
                 self._emit(
-                    "  No images to build (no services declare build context)."
+                    "  No images to build (no services declare build "
+                    "context). Per-service breakdown:"
+                )
+                for name, spec in sorted(ctx.services.items()):
+                    img = spec.image or "<no image>"
+                    self._emit(
+                        f"    {name}: build_context=None image={img!r} "
+                        f"(no compose build: stanza found, or rc.yml "
+                        f"references compose_file with no build:)"
+                    )
+                self._emit(
+                    "  If this is unexpected: check rc.yml.compose_file "
+                    "points at a compose YAML that has services.<svc>."
+                    "build:{context,dockerfile} for the service(s) you "
+                    "want rebuilt. See rc-3kr."
                 )
             else:
                 self._emit(
