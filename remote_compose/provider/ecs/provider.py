@@ -871,6 +871,13 @@ class ECSProvider(Provider):
         if services_filter is not None:
             allowed = set(services_filter)
             to_build = [s for s in to_build if s.name in allowed]
+        # rc-2v8 (extended): check build-context sizes BEFORE running
+        # docker build. Without this, a 6GB+ context goes straight to
+        # buildkit and the user only learns they should have written a
+        # .dockerignore after 15-30 min of "transferring context: 5.6GB".
+        # >5GB hard-errors unless RC_FORCE_LARGE_CONTEXT=1; >1GB warns.
+        if to_build:
+            self._preflight_build_context_sizes(to_build)
         if not to_build:
             # rc-8q4 + rc-3kr: don't silently return — emit per-service
             # diagnostic so the user can see WHY each service was
@@ -1055,6 +1062,67 @@ class ECSProvider(Provider):
             if "ImageAlreadyExistsException" in repr(exc):
                 return
             raise
+
+    def _preflight_build_context_sizes(self, to_build: list) -> None:
+        """rc-2v8: refuse to start docker build when the context is huge.
+
+        Sentinal repro: backend/ was 6.8GB (5.8GB Django uploaded media in
+        backend/backend/media). The first build hung 25+ min uploading
+        context to buildkit. This pre-flight uses the same size walker as
+        the plan-time warning to catch the problem BEFORE buildkit gets
+        the context. Errors (not warns) when the user is about to ship a
+        multi-GB image — escape hatch via RC_FORCE_LARGE_CONTEXT=1.
+
+        Honors a soft threshold (1GB → warn) and a hard threshold
+        (5GB → error) tunable via env:
+          RC_BUILD_CONTEXT_WARN_GB (default 1)
+          RC_BUILD_CONTEXT_BLOCK_GB (default 5)
+        """
+        import os as _os
+        try:
+            warn_gb = float(_os.environ.get("RC_BUILD_CONTEXT_WARN_GB", "1"))
+            block_gb = float(_os.environ.get("RC_BUILD_CONTEXT_BLOCK_GB", "5"))
+        except ValueError:
+            warn_gb, block_gb = 1.0, 5.0
+        warn_b = int(warn_gb * 1024 * 1024 * 1024)
+        block_b = int(block_gb * 1024 * 1024 * 1024)
+        force = _os.environ.get("RC_FORCE_LARGE_CONTEXT", "").lower() in {
+            "1", "true", "yes", "on",
+        }
+        from ...compose_warnings import _build_context_size, _human_bytes
+        seen: set[str] = set()
+        block_msgs: list[str] = []
+        for spec in to_build:
+            if not spec.build_context:
+                continue
+            ctx_path = Path(spec.build_context)
+            key = str(ctx_path.resolve()) if ctx_path.exists() else str(ctx_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            total, top_dirs = _build_context_size(ctx_path)
+            if total < warn_b:
+                continue
+            top_summary = ", ".join(
+                f"{name} ({_human_bytes(sz)})" for name, sz in top_dirs[:3]
+            )
+            line = (
+                f"build context for {spec.name!r} ({ctx_path}) is "
+                f"{_human_bytes(total)}. Heaviest: {top_summary}. "
+                f"Add to .dockerignore."
+            )
+            if total >= block_b and not force:
+                block_msgs.append(line)
+            else:
+                self._emit(f"  WARN: {line}")
+        if block_msgs:
+            joined = "\n    ".join(block_msgs)
+            raise ProviderConfigError(
+                f"rc-2v8: refusing to docker build with multi-GB context(s) — "
+                f"the upload to buildkit can hang for 25+ min on slow uplinks. "
+                f"Slim the context via .dockerignore (or set "
+                f"RC_FORCE_LARGE_CONTEXT=1 to bypass).\n    {joined}"
+            )
 
     def _emit(self, message: str) -> None:
         """Always-on output sink for reconcile + retry warnings (rc-e5u.46.9).

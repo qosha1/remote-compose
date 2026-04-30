@@ -757,6 +757,27 @@ def resolve_provider(v2: RcConfigV2) -> Provider:
             f"Known: install extras (pip install 'remote-compose[{v2.provider}]') "
             f"or check the spelling."
         )
+    # rc-60x: wire click.echo as the progress callback so heartbeats /
+    # 'still running' messages from long phases (terraform apply, build,
+    # secrets push, force-roll wait) actually reach the user. Without
+    # this the heartbeat thread silently no-ops because progress=None.
+    # Try the kwarg-aware constructor first (ECSProvider); fall back to
+    # cls() for providers like FakeProvider that take no init args.
+    import click as _click
+    import inspect as _inspect
+    _emit_progress = lambda m: _click.echo(m)
+    try:
+        sig = _inspect.signature(cls)
+        if "progress" in sig.parameters and "runner_factory" in sig.parameters:
+            from .terraform.runner import TerraformRunner as _TR
+            def _runner_factory_with_progress(out_dir):
+                return _TR(out_dir, progress=_emit_progress)
+            return cls(
+                progress=_emit_progress,
+                runner_factory=_runner_factory_with_progress,
+            )
+    except (ValueError, TypeError):
+        pass
     return cls()
 
 
