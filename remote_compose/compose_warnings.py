@@ -24,6 +24,7 @@ Beads:
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -784,6 +785,114 @@ def detect_stale_nginx_resolver_ip(
     return warnings
 
 
+# rc-2v8: thresholds for the build-context size warning.
+_LARGE_CONTEXT_WARN_BYTES = 1024 * 1024 * 1024  # 1 GiB
+_LARGE_CONTEXT_BLOCK_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
+# Cap per-subtree work so a pathological tree doesn't make rc plan slow.
+_MAX_ENTRIES_PER_SUBTREE = 100_000
+
+
+def _human_bytes(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f}GB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f}MB"
+    if n >= 1 << 10:
+        return f"{n / (1 << 10):.1f}KB"
+    return f"{n}B"
+
+
+def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
+    """Sum file sizes under ``ctx_path``. Return (total, sorted top-level entries).
+
+    Walks each top-level entry via os.walk capped at
+    ``_MAX_ENTRIES_PER_SUBTREE`` files to bound the worst case. Returns the
+    top-level entry sizes sorted descending so callers can quote the
+    heaviest dirs in a warning.
+    """
+    if not ctx_path.exists() or not ctx_path.is_dir():
+        return 0, []
+    sizes: dict[str, int] = {}
+    try:
+        entries = list(os.scandir(ctx_path))
+    except OSError:
+        return 0, []
+    for entry in entries:
+        try:
+            if entry.is_file(follow_symlinks=False):
+                sizes[entry.name] = entry.stat().st_size
+            elif entry.is_dir(follow_symlinks=False):
+                total = 0
+                count = 0
+                for root, _dirs, files in os.walk(
+                    entry.path, followlinks=False,
+                ):
+                    for f in files:
+                        try:
+                            total += os.lstat(os.path.join(root, f)).st_size
+                        except OSError:
+                            pass
+                        count += 1
+                        if count >= _MAX_ENTRIES_PER_SUBTREE:
+                            break
+                    if count >= _MAX_ENTRIES_PER_SUBTREE:
+                        break
+                sizes[entry.name] = total
+        except OSError:
+            continue
+    total = sum(sizes.values())
+    return total, sorted(sizes.items(), key=lambda kv: -kv[1])
+
+
+def detect_large_build_context(
+    compose: dict, compose_path: Path,
+) -> list[str]:
+    """rc-2v8: warn / error when a service's build context exceeds size
+    thresholds.
+
+    Sentinal repro: backend/ alone was 6.8GB (5.8GB of which was
+    backend/backend/media — Django uploaded media). The first build
+    hung 25+ min uploading the context to buildkit before adding
+    .dockerignore exclusions. Detecting + naming the heaviest dirs at
+    plan time saves that round-trip.
+
+    Returns a list of WARN-prefixed strings (>1GB context) and ERROR-
+    prefixed strings (>5GB). Callers decide how to render.
+    """
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    seen_contexts: set[str] = set()
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        ctx_path = _resolve_build_context(svc_compose, compose_path)
+        if ctx_path is None:
+            continue
+        # Dedupe: many services sometimes share the same context.
+        key = str(ctx_path.resolve()) if ctx_path.exists() else str(ctx_path)
+        if key in seen_contexts:
+            continue
+        seen_contexts.add(key)
+        total, top_dirs = _build_context_size(ctx_path)
+        if total < _LARGE_CONTEXT_WARN_BYTES:
+            continue
+        # Format the top 3 heaviest entries for the user.
+        top_summary = ", ".join(
+            f"{name} ({_human_bytes(sz)})" for name, sz in top_dirs[:3]
+        )
+        severity = "ERROR" if total >= _LARGE_CONTEXT_BLOCK_BYTES else "WARN"
+        warnings.append(
+            f"{severity}: service {svc_name!r}: build context "
+            f"{ctx_path} is {_human_bytes(total)}. Heaviest: "
+            f"{top_summary}. Add to .dockerignore to slim the upload "
+            f"to buildkit (the first build can hang for 30+ min on a "
+            f"multi-GB context)."
+        )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -803,4 +912,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_django_allowed_hosts(compose, compose_path, rc_v2_raw))
     out.extend(detect_localhost_host_in_env_file(compose, compose_path))
     out.extend(detect_stale_nginx_resolver_ip(compose, compose_path, rc_v2_raw))
+    out.extend(detect_large_build_context(compose, compose_path))
     return out

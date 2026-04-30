@@ -983,44 +983,56 @@ def run_auto_on_deploy_hooks_for_path(
                 f"{len(targets)} service(s) to reach steady state before "
                 f"running auto_on_deploy hooks..."
             )
-            while True:
-                try:
-                    desc = ecs_client.describe_services(
-                        cluster=cluster, services=targets,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    _click.echo(
-                        f"  WARN: describe_services failed: {exc!s}",
-                        err=True,
-                    )
-                    break
-                pending = []
-                for svc in desc.get("services", []) or []:
-                    deployments = svc.get("deployments") or []
-                    if len(deployments) != 1:
-                        pending.append(svc.get("serviceName"))
-                        continue
-                    dep = deployments[0]
-                    rollout = dep.get("rolloutState")
-                    # rolloutState may be None on classic ECS deployment
-                    # controllers — fall back to runningCount == desiredCount
-                    # in that case.
-                    if rollout is None:
-                        if dep.get("runningCount") != dep.get("desiredCount"):
+            # rc-60x: heartbeat fills the otherwise-silent 30-300s gap between
+            # this initial message and either success or timeout. Daemon
+            # thread; never blocks shutdown.
+            from .heartbeat import heartbeat as _heartbeat
+            _hb = _heartbeat(
+                lambda m: _click.echo(m, err=True),
+                f"waiting for {len(targets)} service(s) to reach steady state",
+            )
+            _hb.__enter__()
+            try:
+                while True:
+                    try:
+                        desc = ecs_client.describe_services(
+                            cluster=cluster, services=targets,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        _click.echo(
+                            f"  WARN: describe_services failed: {exc!s}",
+                            err=True,
+                        )
+                        break
+                    pending = []
+                    for svc in desc.get("services", []) or []:
+                        deployments = svc.get("deployments") or []
+                        if len(deployments) != 1:
                             pending.append(svc.get("serviceName"))
-                    elif rollout != "COMPLETED":
-                        pending.append(svc.get("serviceName"))
-                if not pending:
-                    break
-                if time.monotonic() > deadline:
-                    _click.echo(
-                        f"  WARN: services {pending} did not stabilize "
-                        f"within {wait_budget}s — running hooks anyway "
-                        f"(may hit old tasks).",
-                        err=True,
-                    )
-                    break
-                time.sleep(wait_interval)
+                            continue
+                        dep = deployments[0]
+                        rollout = dep.get("rolloutState")
+                        # rolloutState may be None on classic ECS deployment
+                        # controllers — fall back to runningCount == desiredCount
+                        # in that case.
+                        if rollout is None:
+                            if dep.get("runningCount") != dep.get("desiredCount"):
+                                pending.append(svc.get("serviceName"))
+                        elif rollout != "COMPLETED":
+                            pending.append(svc.get("serviceName"))
+                    if not pending:
+                        break
+                    if time.monotonic() > deadline:
+                        _click.echo(
+                            f"  WARN: services {pending} did not stabilize "
+                            f"within {wait_budget}s — running hooks anyway "
+                            f"(may hit old tasks).",
+                            err=True,
+                        )
+                        break
+                    time.sleep(wait_interval)
+            finally:
+                _hb.__exit__(None, None, None)
 
     _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
 

@@ -7,7 +7,12 @@ resource "aws_lb" "main" {
   subnets            = aws_subnet.public[*].id
 }
 resource "aws_lb_target_group" "default" {
-  name        = "${var.project}-tg"
+  # rc-0zx: name_prefix + create_before_destroy so adding a service.domain
+  # to an existing stack doesn't hit "Target group is currently in use by
+  # a listener" during the listener-default-action move. AWS auto-suffixes
+  # name_prefix with a unique 6-char id so two TGs can briefly coexist
+  # while the listener cuts over.
+  name_prefix = substr("${var.project}-", 0, 6)
   port        = 80
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -20,6 +25,10 @@ resource "aws_lb_target_group" "default" {
     unhealthy_threshold = 3
     interval            = 30
     timeout             = 5
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
