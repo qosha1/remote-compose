@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 
 from ._dispatchers import _db_push_v2
 from ._legacy import (
@@ -404,3 +405,130 @@ def db_list(ctx):
     if retention and len(objects) > retention:
         excess = len(objects) - retention
         click.echo(f"  Retention: {retention} (oldest {excess} could be pruned)")
+
+
+@db_group.command(name='psql')
+@click.option('--service', default=None,
+              help='Postgres service to exec into (default: backup.service from rc.yml)')
+@click.option('-c', '--command', 'sql_command', default=None,
+              help='Run a single SQL command and exit (psql -c). When omitted, '
+                   'opens an interactive psql shell.')
+@click.option('-d', '--database', 'db_name', default=None,
+              help='Database to connect to (default: $POSTGRES_DB from the '
+                   'service container env).')
+@click.pass_context
+def db_psql(ctx, service, sql_command, db_name):
+    """Open a psql shell against the deployed postgres (rc-878).
+
+    \b
+    Wraps `aws ecs execute-command` + psql with sane defaults:
+      - PAGER=cat + psql -P pager=off so output isn't mangled by less
+      - auto-discovers the postgres task in the cluster
+      - reads POSTGRES_USER / POSTGRES_DB / POSTGRES_PORT from the
+        container's task-def env so users don't have to remember
+        sentinal-style port quirks (5434 vs 5432)
+
+    \b
+    Examples:
+      rc db psql                              # interactive shell
+      rc db psql -c "SELECT count(*) FROM users_user"
+      rc db psql -d backend -c "\\dt"
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    rc_path = Path(config_path)
+    if not rc_path.exists():
+        raise click.ClickException(f"{rc_path} not found.")
+    rc_raw = yaml.safe_load(rc_path.read_text()) or {}
+    if rc_raw.get("version") != 2:
+        raise click.ClickException(
+            "rc db psql currently supports v2 rc.yml only."
+        )
+    ecs_cfg = (rc_raw.get("provider_config") or {}).get("ecs") or {}
+    cluster = ecs_cfg.get("cluster")
+    region = ecs_cfg.get("region")
+    aws_profile = ecs_cfg.get("aws_profile")
+    if not cluster or not region:
+        raise click.ClickException(
+            "rc db psql: rc.yml must declare provider_config.ecs.cluster + "
+            "provider_config.ecs.region."
+        )
+
+    service = (
+        service
+        or (rc_raw.get("backup") or {}).get("service")
+        or "postgres"
+    )
+
+    if aws_profile:
+        _os.environ.setdefault("AWS_PROFILE", aws_profile)
+    import boto3
+    sess = boto3.Session(profile_name=aws_profile, region_name=region)
+    ecs = sess.client("ecs")
+
+    # Find a running task for the service.
+    task_arns = ecs.list_tasks(
+        cluster=cluster, serviceName=service, desiredStatus="RUNNING",
+    ).get("taskArns") or []
+    if not task_arns:
+        raise click.ClickException(
+            f"rc db psql: no running task for service {service!r} in "
+            f"cluster {cluster!r}. Is the stack up?"
+        )
+    task_arn = task_arns[0]
+    task_id = task_arn.rsplit("/", 1)[-1]
+
+    # Read POSTGRES_PORT/USER/DB from the task def env so we don't have to
+    # ask the user for them. Falls back to defaults if not set.
+    desc = ecs.describe_task_definition(
+        taskDefinition=service if "/" not in task_arn else task_arn.split("/")[-2]
+    )
+    # Cleaner: read directly from the running task's task-def revision.
+    task_desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+    task_def_arn = task_desc["tasks"][0]["taskDefinitionArn"]
+    td = ecs.describe_task_definition(taskDefinition=task_def_arn)
+    container = td["taskDefinition"]["containerDefinitions"][0]
+    env_dict = {e["name"]: e["value"] for e in container.get("environment") or []}
+    pg_port = env_dict.get("POSTGRES_PORT", "5432")
+    pg_user = env_dict.get("POSTGRES_USER", "postgres")
+    pg_db = db_name or env_dict.get("POSTGRES_DB", "postgres")
+
+    # rc-878: PAGER=cat + psql -P pager=off so output captured via
+    # ecs-execute-command is clean (no less paging artifacts).
+    psql_inner = (
+        f"PAGER=cat psql -h localhost -p {pg_port} "
+        f"-U '{pg_user}' -d '{pg_db}' -P pager=off"
+    )
+    if sql_command:
+        # Single command + exit. shlex.quote to survive any user input.
+        import shlex as _shlex
+        psql_inner += f" -c {_shlex.quote(sql_command)}"
+
+    aws_cmd = [
+        "aws", "ecs", "execute-command",
+        "--cluster", cluster,
+        "--task", task_id,
+        "--container", service,
+        "--interactive",
+        "--command", psql_inner,
+        "--region", region,
+    ]
+    if aws_profile:
+        aws_cmd += ["--profile", aws_profile]
+
+    if sql_command:
+        # Non-interactive: capture + print stdout cleanly. Non-zero exit
+        # propagates so CI catches errors.
+        result = _subprocess.run(aws_cmd, capture_output=True, text=True)
+        if result.stdout:
+            click.echo(result.stdout, nl=False)
+        if result.stderr and result.returncode != 0:
+            click.echo(result.stderr, nl=False, err=True)
+        if result.returncode != 0:
+            raise click.exceptions.Exit(result.returncode)
+        return
+    # Interactive: replace the current process so the user gets a real TTY.
+    _os.execvp(aws_cmd[0], aws_cmd)
