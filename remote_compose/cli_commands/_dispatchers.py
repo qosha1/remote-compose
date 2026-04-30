@@ -274,14 +274,48 @@ def _db_push_v2(
             f"        warning: failed to delete S3 object: {exc}",
             err=True,
         )
+    # rc-xmz: pg_restore with --no-owner --clean --if-exists exits 0 even
+    # when individual table restores fail (FK ordering, missing role, etc.).
+    # Errors only appear in stderr as 'pg_restore: error:' lines. Without
+    # surfacing these, rc db push silently completes while the target DB
+    # is missing tables. Sentinal repro lost workflows_pagecapture this way.
+    pg_errors = _count_pg_restore_errors(result.stdout or "", result.stderr or "")
+    if pg_errors > 0:
+        click.echo(
+            f"\n  rc db push: WARNING — pg_restore reported {pg_errors} "
+            f"error(s) during restore. The target DB is likely missing "
+            f"tables/data. Look for 'pg_restore: error:' lines above; "
+            f"common cause is FK ordering (use --jobs=1 or restore "
+            f"schema-then-data separately).",
+            err=True,
+        )
     if result.exit_code != 0:
         click.echo(
             f"\n  rc db push: restore exited {result.exit_code}",
             err=True,
         )
         raise click.exceptions.Exit(result.exit_code)
+    if pg_errors > 0:
+        # Non-zero exit so callers / CI catch it.
+        raise click.exceptions.Exit(2)
     click.echo("\n  rc db push: complete.")
     return True
+
+
+def _count_pg_restore_errors(stdout: str, stderr: str) -> int:
+    """Count 'pg_restore: error:' lines across stdout+stderr.
+
+    rc-xmz: pg_restore exits 0 on partial-success runs (FK ordering, missing
+    object, role mismatch). Counting error lines is the only reliable signal
+    that some objects didn't restore. Excludes 'warning' lines which are
+    benign (already-handled by rc-ln1).
+    """
+    count = 0
+    for stream in (stdout, stderr):
+        for line in (stream or "").splitlines():
+            if "pg_restore: error" in line.lower():
+                count += 1
+    return count
 
 
 def _detect_dump_format(filename: str) -> str:

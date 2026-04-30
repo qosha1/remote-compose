@@ -96,17 +96,38 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
     if domain:
         from remote_compose.init_from_compose import _patch_rc_yml_domain
         from remote_compose.init_from_compose import _zone_from_domain_drop_leftmost
+        # rc-d7s: when rc.yml exists and declares provider_config.ecs.aws_profile,
+        # use it as the default for the Route 53 pre-flight. Without this, the
+        # pre-flight uses --aws-profile=None (no boto3 profile, may differ from
+        # the rc.yml-declared profile) and reports 'zone not found' even when
+        # the zone exists in the right profile. Same fallback for region.
+        effective_profile = aws_profile
+        effective_region = region
+        if target.exists():
+            try:
+                import yaml as _yaml
+                rc_raw = _yaml.safe_load(target.read_text()) or {}
+                if isinstance(rc_raw, dict):
+                    ecs_cfg = (
+                        (rc_raw.get("provider_config") or {}).get("ecs") or {}
+                    )
+                    effective_profile = effective_profile or ecs_cfg.get("aws_profile")
+                    effective_region = ecs_cfg.get("region") or effective_region
+            except Exception:
+                pass
         zone_check = route53_zone or _zone_from_domain_drop_leftmost(domain)
         try:
             import boto3
-            session = boto3.Session(profile_name=aws_profile, region_name=region)
+            session = boto3.Session(
+                profile_name=effective_profile, region_name=effective_region,
+            )
             r53 = session.client("route53")
             zones = r53.list_hosted_zones().get("HostedZones") or []
             zone_names = {z.get("Name", "").rstrip(".") for z in zones}
             if zone_check.rstrip(".") not in zone_names:
                 raise click.ClickException(
                     f"--domain pre-flight: Route 53 hosted zone "
-                    f"'{zone_check}' not found in profile {aws_profile!r}. "
+                    f"'{zone_check}' not found in profile {effective_profile!r}. "
                     f"Existing zones: {sorted(zone_names) or '(none)'}. "
                     f"Override with --route53-zone <zone-you-own>."
                 )

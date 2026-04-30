@@ -31,10 +31,32 @@ def spec(tmp_path):
 
 
 def _run(spec):
-    """Invoke the builder with subprocess mocked; return the captured argv."""
-    with mock.patch("subprocess.run") as run:
+    """Invoke the builder with subprocess mocked; return the captured argv.
+
+    rc-mtt: when cache_to is set, the builder routes through Popen + a
+    no-progress watchdog instead of subprocess.run. Mock both so tests
+    don't care which path the builder picks.
+    """
+    captured: dict = {}
+    def _fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        proc = mock.Mock()
+        proc.stdout = mock.Mock()
+        proc.stdout.readline.return_value = ""
+        proc.stdout.close = mock.Mock()
+        proc.stderr = mock.Mock()
+        proc.stderr.readline.return_value = ""
+        proc.stderr.close = mock.Mock()
+        proc.poll.return_value = 0
+        proc.wait.return_value = 0
+        proc.kill = mock.Mock()
+        return proc
+    with mock.patch("subprocess.run") as run, \
+         mock.patch("subprocess.Popen", side_effect=_fake_popen):
         run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         ImageBuilder(docker_bin="docker").build(spec)
+    if "cmd" in captured:
+        return captured["cmd"]
     return run.call_args.args[0]
 
 

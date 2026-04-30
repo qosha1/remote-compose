@@ -620,6 +620,92 @@ def detect_django_allowed_hosts(
 # ---------------------------------------------------------------------------
 
 
+_LOCALHOST_HOST_VALUES = {"localhost", "127.0.0.1", "host.docker.internal"}
+# rc-7qq: KEYs that name another compose service. Pattern: <SVC>_HOST,
+# DATABASE_HOST etc. We special-case the most common ones rather than
+# guessing from arbitrary key names.
+_HOST_KEY_PATTERN = re.compile(
+    r"^(?:[A-Z][A-Z0-9_]*_)?(?:HOST|HOSTNAME)$"
+)
+
+
+def detect_localhost_host_in_env_file(
+    compose: dict, compose_path: Path,
+) -> list[str]:
+    """rc-7qq: warn when a compose service's env_file declares
+    ``<SOMETHING>_HOST=localhost`` (or 127.0.0.1, host.docker.internal)
+    while ANOTHER compose service exists with a name matching the prefix.
+
+    Sentinal repro: .test/.postgres had POSTGRES_HOST=localhost. In
+    docker-compose-on-host that resolves to the postgres container via
+    host networking. In ECS each task has its own network namespace, so
+    localhost is the django task itself — django then fails to connect
+    on localhost:5434. The right value for ECS is ``postgres`` (the
+    Cloud Map service-discovery FQDN).
+
+    Heuristic: when we see ``<X>_HOST=localhost`` in an env_file AND a
+    compose service named ``<x>`` (lowercased prefix) exists, warn.
+    Avoids false positives on standalone uses of ``localhost`` for things
+    like ``REDIS_HOST=localhost`` when there's no redis service declared.
+    """
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    compose_dir = compose_path.parent if compose_path else Path.cwd()
+    service_names_lower = {str(n).lower() for n in services.keys()}
+    seen: set[tuple[str, str, str]] = set()
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        env_files = svc_compose.get("env_file")
+        if env_files is None:
+            continue
+        if isinstance(env_files, str):
+            env_files = [env_files]
+        for ref in env_files:
+            ref_path = Path(ref)
+            if not ref_path.is_absolute():
+                ref_path = (compose_dir / ref_path).resolve()
+            try:
+                if not ref_path.exists() or ref_path.stat().st_size > _MAX_FILE_BYTES:
+                    continue
+                text = ref_path.read_text(errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                if not _HOST_KEY_PATTERN.match(key):
+                    continue
+                if value not in _LOCALHOST_HOST_VALUES:
+                    continue
+                # Derive the prefix: POSTGRES_HOST → 'postgres'.
+                prefix = key.rsplit("_", 1)[0].lower() if "_" in key else key.lower()
+                if prefix == "host" or prefix == "hostname":
+                    # Bare HOST=localhost — too generic to flag.
+                    continue
+                if prefix not in service_names_lower:
+                    continue
+                seen_key = (svc_name, str(ref_path), key)
+                if seen_key in seen:
+                    continue
+                seen.add(seen_key)
+                warnings.append(
+                    f"service {svc_name!r}: {ref_path} declares "
+                    f"{key}={value} but compose service {prefix!r} exists. "
+                    f"In ECS, services are reachable by name via Cloud Map "
+                    f"DNS — set {key}={prefix} so {svc_name} can connect to "
+                    f"the {prefix} task. {value} would resolve to the "
+                    f"{svc_name} task itself."
+                )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -637,4 +723,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_multi_port_alb(compose, rc_v2_raw))
     out.extend(detect_nginx_upstream_resolver(compose, compose_path, rc_v2_raw))
     out.extend(detect_django_allowed_hosts(compose, compose_path, rc_v2_raw))
+    out.extend(detect_localhost_host_in_env_file(compose, compose_path))
     return out

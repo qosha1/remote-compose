@@ -266,11 +266,32 @@ class TestBuildcacheRepoWired:
                 "proxyEndpoint": "https://111.dkr.ecr.us-east-1.amazonaws.com",
             }],
         }
-        with mock.patch("subprocess.run") as sub_run:
+        # rc-mtt: with cache_to set, the builder routes through
+        # subprocess.Popen + a no-progress watchdog instead of
+        # subprocess.run. Mock both so we capture the command no matter
+        # which path the builder picks.
+        popen_cmds: list[list] = []
+
+        def _fake_popen(cmd, *args, **kwargs):
+            popen_cmds.append(cmd)
+            proc = mock.Mock()
+            proc.stdout = mock.Mock()
+            proc.stdout.readline.return_value = ""
+            proc.stdout.close = mock.Mock()
+            proc.stderr = mock.Mock()
+            proc.stderr.readline.return_value = ""
+            proc.stderr.close = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.kill = mock.Mock()
+            return proc
+
+        with mock.patch("subprocess.run") as sub_run, \
+             mock.patch("subprocess.Popen", side_effect=_fake_popen):
             sub_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             provider.deploy(ctx)
 
-        cmds = [c.args[0] for c in sub_run.call_args_list]
+        cmds = popen_cmds + [c.args[0] for c in sub_run.call_args_list]
 
         def _is_buildx(cmd):
             return (
