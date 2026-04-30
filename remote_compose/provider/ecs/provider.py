@@ -1684,6 +1684,17 @@ class ECSProvider(Provider):
         deadline = time.monotonic() + wait_budget
         task_arn: Optional[str] = None
         last_diag = "no running tasks"
+        # rc-uct: heartbeat the silent 5-min wait so users can tell exec
+        # progress vs stuck. The waiter polls every wait_interval (5s);
+        # heartbeat fires every RC_HEARTBEAT_INTERVAL_S (default 30s).
+        # Skipped when wait_budget=0 (test paths).
+        from ...heartbeat import heartbeat as _hb
+        _hb_ctx = _hb(
+            self.progress,
+            f"waiting for service {service!r} to be exec-ready",
+        ) if wait_budget > 0 else None
+        if _hb_ctx is not None:
+            _hb_ctx.__enter__()
         while True:
             tasks = ecs_client.list_tasks(
                 cluster=cluster, serviceName=service, desiredStatus="RUNNING"
@@ -1747,6 +1758,8 @@ class ECSProvider(Provider):
                     f"as not RUNNING"
                 )
             if time.monotonic() > deadline:
+                if _hb_ctx is not None:
+                    _hb_ctx.__exit__(None, None, None)
                 # When wait_budget=0 and there's never been any task, the
                 # diagnostic about "stuck on startup" misleads — the user
                 # never had a task, period. Use a clearer message in that
@@ -1770,17 +1783,30 @@ class ECSProvider(Provider):
                 continue
             time.sleep(wait_interval)
 
+        # Loop exited via `break` (got a task_arn) — close heartbeat.
+        if _hb_ctx is not None:
+            _hb_ctx.__exit__(None, None, None)
+
         env = _os.environ.copy()
         if profile:
             env["AWS_PROFILE"] = profile
 
+        # rc-uct: heartbeat the actual aws ecs execute-command call too.
+        # SSM session-manager-plugin can hang on a flaky network or
+        # broken in-container SSM agent; without this the user sees
+        # nothing until the 10-min timeout fires.
+        from ...heartbeat import heartbeat as _hb2
         if interactive:
-            return self._exec_interactive_tty(
-                cluster, task_arn, service, command, region, env,
+            with _hb2(
+                self.progress, f"executing in {service!r} (interactive)",
+            ):
+                return self._exec_interactive_tty(
+                    cluster, task_arn, service, command, region, env,
+                )
+        with _hb2(self.progress, f"executing in {service!r}"):
+            return self._exec_capture(
+                cluster, task_arn, service, command, region, env, timeout,
             )
-        return self._exec_capture(
-            cluster, task_arn, service, command, region, env, timeout,
-        )
 
     _SENTINEL_BEGIN = "__RC_EXEC_BEGIN__"
     _SENTINEL_END = "__RC_EXEC_END__"
