@@ -893,6 +893,97 @@ def detect_large_build_context(
     return warnings
 
 
+# rc-6jq: cap urls.py scanning so the detector stays cheap on plan.
+_MAX_URLS_PY_FILES = 20
+_MAX_URLS_PY_BYTES = 256 * 1024
+
+
+def detect_unmatched_health_check_path(
+    compose: dict,
+    compose_path: Path,
+    rc_v2_raw: Optional[dict] = None,
+) -> list[str]:
+    """rc-6jq: warn when rc.yml services.<svc>.health_check_path is set
+    but the literal path doesn't appear anywhere in the service's
+    Django build context (urls.py files in particular).
+
+    Discovered during start-simpli redeploy: rc.yml had
+    health_check_path: /api/health/ but the real endpoint was
+    /api/v1/health/. ALB health checks 404'd → tasks drained → deploy
+    stuck. Plan-time detection saves the round-trip.
+
+    Heuristic only — false positives possible (e.g. routes constructed
+    dynamically). Scans up to N urls.py files in the build context and
+    looks for the configured health_check_path as a literal substring.
+    Skips when health_check_path is the trivial '/' default.
+    """
+    warnings: list[str] = []
+    rc_raw = rc_v2_raw or {}
+    rc_services = (rc_raw.get("services") or {})
+    if not isinstance(rc_services, dict):
+        return warnings
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    seen: set[tuple[str, str]] = set()
+    for svc_name, svc_cfg in rc_services.items():
+        if not isinstance(svc_cfg, dict):
+            continue
+        hc = svc_cfg.get("health_check_path")
+        if not hc or hc in {"/", ""}:
+            continue
+        # Only check Django-shaped services — that's where this gotcha
+        # actually shows up. Rails/Phoenix conventions differ enough
+        # that the substring scan would miss legit cases.
+        svc_compose = services.get(svc_name) or {}
+        if not _looks_like_django_service(svc_compose, compose_path):
+            continue
+        ctx_path = _resolve_build_context(svc_compose, compose_path)
+        if ctx_path is None or not ctx_path.exists() or not ctx_path.is_dir():
+            continue
+        # Scan urls.py files (capped). Look for the literal path.
+        scanned = 0
+        found = False
+        sample_routes: list[str] = []
+        for urls_py in ctx_path.rglob("urls.py"):
+            if scanned >= _MAX_URLS_PY_FILES:
+                break
+            try:
+                if urls_py.stat().st_size > _MAX_URLS_PY_BYTES:
+                    continue
+                content = urls_py.read_text(errors="replace")
+            except OSError:
+                continue
+            scanned += 1
+            # Django path() routes don't include the leading '/', so try
+            # both forms. Also try without trailing slash for flexibility.
+            stripped = hc.lstrip("/")
+            candidates = (hc, hc.rstrip("/"), stripped, stripped.rstrip("/"))
+            if any(c and c in content for c in candidates):
+                found = True
+                break
+            # Collect a few sample routes for the warning.
+            for m in re.finditer(r"""path\s*\(\s*['"]([^'"]+)['"]""", content):
+                if len(sample_routes) < 5:
+                    sample_routes.append(m.group(1))
+        if not found and scanned > 0:
+            key = (svc_name, hc)
+            if key in seen:
+                continue
+            seen.add(key)
+            samples = (
+                f" Sample routes found: {sample_routes[:3]}."
+                if sample_routes else ""
+            )
+            warnings.append(
+                f"service {svc_name!r}: rc.yml health_check_path={hc!r} "
+                f"not found in any of {scanned} urls.py file(s) under "
+                f"{ctx_path}. ALB health checks may 404 → tasks drained "
+                f"→ deploy stuck.{samples}"
+            )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -913,4 +1004,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_localhost_host_in_env_file(compose, compose_path))
     out.extend(detect_stale_nginx_resolver_ip(compose, compose_path, rc_v2_raw))
     out.extend(detect_large_build_context(compose, compose_path))
+    out.extend(detect_unmatched_health_check_path(compose, compose_path, rc_v2_raw))
     return out

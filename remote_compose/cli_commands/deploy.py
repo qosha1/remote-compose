@@ -134,6 +134,31 @@ def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, d
         services_list = stale
     from remote_compose.cli_v2 import dispatch_if_v2
     from remote_compose.terraform.runner import TerraformError
+    # rc-j04: --dry-run on v2 stacks routes to `plan` instead of `deploy`,
+    # since v2 has no separate dry-run semantics for deploy. Without this,
+    # the flag was silently ignored and the user got a real apply (the bug
+    # filed as github.com/qosha1/remote-compose#2). Plan returns the same
+    # create/update/destroy summary `rc plan` shows so callers/CI use the
+    # same shape regardless of which command they typed.
+    if dry_run:
+        try:
+            handled = dispatch_if_v2(
+                ctx.obj.get('config_path'), 'plan',
+            )
+        except TerraformError as exc:
+            msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
+            if "state lock" in msg or "conditionalcheckfailedexception" in msg:
+                raise click.ClickException(
+                    "another rc deploy is already in flight (terraform state "
+                    "lock held). Wait for it to finish, then retry."
+                )
+            raise
+        if handled:
+            click.echo(
+                "\n  --dry-run: routed to `rc plan` (v2 stacks have no "
+                "separate dry-run for deploy). No changes were applied."
+            )
+            return
     try:
         handled = dispatch_if_v2(
             ctx.obj.get('config_path'), 'deploy',

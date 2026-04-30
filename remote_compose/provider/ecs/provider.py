@@ -1245,6 +1245,7 @@ class ECSProvider(Provider):
             if cluster_prefix.endswith(suffix):
                 cluster_prefix = cluster_prefix[: -len(suffix)]
                 break
+        rolled_names: list[str] = []
         for svc in ordered:
             candidates = [svc]
             if cluster_prefix and cluster_prefix != ctx.project:
@@ -1258,11 +1259,102 @@ class ECSProvider(Provider):
                         forceNewDeployment=True,
                     )
                     last_err = None
+                    rolled_names.append(name)
                     break
                 except Exception as exc:  # noqa: BLE001
                     last_err = exc
             if last_err is not None:
                 raise last_err
+
+        # rc-8zz: post-rollout watcher. Poll service events for 60s looking
+        # for IAM/secret/ECR resolution failures. ECS retries failed task
+        # placements every ~30s, so the first error usually shows up
+        # within 30-60s of force-roll. Without this, the user only learns
+        # about ResourceInitializationError when they manually inspect
+        # service events — sometimes hours later.
+        self._watch_post_rollout_errors(client, cluster, rolled_names)
+
+    def _watch_post_rollout_errors(
+        self, client: Any, cluster: str, services: list[str],
+    ) -> None:
+        """rc-8zz: poll ECS service events for ~60s after force-roll;
+        surface IAM/secret/ECR placement errors clearly + early.
+
+        Looks for the most common deploy-time gotchas:
+          - ResourceInitializationError (SM perms missing)
+          - unable to retrieve secret from asm
+          - CannotPullContainerError (ECR perms missing or image absent)
+
+        Honors RC_POST_ROLLOUT_WATCH_S env var (default 60) so tests +
+        operators can tune.
+        """
+        import os as _os
+        budget = int(_os.environ.get("RC_POST_ROLLOUT_WATCH_S", "60"))
+        if budget <= 0 or not services:
+            return
+        deadline = time.monotonic() + budget
+        seen_event_ids: set[str] = set()
+        # Capture pre-roll event IDs so we only flag NEW events.
+        try:
+            pre = client.describe_services(cluster=cluster, services=services)
+            for svc in pre.get("services") or []:
+                for ev in svc.get("events") or []:
+                    eid = ev.get("id")
+                    if eid:
+                        seen_event_ids.add(eid)
+        except Exception:  # noqa: BLE001
+            return
+        problem_patterns = (
+            "ResourceInitializationError",
+            "unable to retrieve secret",
+            "is not authorized to perform: secretsmanager",
+            "CannotPullContainerError",
+            "is not authorized to perform: ecr",
+            "Repository does not exist",
+        )
+        flagged: dict[str, str] = {}
+        while time.monotonic() < deadline:
+            try:
+                desc = client.describe_services(
+                    cluster=cluster, services=services,
+                )
+            except Exception:  # noqa: BLE001
+                return
+            for svc in desc.get("services") or []:
+                svc_name = svc.get("serviceName") or "?"
+                for ev in svc.get("events") or []:
+                    eid = ev.get("id")
+                    if not eid or eid in seen_event_ids:
+                        continue
+                    seen_event_ids.add(eid)
+                    msg = ev.get("message") or ""
+                    if any(p in msg for p in problem_patterns):
+                        flagged.setdefault(svc_name, msg)
+            if flagged:
+                break
+            # Check deadline BEFORE sleeping so a tight budget exits
+            # quickly. Sleep for the smaller of (5s, remaining budget)
+            # so we don't oversleep past the deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(5.0, remaining))
+        if flagged:
+            self._emit(
+                f"\n  WARN: post-rollout placement errors detected on "
+                f"{len(flagged)} service(s):"
+            )
+            for svc_name, msg in flagged.items():
+                self._emit(f"    {svc_name}: {msg.strip()[:300]}")
+            self._emit(
+                "  Common causes: (1) ecsTaskExecutionRole missing "
+                "secretsmanager:GetSecretValue on new auto-discovered "
+                "SM secrets — attach an inline policy granting it on "
+                "<project>/* ARNs; (2) ECR perms missing on the role; "
+                "(3) the image pushed isn't tagged the way the task "
+                "def expects. Old tasks may still serve traffic during "
+                "this window."
+            )
 
     def destroy(self, ctx: DeployContext) -> None:
         out_dir = self._tf_dir(ctx)

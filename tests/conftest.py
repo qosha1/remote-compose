@@ -12,6 +12,13 @@ def pytest_configure():
     """Configure Django settings for tests."""
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.settings')
     django.setup()
+    # rc-8zz: opt all tests out of the post-rollout ECS event watcher by
+    # default. The watcher polls describe_services for up to 60s after
+    # force-roll — fine in production, but every force-roll caller in
+    # the unit tests would otherwise wait on it. Tests that specifically
+    # exercise the watcher (test_post_rollout_watcher.py) override this
+    # via monkeypatch.setenv.
+    os.environ.setdefault("RC_POST_ROLLOUT_WATCH_S", "0")
 
 
 # ---------------------------------------------------------------------------
