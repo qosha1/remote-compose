@@ -1104,6 +1104,129 @@ def detect_dev_mode_command(compose: dict) -> list[str]:
     return warnings
 
 
+def detect_python_pyc_in_build_context(
+    compose: dict, compose_path: Path,
+) -> list[str]:
+    """rc-ife: warn when a Python service's build context contains
+    __pycache__ or .pyc files AND .dockerignore doesn't exclude them.
+
+    Sentinal repro 2026-04-27: user edited config/settings/local.py, ran
+    rc deploy --services django, rebuilt the image — but Django still
+    served OLD settings until the user manually cleared __pycache__
+    inside the container. Hypothesis: stale .pyc bytecode coexists with
+    the .py at COPY time, and Python prefers the .pyc when mtimes
+    match (Docker normalizes COPY mtimes).
+
+    Detection:
+      1. compose has a service whose Dockerfile or image name suggests
+         Python (heuristic: service uses a 'python' base image OR
+         compose service has 'python' / 'manage.py' / 'gunicorn' /
+         'uvicorn' / 'flask' / 'celery' in command).
+      2. The service's build context contains at least one __pycache__
+         dir or .pyc file (cheap glob).
+      3. The dockerignore at the build-context root doesn't have a
+         line matching __pycache__ or *.pyc.
+
+    Each match produces one warning. Real fix: add the patterns to
+    .dockerignore (or PYTHONDONTWRITEBYTECODE=1 in the image).
+    """
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    compose_dir = compose_path.parent
+
+    def _looks_python(svc_compose: dict) -> bool:
+        # Command field hint.
+        cmd = svc_compose.get("command")
+        cmd_str = ""
+        if isinstance(cmd, str):
+            cmd_str = cmd
+        elif isinstance(cmd, list):
+            cmd_str = " ".join(str(p) for p in cmd)
+        cmd_lower = cmd_str.lower()
+        if any(s in cmd_lower for s in (
+            "python", "manage.py", "gunicorn", "uvicorn", "flask ",
+            "celery ",
+        )):
+            return True
+        # Image name hint (e.g., 'python:3.11', 'tiangolo/uvicorn-...').
+        image = svc_compose.get("image") or ""
+        if isinstance(image, str) and (
+            image.startswith("python:") or "uvicorn" in image
+        ):
+            return True
+        return False
+
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        if not _looks_python(svc_compose):
+            continue
+        # Resolve build context.
+        build = svc_compose.get("build")
+        if build is None:
+            continue
+        if isinstance(build, str):
+            ctx_path = (compose_dir / build).resolve()
+        elif isinstance(build, dict):
+            ctx_path = (compose_dir / build.get("context", ".")).resolve()
+        else:
+            continue
+        if not ctx_path.is_dir():
+            continue
+        # Check for stale pyc/cache via shallow scan (depth-limited).
+        has_pyc = False
+        try:
+            for entry in os.walk(ctx_path):
+                root, dirs, files = entry
+                # Limit depth to avoid scanning the world.
+                rel = Path(root).relative_to(ctx_path)
+                if len(rel.parts) > 4:
+                    dirs[:] = []
+                    continue
+                if "__pycache__" in dirs:
+                    has_pyc = True
+                    break
+                if any(f.endswith(".pyc") for f in files):
+                    has_pyc = True
+                    break
+        except OSError:
+            continue
+        if not has_pyc:
+            continue
+        # Read .dockerignore (best-effort) and look for the patterns.
+        ignore_path = ctx_path / ".dockerignore"
+        ignore_lines: set[str] = set()
+        if ignore_path.is_file():
+            try:
+                for raw in ignore_path.read_text(errors="replace").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or line.startswith("!"):
+                        continue
+                    ignore_lines.add(line)
+            except OSError:
+                pass
+        ignored_pyc = any(
+            "__pycache__" in line for line in ignore_lines
+        )
+        ignored_pyc_ext = any(
+            line.endswith("*.pyc") or line == "*.pyc"
+            for line in ignore_lines
+        )
+        if ignored_pyc and ignored_pyc_ext:
+            continue
+        warnings.append(
+            f"service {svc_name!r}: Python build context "
+            f"{ctx_path} contains __pycache__/.pyc but .dockerignore "
+            f"does not exclude them. Stale bytecode can ship into the "
+            f"image and serve old code after a rebuild (rc-ife). Add "
+            f"these lines to .dockerignore: '**/__pycache__' and "
+            f"'**/*.pyc'."
+        )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -1126,4 +1249,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_large_build_context(compose, compose_path))
     out.extend(detect_unmatched_health_check_path(compose, compose_path, rc_v2_raw))
     out.extend(detect_dev_mode_command(compose))
+    out.extend(detect_python_pyc_in_build_context(compose, compose_path))
     return out
