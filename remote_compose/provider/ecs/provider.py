@@ -1813,21 +1813,37 @@ class ECSProvider(Provider):
         ) if wait_budget > 0 else None
         if _hb_ctx is not None:
             _hb_ctx.__enter__()
+        # rc-0ev: also fetch the service's CURRENT taskDefinitionArn so
+        # we can prefer tasks running under the latest revision. Without
+        # this, during a force-roll we can land on a draining old task
+        # whose enableExecuteCommand=false even though its agent is
+        # technically RUNNING. Best-effort: silent fall-through if the
+        # describe_services call fails (test mocks, transient AWS).
+        current_td_arn: Optional[str] = None
+        try:
+            svc_desc = ecs_client.describe_services(
+                cluster=cluster, services=[service],
+            )
+            services_list = svc_desc.get("services") or []
+            if services_list:
+                current_td_arn = services_list[0].get("taskDefinition")
+        except Exception:  # noqa: BLE001
+            current_td_arn = None
         while True:
             tasks = ecs_client.list_tasks(
                 cluster=cluster, serviceName=service, desiredStatus="RUNNING"
             ).get("taskArns") or []
             if tasks:
-                # Prefer a task whose ExecuteCommandAgent is RUNNING. ECS
-                # describe-tasks returns managedAgents per container.
-                # Fall through to the bare list_tasks ARN if describe_tasks
-                # is unhelpful (mocked test, network blip, missing perms,
-                # very fresh task that hasn't reported agents yet) — that
-                # matches pre-46.6 behavior. Only DEFER on the explicit
-                # "agent reported as not RUNNING" case which is the actual
-                # race we're guarding against.
+                # Prefer a task whose ExecuteCommandAgent is RUNNING AND
+                # whose enableExecuteCommand is True AND whose
+                # taskDefinitionArn matches the service's current
+                # revision (rc-0ev). Fall through to the first
+                # list_tasks ARN if describe_tasks is unhelpful (mocked
+                # test, network blip, missing perms, very fresh task
+                # that hasn't reported agents yet) — pre-46.6 behavior.
                 exec_blocked_tasks: set[str] = set()
                 preferred: Optional[str] = None
+                preferred_old_revision: Optional[str] = None
                 try:
                     desc = ecs_client.describe_tasks(cluster=cluster, tasks=tasks)
                     desc_tasks = desc.get("tasks") or []
@@ -1837,6 +1853,18 @@ class ECSProvider(Provider):
                     if not isinstance(t, dict):
                         continue
                     if t.get("lastStatus") != "RUNNING":
+                        continue
+                    # rc-0ev: skip tasks whose execute-command was disabled
+                    # at run-time. AWS returns this field literally as
+                    # `enableExecuteCommand` on the task. The old task in a
+                    # force-roll may have been launched before exec was
+                    # enabled on the task def → exec attempt would fail
+                    # with 'execute command was not enabled when the task
+                    # was run'. Default to True when the field is absent so
+                    # older mocks / older AWS API responses don't get
+                    # spuriously rejected.
+                    if t.get("enableExecuteCommand") is False:
+                        exec_blocked_tasks.add(t.get("taskArn") or "")
                         continue
                     agents_ready = True
                     seen_exec_agent = False
@@ -1857,10 +1885,26 @@ class ECSProvider(Provider):
                     if seen_exec_agent and not agents_ready:
                         exec_blocked_tasks.add(t.get("taskArn") or "")
                         continue
-                    preferred = t.get("taskArn")
-                    break
+                    # rc-0ev: prefer matching-revision tasks; remember
+                    # the old-revision exec-ready task as a fallback.
+                    arn = t.get("taskArn")
+                    if (
+                        current_td_arn
+                        and t.get("taskDefinitionArn") == current_td_arn
+                    ):
+                        preferred = arn
+                        break
+                    if preferred_old_revision is None:
+                        preferred_old_revision = arn
                 if preferred:
                     task_arn = preferred
+                    break
+                if preferred_old_revision:
+                    # All exec-ready tasks are on an older task def — use
+                    # one anyway, since waiting forever for the new
+                    # revision can stall lifecycle hooks if the new task
+                    # is taking a while to register its agent.
+                    task_arn = preferred_old_revision
                     break
                 # describe_tasks didn't give us an agent-ready candidate.
                 # If NO task we saw was explicitly blocked, fall through
@@ -1872,8 +1916,9 @@ class ECSProvider(Provider):
                     task_arn = fallback
                     break
                 last_diag = (
-                    f"{len(tasks)} task(s) running but exec agent reported "
-                    f"as not RUNNING"
+                    f"{len(tasks)} task(s) running but none have "
+                    f"enableExecuteCommand + ExecuteCommandAgent ready "
+                    f"(check `rc status` if the new revision is healthy)"
                 )
             if time.monotonic() > deadline:
                 if _hb_ctx is not None:

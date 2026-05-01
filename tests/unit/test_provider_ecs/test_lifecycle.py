@@ -338,3 +338,186 @@ class TestLogsAndExec:
         result = provider.exec(ctx, "web", ["ls"])
         assert result.exit_code == 1
         assert "no running tasks" in result.stderr
+
+
+class TestExecPicksCorrectTask:
+    """rc-0ev: during a force-roll, two RUNNING task sets co-exist
+    briefly. provider.exec must skip the OLD task whose
+    enableExecuteCommand is False and prefer the NEW task on the
+    current task definition revision. Without this filter we hit
+    'execute command was not enabled when the task was run'."""
+
+    def test_skips_task_with_enable_execute_command_false(
+        self, provider, mock_session, tmp_path,
+    ):
+        from unittest import mock as _mock
+        ecs = mock_session.client.return_value
+        old_arn = "arn:aws:ecs:...:task/old"
+        new_arn = "arn:aws:ecs:...:task/new"
+        ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
+        ecs.describe_services.return_value = {
+            "services": [{
+                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+            }],
+        }
+        ecs.describe_tasks.return_value = {
+            "tasks": [
+                {
+                    "taskArn": old_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": False,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "RUNNING",
+                        }],
+                    }],
+                },
+                {
+                    "taskArn": new_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": True,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "RUNNING",
+                        }],
+                    }],
+                },
+            ],
+        }
+        ctx = _ctx(tmp_path)
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(
+                returncode=0,
+                stdout=(
+                    b"__RC_EXEC_BEGIN__\nok\n__RC_EXEC_EXIT__=0\n__RC_EXEC_END__\n"
+                ),
+                stderr=b"",
+            )
+            provider.exec(ctx, "web", ["echo", "ok"])
+        cmd = run.call_args.args[0]
+        # Must pick the NEW task — not the old one with exec disabled.
+        assert new_arn in cmd
+        assert old_arn not in cmd
+
+    def test_prefers_current_revision_over_older_exec_ready_task(
+        self, provider, mock_session, tmp_path,
+    ):
+        from unittest import mock as _mock
+        ecs = mock_session.client.return_value
+        old_arn = "arn:aws:ecs:...:task/old"
+        new_arn = "arn:aws:ecs:...:task/new"
+        ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
+        ecs.describe_services.return_value = {
+            "services": [{
+                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+            }],
+        }
+        # Both tasks are exec-ready (enableExecuteCommand=True, agent
+        # RUNNING). Old is on rev 41; new is on rev 42 (current). With
+        # the rc-0ev fix, current-revision task wins even though both
+        # are technically exec-able.
+        ecs.describe_tasks.return_value = {
+            "tasks": [
+                {
+                    "taskArn": old_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": True,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "RUNNING",
+                        }],
+                    }],
+                },
+                {
+                    "taskArn": new_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": True,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "RUNNING",
+                        }],
+                    }],
+                },
+            ],
+        }
+        ctx = _ctx(tmp_path)
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(
+                returncode=0,
+                stdout=(
+                    b"__RC_EXEC_BEGIN__\nok\n__RC_EXEC_EXIT__=0\n__RC_EXEC_END__\n"
+                ),
+                stderr=b"",
+            )
+            provider.exec(ctx, "web", ["echo", "ok"])
+        cmd = run.call_args.args[0]
+        assert new_arn in cmd
+        assert old_arn not in cmd
+
+    def test_falls_back_to_old_revision_when_new_not_ready(
+        self, provider, mock_session, tmp_path,
+    ):
+        # Edge case: the current-revision task hasn't finished registering
+        # its ExecuteCommandAgent yet. The old-revision task IS ready.
+        # Rather than block lifecycle hooks indefinitely, exec falls
+        # back to the old-revision task (which IS exec-able).
+        from unittest import mock as _mock
+        ecs = mock_session.client.return_value
+        old_arn = "arn:aws:ecs:...:task/old-ready"
+        new_arn = "arn:aws:ecs:...:task/new-not-ready"
+        ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
+        ecs.describe_services.return_value = {
+            "services": [{
+                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+            }],
+        }
+        ecs.describe_tasks.return_value = {
+            "tasks": [
+                {
+                    "taskArn": old_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": True,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "RUNNING",
+                        }],
+                    }],
+                },
+                {
+                    "taskArn": new_arn,
+                    "lastStatus": "RUNNING",
+                    "enableExecuteCommand": True,
+                    "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
+                    "containers": [{
+                        "managedAgents": [{
+                            "name": "ExecuteCommandAgent",
+                            "lastStatus": "PENDING",  # Not ready yet
+                        }],
+                    }],
+                },
+            ],
+        }
+        ctx = _ctx(tmp_path)
+        with _mock.patch("subprocess.run") as run:
+            run.return_value = _mock.Mock(
+                returncode=0,
+                stdout=(
+                    b"__RC_EXEC_BEGIN__\nok\n__RC_EXEC_EXIT__=0\n__RC_EXEC_END__\n"
+                ),
+                stderr=b"",
+            )
+            provider.exec(ctx, "web", ["echo", "ok"])
+        cmd = run.call_args.args[0]
+        # Old-revision task is exec-able; pick it rather than waiting.
+        assert old_arn in cmd
+        assert new_arn not in cmd
