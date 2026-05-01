@@ -158,9 +158,31 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
 
     click.echo(f"\n  Pushed {total_keys} keys across {len(file_secrets)} secret(s).")
 
+    # rc-e5u.38: detect orphan keys — keys present in the SM blob (just
+    # uploaded) but NOT referenced by any task def's secrets[] entry.
+    # The container would never see those keys until the next rc deploy
+    # re-emits the task def. Warn loudly so the user knows to follow up.
+    cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
+    ecs = session.client("ecs")
+    orphan_keys = _detect_orphan_secret_keys_v2(
+        ecs, cluster, v2, file_secrets, project_dir,
+    )
+    if orphan_keys:
+        click.echo(
+            "\n  ! Orphan keys detected — these are in SM but no task "
+            "def's secrets[] references them, so containers won't see "
+            "them until the task defs are re-emitted:",
+            err=True,
+        )
+        for sm_name, missing in sorted(orphan_keys.items()):
+            click.echo(f"    {sm_name}: {sorted(missing)}", err=True)
+        click.echo(
+            "    → run `rc deploy --no-build` to re-emit the task defs "
+            "with these keys included.",
+            err=True,
+        )
+
     if rollout and file_secrets:
-        cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
-        ecs = session.client("ecs")
         services = sorted(v2.services.keys()) if v2.services else []
         if services:
             click.echo(f"\n  Forcing new deployment on {len(services)} service(s)...")
@@ -173,6 +195,104 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
                 except Exception as exc:
                     click.echo(f"    {svc_name}: rollout failed — {exc}", err=True)
     return True
+
+
+def _detect_orphan_secret_keys_v2(
+    ecs_client,
+    cluster: str,
+    v2,
+    file_secrets,
+    project_dir: Path,
+) -> dict[str, set[str]]:
+    """rc-e5u.38: return {sm_name: set_of_orphan_keys} for keys present in
+    the JUST-pushed SM blobs but not referenced by any current task def.
+
+    Returns {} silently on AWS errors (network, perms) — the orphan
+    diagnostic is best-effort, not a blocker. Always returns an empty
+    dict when v2.services is empty.
+    """
+    if not file_secrets or not v2.services:
+        return {}
+    from remote_compose.envfile import parse as parse_env, EnvFileError
+
+    referenced_by_task_defs: dict[str, set[str]] = {}
+    any_query_succeeded = False
+    for svc_name in sorted(v2.services.keys()):
+        try:
+            desc = ecs_client.describe_services(
+                cluster=cluster, services=[svc_name],
+            )
+            any_query_succeeded = True
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(desc, dict):
+            continue
+        services_resp = desc.get("services") or []
+        if not isinstance(services_resp, list) or not services_resp:
+            continue
+        first_svc = services_resp[0]
+        if not isinstance(first_svc, dict):
+            continue
+        td_arn = first_svc.get("taskDefinition")
+        if not td_arn or not isinstance(td_arn, str):
+            continue
+        try:
+            td = ecs_client.describe_task_definition(taskDefinition=td_arn)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(td, dict):
+            continue
+        td_inner = td.get("taskDefinition")
+        if not isinstance(td_inner, dict):
+            continue
+        for cd in td_inner.get("containerDefinitions") or []:
+            if not isinstance(cd, dict):
+                continue
+            for sec_entry in cd.get("secrets") or []:
+                if not isinstance(sec_entry, dict):
+                    continue
+                value_from = sec_entry.get("valueFrom") or ""
+                # Format: arn:...:<name>:<KEY>::
+                # Extract the SM name AND the key after the colon.
+                if ":" not in value_from:
+                    continue
+                # arn:aws:secretsmanager:region:acct:secret:<name>-suffix:<KEY>::
+                parts = value_from.rsplit(":", 3)
+                if len(parts) >= 3:
+                    secret_arn = parts[0]
+                    key = parts[1]
+                    sm_simple_name = secret_arn.split(":")[-1]
+                    referenced_by_task_defs.setdefault(
+                        sm_simple_name, set()
+                    ).add(key)
+
+    # If every describe_services failed, we can't tell what's orphaned.
+    # Skip the diagnostic rather than flagging every key as orphan (which
+    # would be a false alarm).
+    if not any_query_succeeded:
+        return {}
+
+    orphans: dict[str, set[str]] = {}
+    for sec in file_secrets:
+        env_path = Path(sec.path)
+        if not env_path.is_absolute():
+            env_path = (project_dir / env_path).resolve()
+        try:
+            body = parse_env(env_path)
+        except (EnvFileError, OSError):
+            continue
+        sm_simple = f"{v2.project}/{sec.name}"
+        # Match by simple-name suffix (the ARN includes a -<random> suffix).
+        referenced = set()
+        for full_name, keys in referenced_by_task_defs.items():
+            # full_name looks like "<project>/<secret>-RandomSuffix" or just
+            # "<project>/<secret>". Match by prefix.
+            if full_name == sm_simple or full_name.startswith(sm_simple + "-"):
+                referenced |= keys
+        missing = set(body.keys()) - referenced
+        if missing:
+            orphans[sm_simple] = missing
+    return orphans
 
 
 def _db_push_v2(
