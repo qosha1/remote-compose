@@ -1307,8 +1307,19 @@ class ECSProvider(Provider):
             )
             return
         except TerraformError as exc:
+            # rc-e5u.37.5: terraform's actual message is "is already
+            # managing a remote object" (verb form), not "already
+            # managed". The old substring missed this so subsequent
+            # deploys hit ResourceAlreadyExistsException on apply even
+            # though the resource WAS in state. Match the verb form
+            # plus the older "already exists in state" tf <0.12 wording.
             msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
-            if "already managed" in msg or "already exists in state" in msg:
+            already_managed_signals = (
+                "already managed",
+                "is already managing",
+                "already exists in state",
+            )
+            if any(s in msg for s in already_managed_signals):
                 return  # already imported on a prior deploy
             # Import failed. Fall through to the boto3-delete fallback
             # below — apply otherwise blows up with

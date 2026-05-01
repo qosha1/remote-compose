@@ -139,6 +139,40 @@ class TestOrphanLogGroupImport:
         # Should NOT raise.
         provider.deploy(_ctx(tmp_path, cluster="myapp-prod"))
 
+    def test_swallows_is_already_managing_variant(self, tmp_path):
+        """rc-e5u.37.5: terraform may emit 'is already managing' (verb form)
+        WITHOUT the 'already managed' phrase if the user's tf version
+        prints only the second sentence. Make sure that case is also
+        recognized as 'already in state'."""
+        sess = _logs_session([
+            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+        ])
+        holder: dict = {"runner": None}
+        provider = _provider(holder, sess)
+
+        class _VerbFormFailingRunner(RecordingTerraformRunner):
+            def import_resource(self, address, resource_id):
+                self.calls.append(
+                    type(self.calls[0])(args=["import", address, resource_id])
+                    if self.calls else None
+                )
+                raise TerraformError(
+                    cmd=["terraform", "import", address, resource_id],
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "Terraform is already managing a remote object for "
+                        "aws_cloudwatch_log_group.container_insights. To "
+                        "import to this address you must first remove the "
+                        "existing object from the state."
+                    ),
+                )
+
+        runner = _VerbFormFailingRunner(tmp_path / "terraform")
+        provider.runner_factory = lambda out_dir: runner
+        # Must NOT raise — already-in-state must be recognized via either phrase.
+        provider.deploy(_ctx(tmp_path, cluster="myapp-prod"))
+
     def test_boto3_failure_does_not_crash_deploy(self, tmp_path):
         """If boto3 raises (creds missing, region unreachable), continue
         with normal apply — the user gets the original error path if AWS

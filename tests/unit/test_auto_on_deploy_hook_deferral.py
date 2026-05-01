@@ -164,18 +164,25 @@ class TestRunAutoOnDeployHooksForPath:
         session.client.return_value = ecs_client
         provider.session_factory.return_value = session
 
+        # rc-e5u.36.6: wait moved INSIDE _run_auto_on_deploy_hooks. The
+        # outer helper now just delegates with wait_for_stable=True.
         with patch("remote_compose.cli_v2.resolve_provider", return_value=provider), \
              patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks:
             run_auto_on_deploy_hooks_for_path(rc_yml_with_migrate_hook)
 
-        ecs_client.describe_services.assert_called_once()
         run_hooks.assert_called_once()
+        # The wait is now part of _run_auto_on_deploy_hooks's contract,
+        # threaded via wait_for_stable=True.
+        kwargs = run_hooks.call_args.kwargs
+        assert kwargs.get("wait_for_stable", True) is True
 
     def test_proceeds_anyway_after_stability_timeout(
         self, rc_yml_with_migrate_hook, monkeypatch,
     ):
         """If services don't stabilize within budget, run hooks anyway
-        with a warning — better noisy than stuck."""
+        with a warning — better noisy than stuck. The wait now happens
+        inside _run_auto_on_deploy_hooks so this test exercises the
+        end-to-end path without patching out the inner function."""
         monkeypatch.setenv("RC_HOOK_WAIT_TIMEOUT_S", "1")
         monkeypatch.setenv("RC_HOOK_WAIT_INTERVAL_S", "0.1")
 
@@ -194,23 +201,27 @@ class TestRunAutoOnDeployHooksForPath:
         session = MagicMock()
         session.client.return_value = ecs_client
         provider.session_factory.return_value = session
+        provider.exec.return_value = MagicMock(exit_code=0, stdout="", stderr="")
 
-        with patch("remote_compose.cli_v2.resolve_provider", return_value=provider), \
-             patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks:
+        with patch("remote_compose.cli_v2.resolve_provider", return_value=provider):
             run_auto_on_deploy_hooks_for_path(rc_yml_with_migrate_hook)
 
-        # Hooks still ran despite the never-stabilizing service.
-        run_hooks.assert_called_once()
+        # Wait was attempted; the service never went COMPLETED so the
+        # wait timed out. Hook still fired (provider.exec called).
+        assert ecs_client.describe_services.called
+        provider.exec.assert_called()
 
     def test_skip_wait_for_stable_when_disabled(self, rc_yml_with_migrate_hook):
         """wait_for_stable=False bypasses the ECS describe-services poll.
         Used by tests; production callers (rc up) leave it True."""
         provider = MagicMock()
-        with patch("remote_compose.cli_v2.resolve_provider", return_value=provider), \
-             patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks:
+        provider.exec.return_value = MagicMock(exit_code=0, stdout="", stderr="")
+        with patch("remote_compose.cli_v2.resolve_provider", return_value=provider):
             run_auto_on_deploy_hooks_for_path(
                 rc_yml_with_migrate_hook, wait_for_stable=False,
             )
 
+        # Wait disabled → session_factory was never called for ECS describe.
         provider.session_factory.assert_not_called()
-        run_hooks.assert_called_once()
+        # But hooks DID run.
+        provider.exec.assert_called()

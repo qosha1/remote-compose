@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,11 @@ class TestScaffoldedRcYmlValidatesAsTerraform:
         rc_yml_path = tmp_path / "rc.yml"
         result = subprocess.run(
             [
-                "python3", "-m", "remote_compose.cli", "compose", "import",
+                # rc-4e5: sys.executable so the test uses the same
+                # interpreter pytest is running under (which has the
+                # project deps installed). 'python3' fails on systems
+                # where the system python3 lacks click/yaml.
+                sys.executable, "-m", "remote_compose.cli", "compose", "import",
                 "--from", str(compose_path),
                 "--out", str(rc_yml_path),
                 "--project", "itest",

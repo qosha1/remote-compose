@@ -943,8 +943,111 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
         )
 
 
+def _wait_for_services_stable(
+    provider,
+    ctx,
+    v2,
+    services_filter: Optional[list[str]] = None,
+) -> None:
+    """rc-e5u.36.6: poll describe-services until rolloutState=COMPLETED
+    on every targeted service, with timeout. Both rc up and rc deploy
+    paths use this before running auto_on_deploy hooks so the hook lands
+    on a task with the latest task definition (real env vars), not on
+    the still-rolling old task with placeholder secrets.
+
+    RC_HOOK_WAIT_TIMEOUT_S (default 300) caps the wait; on timeout we
+    warn + run hooks anyway (matches old behavior).
+    """
+    import os as _os
+    import click as _click
+    ecs_cfg = _ecs_cfg_for_v2(v2)
+    cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
+    targets = sorted(set(services_filter)) if services_filter else sorted(v2.services.keys())
+    if not targets:
+        return
+    try:
+        session = provider.session_factory(ctx)
+        ecs_client = session.client("ecs")
+    except Exception as exc:  # noqa: BLE001
+        _click.echo(
+            f"  WARN: skipping deployment-stability wait — could not "
+            f"contact ECS: {type(exc).__name__}: {exc}",
+            err=True,
+        )
+        return
+
+    wait_budget = int(_os.environ.get("RC_HOOK_WAIT_TIMEOUT_S", "300"))
+    wait_interval = float(_os.environ.get("RC_HOOK_WAIT_INTERVAL_S", "10"))
+    if wait_budget <= 0:
+        return
+    deadline = time.monotonic() + wait_budget
+    _click.echo(
+        f"  Waiting up to {wait_budget}s for {len(targets)} service(s) "
+        f"to reach steady state before running auto_on_deploy hooks..."
+    )
+    from .heartbeat import heartbeat as _heartbeat
+    _hb = _heartbeat(
+        lambda m: _click.echo(m, err=True),
+        f"waiting for {len(targets)} service(s) to reach steady state",
+    )
+    _hb.__enter__()
+    try:
+        while True:
+            try:
+                desc = ecs_client.describe_services(
+                    cluster=cluster, services=targets,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _click.echo(
+                    f"  WARN: describe_services failed: {exc!s}",
+                    err=True,
+                )
+                return
+            # Defensive: if a test mock returns a non-dict, skip the wait
+            # rather than crash. Real boto3 always returns a dict here.
+            if not isinstance(desc, dict):
+                return
+            services_resp = desc.get("services", []) or []
+            if not isinstance(services_resp, list):
+                return
+            pending = []
+            for svc in services_resp:
+                if not isinstance(svc, dict):
+                    continue
+                deployments = svc.get("deployments") or []
+                if len(deployments) != 1:
+                    pending.append(svc.get("serviceName"))
+                    continue
+                dep = deployments[0]
+                rollout = dep.get("rolloutState")
+                if rollout is None:
+                    if dep.get("runningCount") != dep.get("desiredCount"):
+                        pending.append(svc.get("serviceName"))
+                elif rollout != "COMPLETED":
+                    pending.append(svc.get("serviceName"))
+            if not pending:
+                return
+            if time.monotonic() > deadline:
+                _click.echo(
+                    f"  WARN: services {pending} did not stabilize "
+                    f"within {wait_budget}s — running hooks anyway "
+                    f"(may hit old tasks).",
+                    err=True,
+                )
+                return
+            time.sleep(wait_interval)
+    finally:
+        _hb.__exit__(None, None, None)
+
+
+def _ecs_cfg_for_v2(v2) -> dict:
+    cfg = (v2.provider_config or {}).get("ecs") or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _run_auto_on_deploy_hooks(
     provider, ctx, v2, services_filter: Optional[list[str]] = None,
+    wait_for_stable: bool = True,
 ) -> None:
     """Run every services[*].lifecycle.<hook> with auto_on_deploy=true,
     in declaration order. Honors run_once via probe. Hook failures are
@@ -954,6 +1057,10 @@ def _run_auto_on_deploy_hooks(
     When ``services_filter`` is set, only hooks on those services run —
     matches the deploy filter (e.g. ``rc deploy --services django`` only
     triggers django.migrate, not nginx.reload).
+
+    rc-e5u.36.6: ``wait_for_stable`` (default True) polls
+    describe-services rolloutState=COMPLETED before firing any hook so
+    the hook lands on the new task def rather than the old draining one.
     """
     import click as _click
     allowed = set(services_filter) if services_filter else None
@@ -966,6 +1073,11 @@ def _run_auto_on_deploy_hooks(
                 hooks.append((svc_name, hook_name, hook))
     if not hooks:
         return
+    if wait_for_stable:
+        _wait_for_services_stable(
+            provider, ctx, v2,
+            services_filter=services_filter,
+        )
     _click.echo("\n  Running auto_on_deploy lifecycle hooks:")
     for svc_name, hook_name, hook in hooks:
         if hook.run_once and hook.probe:
@@ -1034,81 +1146,14 @@ def run_auto_on_deploy_hooks_for_path(
     ctx = build_deploy_context(v2, raw, p)
     provider = resolve_provider(v2)
 
-    if wait_for_stable:
-        ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
-        cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
-        targets = sorted(set(services_filter)) if services_filter else sorted(v2.services.keys())
-        try:
-            session = provider.session_factory(ctx)
-            ecs_client = session.client("ecs")
-        except Exception as exc:  # noqa: BLE001
-            _click.echo(
-                f"  WARN: skipping deployment-stability wait — could not "
-                f"contact ECS: {type(exc).__name__}: {exc}",
-                err=True,
-            )
-        else:
-            import os as _os
-            wait_budget = int(_os.environ.get("RC_HOOK_WAIT_TIMEOUT_S", "300"))
-            wait_interval = float(_os.environ.get("RC_HOOK_WAIT_INTERVAL_S", "10"))
-            deadline = time.monotonic() + wait_budget
-            _click.echo(
-                f"  Waiting up to {wait_budget}s for "
-                f"{len(targets)} service(s) to reach steady state before "
-                f"running auto_on_deploy hooks..."
-            )
-            # rc-60x: heartbeat fills the otherwise-silent 30-300s gap between
-            # this initial message and either success or timeout. Daemon
-            # thread; never blocks shutdown.
-            from .heartbeat import heartbeat as _heartbeat
-            _hb = _heartbeat(
-                lambda m: _click.echo(m, err=True),
-                f"waiting for {len(targets)} service(s) to reach steady state",
-            )
-            _hb.__enter__()
-            try:
-                while True:
-                    try:
-                        desc = ecs_client.describe_services(
-                            cluster=cluster, services=targets,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        _click.echo(
-                            f"  WARN: describe_services failed: {exc!s}",
-                            err=True,
-                        )
-                        break
-                    pending = []
-                    for svc in desc.get("services", []) or []:
-                        deployments = svc.get("deployments") or []
-                        if len(deployments) != 1:
-                            pending.append(svc.get("serviceName"))
-                            continue
-                        dep = deployments[0]
-                        rollout = dep.get("rolloutState")
-                        # rolloutState may be None on classic ECS deployment
-                        # controllers — fall back to runningCount == desiredCount
-                        # in that case.
-                        if rollout is None:
-                            if dep.get("runningCount") != dep.get("desiredCount"):
-                                pending.append(svc.get("serviceName"))
-                        elif rollout != "COMPLETED":
-                            pending.append(svc.get("serviceName"))
-                    if not pending:
-                        break
-                    if time.monotonic() > deadline:
-                        _click.echo(
-                            f"  WARN: services {pending} did not stabilize "
-                            f"within {wait_budget}s — running hooks anyway "
-                            f"(may hit old tasks).",
-                            err=True,
-                        )
-                        break
-                    time.sleep(wait_interval)
-            finally:
-                _hb.__exit__(None, None, None)
-
-    _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
+    # rc-e5u.36.6: wait+run is now folded into _run_auto_on_deploy_hooks.
+    # The wait_for_stable knob still threads through so callers that
+    # want to skip the wait (e.g. tests) can opt out.
+    _run_auto_on_deploy_hooks(
+        provider, ctx, v2,
+        services_filter=services_filter,
+        wait_for_stable=wait_for_stable,
+    )
 
 
 def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bool:
