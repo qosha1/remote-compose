@@ -33,15 +33,41 @@ def load_rc_yml(path: str | Path) -> tuple[int, dict, RcConfigV2 | None]:
 
     version is 1 for legacy, 2 for v2. Only v2 gets parsed into a typed
     RcConfigV2 (v1 stays as a dict for the legacy code to chew on).
+
+    rc-8y6: YAML parse errors and v2 schema errors both get the rc.yml
+    path prepended so users see *which* file is broken (not just
+    'YAMLError' / 'ConfigError' with no location). YAMLError's
+    problem_mark line+column is included verbatim.
     """
+    from .config._schema_types import ConfigError as _ConfigError
     path = Path(path)
-    with path.open() as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with path.open() as f:
+            raw = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        # Surface line + column when ruamel/PyYAML expose them.
+        loc = ""
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            loc = f" (line {mark.line + 1}, column {mark.column + 1})"
+        raise _ConfigError(
+            f"rc.yml at {path}{loc}: YAML syntax error — {exc}"
+        ) from exc
+    except OSError as exc:
+        raise _ConfigError(f"rc.yml at {path}: cannot read — {exc}") from exc
     if not isinstance(raw, dict):
-        raise ValueError(f"rc.yml must be a mapping, got {type(raw).__name__}")
+        raise _ConfigError(
+            f"rc.yml at {path}: must be a mapping, got "
+            f"{type(raw).__name__}"
+        )
     version = int(raw.get("version", 1))
     if version == 2:
-        return version, raw, parse_v2(raw)
+        try:
+            return version, raw, parse_v2(raw)
+        except _ConfigError as exc:
+            # Re-raise with the file path prepended. preserve the original
+            # message after a colon so existing error-parsing keeps working.
+            raise _ConfigError(f"rc.yml at {path}: {exc}") from exc
     return version, raw, None
 
 
@@ -983,7 +1009,14 @@ def run_auto_on_deploy_hooks_for_path(
         return
     try:
         version, raw, v2 = load_rc_yml(p)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # rc-x19: don't silently skip the lifecycle-hook wait when rc.yml
+        # is malformed — at least tell the user we're skipping it.
+        _click.echo(
+            f"  WARN: rc.yml parse failed during deployment-stability "
+            f"check ({exc!s}); auto_on_deploy hooks will not run.",
+            err=True,
+        )
         return
     if version != 2 or v2 is None:
         return

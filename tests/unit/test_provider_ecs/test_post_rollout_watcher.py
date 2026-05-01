@@ -198,6 +198,53 @@ class TestPostRolloutWatcher:
         joined = "\n".join(events)
         assert "flap" not in joined.lower()
 
+    def test_aws_error_at_baseline_warns_not_silent(self, tmp_path, monkeypatch):
+        """rc-x19: previously, an AWS error during pre-roll baseline
+        silently disabled the watcher (silent return). Now we emit a
+        warning so the user knows post-rollout diagnostics won't run."""
+        monkeypatch.setenv("RC_POST_ROLLOUT_WATCH_S", "2")
+        events: list[str] = []
+        client = mock.MagicMock()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("throttled")
+
+        client.describe_services.side_effect = boom
+        provider = ECSProvider(
+            session_factory=lambda c: mock.Mock(client=lambda *_a, **_kw: client),
+            progress=events.append,
+        )
+        provider._force_new_deployments(_ctx(tmp_path), ["django"])
+        joined = "\n".join(events)
+        assert "post-rollout watcher disabled" in joined
+        assert "throttled" in joined
+
+    def test_aws_error_mid_watch_warns_not_silent(self, tmp_path, monkeypatch):
+        """rc-x19: same for transient errors mid-watch loop. Don't go
+        silent — explain why the watch ended early."""
+        monkeypatch.setenv("RC_POST_ROLLOUT_WATCH_S", "5")
+        events: list[str] = []
+        client = mock.MagicMock()
+        call_count = {"n": 0}
+
+        def fake_describe(cluster, services):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Baseline succeeds.
+                return {"services": [{"serviceName": services[0], "events": []}]}
+            # Subsequent polls fail.
+            raise RuntimeError("network blip")
+
+        client.describe_services.side_effect = fake_describe
+        provider = ECSProvider(
+            session_factory=lambda c: mock.Mock(client=lambda *_a, **_kw: client),
+            progress=events.append,
+        )
+        provider._force_new_deployments(_ctx(tmp_path), ["django"])
+        joined = "\n".join(events)
+        assert "describe_services failed mid-poll" in joined
+        assert "network blip" in joined
+
     def test_pre_existing_errors_not_re_surfaced(self, tmp_path, monkeypatch):
         # An IAM error event from a previous deploy that's still in the
         # service-events log shouldn't trigger the watcher.

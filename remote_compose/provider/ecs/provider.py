@@ -113,11 +113,40 @@ def _default_session_factory(ctx: DeployContext) -> Any:
     Imported lazily so core + FakeProvider never drag boto3 in.
     """
     import boto3  # noqa: WPS433 (intentional local import)
-    ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+    ecs_cfg = _ecs_cfg(ctx)
     return boto3.Session(
         region_name=ecs_cfg.get("region"),
         profile_name=ecs_cfg.get("aws_profile"),
     )
+
+
+def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, Any]:
+    """rc-tuc: centralized accessor for ctx.provider_config.ecs.
+
+    Replaces the bespoke '(ctx.provider_config or {}).get("ecs") or {}'
+    chain that's repeated ~8 times in this module. When ``require`` is
+    given, raises ProviderConfigError with the missing key name — turns
+    a downstream TypeError ('NoneType has no attribute ...') into a
+    callable, named failure at the point of use.
+    """
+    cfg = ctx.provider_config
+    if cfg is not None and not isinstance(cfg, dict):
+        raise ProviderConfigError(
+            f"provider_config must be a dict, got {type(cfg).__name__}"
+        )
+    cfg = cfg or {}
+    ecs = cfg.get("ecs")
+    if ecs is not None and not isinstance(ecs, dict):
+        raise ProviderConfigError(
+            f"provider_config.ecs must be a dict, got {type(ecs).__name__}"
+        )
+    ecs = ecs or {}
+    for key in require:
+        if not ecs.get(key):
+            raise ProviderConfigError(
+                f"provider_config.ecs.{key} is required"
+            )
+    return ecs
 
 
 class ECSProvider(Provider):
@@ -143,7 +172,7 @@ class ECSProvider(Provider):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         region = ecs_cfg.get("region")
         if not region:
             raise ProviderConfigError(
@@ -790,7 +819,7 @@ class ECSProvider(Provider):
 
         # Synthesize a terraform-outputs-shaped dict so _build_and_push_images
         # can be reused unchanged. Keys: repo URL keyed by service name.
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         region = ecs_cfg.get("region")
         session = self.session_factory(ctx)
         ecr = session.client("ecr", region_name=region)
@@ -1237,7 +1266,7 @@ class ECSProvider(Provider):
         ResourceAlreadyExistsException with no breadcrumb pointing at the
         cause.
         """
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         log_group_name = (
             f"/aws/ecs/containerinsights/{cluster_name}/performance"
@@ -1341,7 +1370,7 @@ class ECSProvider(Provider):
         infrastructure first; default ECS deploymentConfiguration (min=100,
         max=200) handles the rest of the convergence naturally.
         """
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)
         client = session.client("ecs")
@@ -1419,7 +1448,14 @@ class ECSProvider(Provider):
                     eid = ev.get("id")
                     if eid:
                         seen_event_ids.add(eid)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # rc-x19: silently disabling the watcher on transient AWS
+            # errors hides whether the user got post-rollout diagnostics
+            # or not. Emit a warning so they know.
+            self._emit(
+                f"  WARN: post-rollout watcher disabled — could not "
+                f"baseline service events ({exc!s})."
+            )
             return
         problem_patterns = (
             "ResourceInitializationError",
@@ -1444,7 +1480,13 @@ class ECSProvider(Provider):
                 desc = client.describe_services(
                     cluster=cluster, services=services,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # rc-x19: same as above — warn rather than silently abort
+                # the watch loop mid-budget.
+                self._emit(
+                    f"  WARN: post-rollout watcher aborted — "
+                    f"describe_services failed mid-poll ({exc!s})."
+                )
                 return
             for svc in desc.get("services") or []:
                 svc_name = svc.get("serviceName") or "?"
@@ -1532,7 +1574,7 @@ class ECSProvider(Provider):
         Terraform state is untouched.
         """
         start = time.monotonic()
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         targets = services or sorted(ctx.services.keys())
 
@@ -1556,7 +1598,7 @@ class ECSProvider(Provider):
     # -----------------------------------------------------------------
 
     def status(self, ctx: DeployContext) -> StatusReport:
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)
         client = session.client("ecs")
@@ -1640,8 +1682,13 @@ class ECSProvider(Provider):
                 alb_dns = (outputs.get("alb_dns_name") or {}).get("value")
                 if alb_dns:
                     ingress_url = f"http://{alb_dns}"
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # rc-x19: don't silently swallow. Status report still
+                # works without ingress_url; just tell the caller why.
+                self._emit(
+                    f"  WARN: could not read ALB DNS from terraform "
+                    f"outputs ({exc!s}). Status report omits ingress_url."
+                )
         return StatusReport(
             services=statuses,
             cluster_health=cluster_health,
@@ -1733,7 +1780,7 @@ class ECSProvider(Provider):
         import shlex
         import subprocess
 
-        ecs_cfg = (ctx.provider_config or {}).get("ecs") or {}
+        ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         region = ecs_cfg.get("region")
         profile = ecs_cfg.get("aws_profile")
