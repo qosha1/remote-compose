@@ -133,3 +133,10 @@ dmypy.json
 
 # Dolt database files (added by bd init)
 .dolt/
+
+# rc-2kp: rc fix * subcommand sentinel (consumed + deleted by next rc up).
+# Per-project transient state, never committed.
+.rc/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key

@@ -250,6 +250,10 @@ resource "aws_ecs_service" "web" {
   service_registries {
     registry_arn = aws_service_discovery_service.web.arn
   }
+  # rc-05q: AWS default is 0s, which kills tasks before slow-booting
+  # services (Django migrate + collectstatic + uvicorn) can bind. 60s
+  # base; 180s when an auto_on_deploy lifecycle hook is declared.
+  health_check_grace_period_seconds = 60
   load_balancer {
     target_group_arn = aws_lb_target_group.default.arn
     container_name   = "web"

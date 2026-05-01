@@ -1033,6 +1033,77 @@ def detect_unmatched_health_check_path(
     return warnings
 
 
+# Dev-mode command signatures. Each entry is (regex, human description)
+# matched case-insensitively against the joined command string. Order
+# matters only in the message we surface — the first match wins per
+# service.
+_DEV_MODE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\buvicorn\b.*--reload\b", "uvicorn --reload (WatchFiles flakes on ECS, ALB sees connection refused during reloads)"),
+    (r"\bgunicorn\b.*--reload\b", "gunicorn --reload (worker-recycling on file change is unstable for ECS)"),
+    (r"\bmanage\.py\s+runserver\b", "Django runserver (single-threaded dev server, not for production)"),
+    (r"\bflask\s+run\b.*--debug\b", "flask run --debug (Werkzeug dev server, single-threaded)"),
+    (r"\bflask\s+run\b(?!.*--no-debug)", "flask run (default --debug=on enables Werkzeug dev server)"),
+    (r"\bnpm\s+run\s+dev\b", "npm run dev (Node dev server, hot-reload)"),
+    (r"\byarn\s+dev\b", "yarn dev (Node dev server, hot-reload)"),
+    (r"\bnext\s+dev\b", "next dev (Next.js dev server)"),
+    (r"\bwebpack-dev-server\b", "webpack-dev-server"),
+    (r"\brails\s+s(?:erver)?\b(?!.*-e\s+production)", "rails server without -e production"),
+)
+
+
+def _command_to_string(command) -> str:
+    """Normalize compose ``command:`` value (string or list) to a single
+    space-joined string for regex scanning. Returns empty string when no
+    command is set."""
+    if command is None:
+        return ""
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(str(p) for p in command)
+    return ""
+
+
+def detect_dev_mode_command(compose: dict) -> list[str]:
+    """rc-6au: warn when a compose service's ``command:`` is a dev-mode
+    runner.
+
+    Dev-mode runners are unstable on ECS for two reasons:
+      1. File watchers (WatchFiles, webpack-dev-server) can flake or
+         briefly stop accepting connections during reload, causing ALB
+         health checks to fail.
+      2. Many dev servers are single-threaded and don't tolerate the
+         load any real ALB throws at them.
+
+    This detector is best-effort. It only sees the compose ``command:``
+    field — a service whose Dockerfile CMD or entrypoint script is the
+    actual dev runner won't be caught here. That deeper detection
+    requires inspecting the built image and is tracked separately.
+    """
+    import re
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        cmd_str = _command_to_string(svc_compose.get("command"))
+        if not cmd_str:
+            continue
+        for pattern, description in _DEV_MODE_PATTERNS:
+            if re.search(pattern, cmd_str, flags=re.IGNORECASE):
+                warnings.append(
+                    f"service {svc_name!r}: command appears to be a dev-mode "
+                    f"runner ({description}). This is unstable for ECS — "
+                    f"consider gating with an env var (e.g. UVICORN_RELOAD=0) "
+                    f"or pointing at a prod start script. Command was: "
+                    f"{cmd_str!r}"
+                )
+                break
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -1054,4 +1125,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_stale_nginx_resolver_ip(compose, compose_path, rc_v2_raw))
     out.extend(detect_large_build_context(compose, compose_path))
     out.extend(detect_unmatched_health_check_path(compose, compose_path, rc_v2_raw))
+    out.extend(detect_dev_mode_command(compose))
     return out

@@ -133,6 +133,71 @@ class TestPostRolloutWatcher:
         joined = "\n".join(events)
         assert "post-rollout placement errors" not in joined
 
+    def test_flap_loop_detected_health_checks_failed(self, tmp_path, monkeypatch):
+        """rc-8vb: a service whose new tasks fail ALB health checks
+        immediately (3+ unhealthy events in watch window) is flapping —
+        usually because grace period is too short OR the app crashes
+        on startup. Surface a flap diagnosis distinct from the
+        IAM/secret/ECR placement-error message."""
+        monkeypatch.setenv("RC_POST_ROLLOUT_WATCH_S", "3")
+        events: list[str] = []
+        client = _setup_client(
+            pre_events=[],
+            post_events=[
+                {"id": "ev-1", "message": (
+                    "(service django) (task abc) (port 8000) is unhealthy in "
+                    "(target-group arn:aws:...) due to (reason Health checks failed)."
+                )},
+                {"id": "ev-2", "message": (
+                    "(service django) has stopped 1 running tasks: (task abc)."
+                )},
+                {"id": "ev-3", "message": (
+                    "(service django) (task def) (port 8000) is unhealthy in "
+                    "(target-group arn:aws:...) due to (reason Health checks failed)."
+                )},
+                {"id": "ev-4", "message": (
+                    "(service django) has stopped 1 running tasks: (task def)."
+                )},
+                {"id": "ev-5", "message": (
+                    "(service django) (task ghi) (port 8000) is unhealthy in "
+                    "(target-group arn:aws:...) due to (reason Health checks failed)."
+                )},
+            ],
+        )
+        provider = ECSProvider(
+            session_factory=lambda c: mock.Mock(client=lambda *_a, **_kw: client),
+            progress=events.append,
+        )
+        provider._force_new_deployments(_ctx(tmp_path), ["django"])
+        joined = "\n".join(events)
+        assert "flap" in joined.lower()
+        assert "django" in joined
+        assert "health_check_grace_period" in joined or "grace period" in joined
+
+    def test_single_health_check_failure_not_flagged_as_flap(self, tmp_path, monkeypatch):
+        """One unhealthy event during a normal rolling deploy isn't a
+        flap — could be a stale task draining. Need 3+ to declare flap."""
+        monkeypatch.setenv("RC_POST_ROLLOUT_WATCH_S", "2")
+        events: list[str] = []
+        client = _setup_client(
+            pre_events=[],
+            post_events=[
+                {"id": "ev-1", "message": (
+                    "(service django) (task abc) is unhealthy in (target-group ...)."
+                )},
+                {"id": "ev-2", "message": (
+                    "(service django) registered 1 targets in (target-group ...)."
+                )},
+            ],
+        )
+        provider = ECSProvider(
+            session_factory=lambda c: mock.Mock(client=lambda *_a, **_kw: client),
+            progress=events.append,
+        )
+        provider._force_new_deployments(_ctx(tmp_path), ["django"])
+        joined = "\n".join(events)
+        assert "flap" not in joined.lower()
+
     def test_pre_existing_errors_not_re_surfaced(self, tmp_path, monkeypatch):
         # An IAM error event from a previous deploy that's still in the
         # service-events log shouldn't trigger the watcher.

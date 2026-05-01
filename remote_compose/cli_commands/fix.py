@@ -23,6 +23,11 @@ def fix_group():
                                    Append COPY <host> <container> to a
                                    service's Dockerfile so /app exists in
                                    the built image (rc-bys).
+      rc fix django-tls            Append CSRF_TRUSTED_ORIGINS reader +
+                                   SECURE_PROXY_SSL_HEADER +
+                                   USE_X_FORWARDED_HOST to the active
+                                   Django settings module so admin login
+                                   works behind the ALB (rc-j08).
     """
 
 
@@ -130,6 +135,10 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
     ))
     click.echo(f"  wrote:      {nginx_path.relative_to(project_dir)}")
     click.echo(f"              {dockerfile_path.relative_to(project_dir)}")
+    # rc-2kp: ensure next rc up doesn't reuse a stale buildx layer cache
+    # that predates the nginx-conf write.
+    from remote_compose.no_cache_state import mark_no_cache
+    mark_no_cache(project_dir, reason="rc fix nginx-conf")
     click.echo(
         f"\n  Wire it into your compose ECS variant (build context = "
         f"project root):"
@@ -210,13 +219,121 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
                    f"{result.skipped_reason}")
         return
 
+    # rc-2kp: edits to the Dockerfile may not invalidate the buildx layer
+    # cache reliably (the registry cache can contain layers from older
+    # Dockerfile revisions that buildx still reuses). Drop the no-cache
+    # sentinel so the next `rc up` rebuilds without --cache-from for this
+    # service's image.
+    from remote_compose.no_cache_state import mark_no_cache
+    mark_no_cache(
+        rc_path.parent.resolve(),
+        reason=f"rc fix bake-bind-mount-source {service}",
+    )
+
     click.echo(f"\nrc fix bake-bind-mount-source {service}")
     click.echo(f"  dockerfile:  {result.dockerfile_path}")
     click.echo(f"  added COPY:")
     for host, container in result.copies_added:
         click.echo(f"    COPY {host} {container}")
+    if result.skipped_dockerignored:
+        click.echo(f"\n  ⚠ skipped (excluded by .dockerignore — "
+                   f"adding COPY would break docker build):")
+        for host, container in result.skipped_dockerignored:
+            click.echo(f"    COPY {host} {container}")
+        click.echo(f"  → remove the dockerignore entry for these paths if "
+                   f"you need them baked into the ECS image.")
     click.echo(
         "\n  Local docker-compose still bind-mounts these paths at runtime "
         "(the bind mount overrides the COPY), so local hot-reload keeps "
         "working. ECS deploys (no bind mounts) now have the source baked in."
+    )
+
+
+@fix_group.command(name='django-tls')
+@click.option('--settings', 'settings_module', default=None,
+              help='Django settings module to patch (dotted path or '
+                   'relative path). Auto-detected when omitted from the '
+                   'usual locations: backend/config/settings/local.py, '
+                   'config/settings.py, etc.')
+@click.option('--secure-cookies', is_flag=True,
+              help='Also append SESSION_COOKIE_SECURE + CSRF_COOKIE_SECURE. '
+                   'Skip when any path in the stack is reachable over '
+                   'plain HTTP (e.g. service-to-service health checks).')
+@click.option('--force', is_flag=True,
+              help='Re-append the block even when the rc-j08 marker is '
+                   'already present.')
+@click.pass_context
+def fix_django_tls_cmd(ctx, settings_module, secure_cookies, force):
+    """Patch a Django settings module so it consumes the env vars rc up --domain injects.
+
+    \b
+    Background: `rc up --domain X` (rc-32x) sets DJANGO_ALLOWED_HOSTS +
+    CSRF_TRUSTED_ORIGINS in the django container env. But Django's
+    settings.py has to actually READ those env vars for them to take
+    effect — most Django apps' local.py / production.py hardcodes
+    these settings. The result: admin POST login returns 403 'Origin
+    checking failed' even though the env var is set on the task def.
+    \b
+    This subcommand appends an env-reading block to the active Django
+    settings module. Three universally-correct settings:
+
+    \b
+      CSRF_TRUSTED_ORIGINS       — reads the env var rc up --domain sets
+      SECURE_PROXY_SSL_HEADER    — trusts ALB X-Forwarded-Proto so
+                                   request.is_secure() returns True
+      USE_X_FORWARDED_HOST       — build_absolute_uri() returns public
+                                   hostname (not internal task IP)
+
+    \b
+    --secure-cookies adds SESSION_COOKIE_SECURE + CSRF_COOKIE_SECURE
+    when the stack is HTTPS-only.
+
+    \b
+    Idempotent via the rc-j08 marker — re-runs are no-ops unless
+    --force.
+    """
+    from remote_compose.fix_django_tls import fix_django_tls
+
+    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    rc_path = Path(config_path)
+    if not rc_path.exists():
+        raise click.ClickException(f"{rc_path} not found.")
+    project_dir = rc_path.parent.resolve()
+
+    try:
+        result = fix_django_tls(
+            project_dir,
+            settings_module=settings_module,
+            secure_cookies=secure_cookies,
+            force=force,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if result.skipped_reason:
+        click.echo(
+            f"  rc fix django-tls: {result.skipped_reason}\n"
+            f"  ({result.settings_path})"
+        )
+        return
+
+    # rc-2kp: settings.py is part of the build context (COPY ./backend /app
+    # picks it up). Same cache-staleness risk as fix_bake_bind: the
+    # registry layer cache may not invalidate reliably across
+    # source-content changes. Force --no-cache on next rc up.
+    from remote_compose.no_cache_state import mark_no_cache
+    mark_no_cache(project_dir, reason="rc fix django-tls")
+
+    click.echo(f"\nrc fix django-tls")
+    click.echo(f"  settings:  {result.settings_path}")
+    click.echo(f"  appended:")
+    click.echo(f"    CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')")
+    click.echo(f"    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')")
+    click.echo(f"    USE_X_FORWARDED_HOST = True")
+    if secure_cookies:
+        click.echo(f"    SESSION_COOKIE_SECURE = True")
+        click.echo(f"    CSRF_COOKIE_SECURE = True")
+    click.echo(
+        "\n  Now `rc up --domain X` will produce a stack where /admin "
+        "POST login works first time."
     )

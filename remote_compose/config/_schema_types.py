@@ -102,6 +102,11 @@ class ServiceV2:
     type: str = "application"
     launch_type: Optional[str] = None
     health_check_path: Optional[str] = None
+    # rc-05q: ECS service.health_check_grace_period_seconds (Fargate-only,
+    # only meaningful for ALB-fronted services). When None, provider
+    # computes 60s default (or 180s with an auto_on_deploy lifecycle
+    # hook). Set explicitly to bypass the auto-default.
+    health_check_grace_period: Optional[int] = None
     public: bool = False
     port: Optional[int] = None
     ephemeral_storage: Optional[int] = None

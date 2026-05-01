@@ -105,3 +105,35 @@ class TestImageBuilder:
             run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             ImageBuilder(docker_bin="docker", progress=events.append).build(spec)
         assert any("docker build" in e for e in events)
+
+
+class TestNoCache:
+    """rc-2kp: no_cache=True forces --no-cache and drops cache_from."""
+
+    def test_no_cache_passes_flag(self, spec):
+        spec.no_cache = True
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ImageBuilder(docker_bin="docker").build(spec)
+        cmd = run.call_args.args[0]
+        assert "--no-cache" in cmd
+
+    def test_no_cache_drops_cache_from(self, spec):
+        spec.no_cache = True
+        spec.cache_from = ["registry.example.com/cache:v1"]
+        # cache_from would normally route through buildx; with no_cache the
+        # builder drops cache_from before deciding which command to use.
+        # That means --cache-from must NOT appear in the final cmd.
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ImageBuilder(docker_bin="docker").build(spec)
+        cmd = run.call_args.args[0]
+        assert "--cache-from" not in cmd
+
+    def test_no_cache_default_off(self, spec):
+        # Backwards-compat: existing builds without no_cache work as before.
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ImageBuilder(docker_bin="docker").build(spec)
+        cmd = run.call_args.args[0]
+        assert "--no-cache" not in cmd

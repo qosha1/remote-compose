@@ -897,3 +897,102 @@ class TestServiceV2EnvMerge:
         assert ctx.services["api"].env["DJANGO_DEBUG"] == "False"
         assert ctx.services["api"].env["PORT"] == "8080"
 
+
+class TestRcJ08DriftWarning:
+    """rc-frx: when a Django service has a domain set (rc-32x's
+    domain_env injects CSRF_TRUSTED_ORIGINS into the task def env), the
+    settings.py module must contain the rc-j08 marker — otherwise
+    /admin POST returns 403 even with the env var present. cli_v2's
+    build_deploy_context emits a stderr warning when the marker is
+    missing."""
+
+    def _scaffold_django(self, tmp_path: Path, with_marker: bool) -> Path:
+        # Compose stanza marks 'django' service. Dockerfile path contains
+        # 'manage.py' so frameworks.detect_framework matches Django.
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n"
+            "  django:\n"
+            "    build:\n"
+            "      context: .\n"
+            "      dockerfile: Dockerfile\n"
+            "    image: example_django\n"
+        )
+        # Minimum Dockerfile that detect_framework recognizes (manage.py).
+        (tmp_path / "Dockerfile").write_text(
+            "FROM python:3.11\n"
+            "COPY manage.py /app/manage.py\n"
+            "CMD ['python', 'manage.py', 'runserver']\n"
+        )
+        # Django settings layout — marker conditional.
+        sp = tmp_path / "backend/config/settings/local.py"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        if with_marker:
+            sp.write_text(
+                "DEBUG = True\n"
+                "# rc-j08: TLS / CSRF / proxy settings auto-appended by rc fix django-tls\n"
+                "import os as _o\n"
+            )
+        else:
+            sp.write_text("DEBUG = True\n")
+
+        rc = tmp_path / "rc.yml"
+        rc.write_text(yaml.safe_dump({
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "django": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "public": True, "port": 8000,
+                    "domain": "app.example.com",
+                },
+            },
+        }))
+        return rc
+
+    def test_warns_when_marker_missing(self, tmp_path, monkeypatch, capsys):
+        rc = self._scaffold_django(tmp_path, with_marker=False)
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        build_deploy_context(v2, raw, rc)
+        captured = capsys.readouterr()
+        assert "rc-j08" in captured.err
+        assert "rc fix django-tls" in captured.err
+        assert "django" in captured.err
+
+    def test_silent_when_marker_present(self, tmp_path, monkeypatch, capsys):
+        rc = self._scaffold_django(tmp_path, with_marker=True)
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        build_deploy_context(v2, raw, rc)
+        captured = capsys.readouterr()
+        assert "rc-j08" not in captured.err
+        assert "rc fix django-tls" not in captured.err
+
+    def test_silent_when_no_domain_set(self, tmp_path, monkeypatch, capsys):
+        # No domain → no CSRF_TRUSTED_ORIGINS injection → no warning even
+        # if marker is missing (the patch isn't needed).
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  django:\n    image: example_django\n"
+        )
+        sp = tmp_path / "backend/config/settings/local.py"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text("DEBUG = True\n")
+        rc = tmp_path / "rc.yml"
+        rc.write_text(yaml.safe_dump({
+            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
+            "provider": "fake",
+            "services": {
+                "django": {
+                    "cpu": 256, "memory": 512, "type": "application",
+                    "public": True, "port": 8000,
+                },
+            },
+        }))
+        monkeypatch.chdir(tmp_path)
+        _, raw, v2 = load_rc_yml(rc)
+        build_deploy_context(v2, raw, rc)
+        captured = capsys.readouterr()
+        assert "rc-j08" not in captured.err
+

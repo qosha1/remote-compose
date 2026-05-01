@@ -326,6 +326,22 @@ class ECSProvider(Provider):
             # rolling deploy (slower) instead of overlap. Acceptable.
             singleton = _looks_like_singleton_scheduler(name, spec.command)
             stateful = len(svc_mounts) > 0 or singleton
+            # rc-05q: ALB grace period. Only meaningful for public services
+            # (load_balancer block exists). When unset, default 60s for
+            # fast-boot services, 180s when any auto_on_deploy lifecycle
+            # hook is declared (those run during rollout — migrate alone
+            # can take 30-60s on a cold DB).
+            if spec.public:
+                if spec.health_check_grace_period is not None:
+                    effective_grace = spec.health_check_grace_period
+                else:
+                    has_auto_on_deploy = any(
+                        (h or {}).get("auto_on_deploy")
+                        for h in (spec.lifecycle or {}).values()
+                    )
+                    effective_grace = 180 if has_auto_on_deploy else 60
+            else:
+                effective_grace = None
             svc_view = {
                 "name": name,
                 "tf_name": _tf_name(name),
@@ -336,6 +352,7 @@ class ECSProvider(Provider):
                 "port": spec.port,
                 "public": bool(spec.public),
                 "health_check_path": spec.health_check_path,
+                "health_check_grace_period": effective_grace,
                 "launch_type": launch_type,
                 "mounts": svc_mounts,
                 "stateful": stateful,
@@ -929,8 +946,21 @@ class ECSProvider(Provider):
         )
 
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
+        from ...no_cache_state import consume_no_cache
         from .ecr_auth import ECRAuthenticator
 
+        # rc-2kp: an `rc fix *` subcommand (bake-bind-mount-source,
+        # django-tls, nginx-conf) drops a sentinel when it edits files
+        # in the project. Consume it so the next build forces --no-cache
+        # for every service — buildx's registry layer cache otherwise
+        # sometimes returns stale layers that don't reflect the edit.
+        no_cache_pending = consume_no_cache(ctx.working_dir)
+        if no_cache_pending:
+            self._emit(
+                "  rc-2kp: no-cache sentinel found (an `rc fix *` "
+                "subcommand modified files since the last build) — "
+                "this build runs with --no-cache."
+            )
         builder = ImageBuilder(progress=self.progress)
         session = self.session_factory(ctx)
         auth = ECRAuthenticator(session=session)
@@ -1013,6 +1043,7 @@ class ECSProvider(Provider):
                 platform="linux/amd64",
                 cache_from=cache_from,
                 cache_to=cache_to,
+                no_cache=no_cache_pending,
             )
             tags = builder.build(build)
             pusher.push(tags)
@@ -1398,7 +1429,16 @@ class ECSProvider(Provider):
             "is not authorized to perform: ecr",
             "Repository does not exist",
         )
+        # rc-8vb: flap signal — service is killing tasks because ALB health
+        # checks fail repeatedly. 3+ unhealthy events in the watch window
+        # = high confidence flap (not just a normal rolling drain).
+        flap_patterns = (
+            "Health checks failed",
+            "is unhealthy in (target-group",
+        )
         flagged: dict[str, str] = {}
+        flap_counts: dict[str, int] = {}
+        flap_sample: dict[str, str] = {}
         while time.monotonic() < deadline:
             try:
                 desc = client.describe_services(
@@ -1416,6 +1456,9 @@ class ECSProvider(Provider):
                     msg = ev.get("message") or ""
                     if any(p in msg for p in problem_patterns):
                         flagged.setdefault(svc_name, msg)
+                    if any(p in msg for p in flap_patterns):
+                        flap_counts[svc_name] = flap_counts.get(svc_name, 0) + 1
+                        flap_sample.setdefault(svc_name, msg)
             if flagged:
                 break
             # Check deadline BEFORE sleeping so a tight budget exits
@@ -1440,6 +1483,34 @@ class ECSProvider(Provider):
                 "(3) the image pushed isn't tagged the way the task "
                 "def expects. Old tasks may still serve traffic during "
                 "this window."
+            )
+        # rc-8vb: separate diagnostic for flap loops. A service with 3+
+        # unhealthy events in the watch window is being killed by ALB
+        # before it can serve — almost always grace period too short
+        # OR the app is crashing on startup.
+        flapping = {n: c for n, c in flap_counts.items() if c >= 3}
+        if flapping:
+            self._emit(
+                f"\n  WARN: post-rollout flap loop detected on "
+                f"{len(flapping)} service(s) — tasks are being killed "
+                f"before they can serve traffic:"
+            )
+            for svc_name, count in flapping.items():
+                sample = flap_sample.get(svc_name, "").strip()[:200]
+                self._emit(
+                    f"    {svc_name}: {count} unhealthy events. "
+                    f"Last: {sample}"
+                )
+            self._emit(
+                "  Likely causes: (1) health_check_grace_period too short "
+                "for the boot time — bump it via "
+                "services.<svc>.health_check_grace_period in rc.yml "
+                "(180s for Django/Rails with migrate; 60s baseline); "
+                "(2) the app is crashing on startup — `aws logs tail "
+                "/ecs/<project> --since 5m --log-stream-name-prefix "
+                "<svc>` should show ImportError/OperationalError/etc.; "
+                "(3) wrong containerPort (compose port doesn't match "
+                "what the app actually binds)."
             )
 
     def destroy(self, ctx: DeployContext) -> None:

@@ -98,6 +98,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             type=raw.get("type", "application"),
             launch_type=raw.get("launch_type"),
             health_check_path=raw.get("health_check_path"),
+            health_check_grace_period=raw.get("health_check_grace_period"),
             public=bool(raw.get("public", False)),
             port=raw.get("port"),
             ephemeral_storage=raw.get("ephemeral_storage"),

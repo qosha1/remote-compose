@@ -35,6 +35,12 @@ class BakeResult:
     dockerfile_path: Optional[Path] = None
     copies_added: list[tuple[str, str]] = field(default_factory=list)
     skipped_reason: Optional[str] = None
+    # rc-4mf: COPYs we declined to append because the host source dir is
+    # excluded by the build context's .dockerignore. Appending these
+    # would produce a structurally-broken Dockerfile (docker build fails
+    # with '<host>: not found'). The CLI surfaces this list so the user
+    # can either remove the ignore entry or accept the skip.
+    skipped_dockerignored: list[tuple[str, str]] = field(default_factory=list)
 
 
 # Container paths that are obviously NOT user source dirs — system mounts,
@@ -103,6 +109,71 @@ def _is_source_bind_mount(host: str, container: str) -> bool:
     return True
 
 
+def _resolve_build_context(compose_path: Path, svc_compose: dict) -> Optional[Path]:
+    """Resolve the absolute path of the service's build context. Mirrors
+    compose semantics: build: <str> means context = that dir; build: dict
+    uses build.context (default '.'). Returns None for image-only services.
+    """
+    build = svc_compose.get("build")
+    if build is None:
+        return None
+    compose_dir = compose_path.parent
+    if isinstance(build, str):
+        return (compose_dir / build).resolve()
+    if not isinstance(build, dict):
+        return None
+    ctx = build.get("context", ".")
+    return (compose_dir / ctx).resolve()
+
+
+def _load_dockerignore(ctx_path: Path) -> set[str]:
+    """Parse .dockerignore at ``ctx_path``/`.dockerignore`. Returns the set
+    of literal patterns we treat as exclusion roots. Mirrors the parser
+    in compose_warnings._load_dockerignore — exact paths and simple
+    top-level dir names; glob patterns ignored.
+    """
+    skip: set[str] = set()
+    df = ctx_path / ".dockerignore"
+    if not df.is_file():
+        return skip
+    try:
+        text = df.read_text(errors="replace")
+    except OSError:
+        return skip
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        clean = line.rstrip("/").rstrip("*").rstrip("/")
+        if not clean or "*" in clean:
+            continue
+        skip.add(clean)
+    return skip
+
+
+def _is_dockerignored(host: str, ignored: set[str]) -> bool:
+    """True when the host source path (compose-style: './test-fixtures' or
+    'backend/media') is excluded by .dockerignore.
+
+    Match strategy: normalize ./prefix and trailing slash, then check
+    whether any path prefix is an ignored entry. ./test-fixtures matches
+    'test-fixtures'. ./backend/media matches 'backend/media' (or 'backend').
+    A bind mount like ./backend with only 'backend/media' ignored is NOT
+    a match — docker copies the parent and excludes the child internally.
+    """
+    if not ignored:
+        return False
+    norm = host.lstrip("./").rstrip("/")
+    if not norm:
+        return False
+    parts = norm.split("/")
+    for i in range(1, len(parts) + 1):
+        prefix = "/".join(parts[:i])
+        if prefix in ignored:
+            return True
+    return False
+
+
 def _resolve_dockerfile(compose_path: Path, service_name: str, svc_compose: dict) -> Optional[Path]:
     """Resolve the Dockerfile path for a service from its compose build stanza."""
     build = svc_compose.get("build")
@@ -167,7 +238,7 @@ def bake_bind_mount_source(
         )
 
     volumes = svc_compose.get("volumes") or []
-    copies: list[tuple[str, str]] = []
+    candidate_copies: list[tuple[str, str]] = []
     for entry in volumes:
         parsed = _split_volume_entry(entry)
         if parsed is None:
@@ -175,13 +246,34 @@ def bake_bind_mount_source(
         host, container = parsed
         if not _is_source_bind_mount(host, container):
             continue
-        copies.append((host, container))
+        candidate_copies.append((host, container))
 
     result = BakeResult(dockerfile_path=dockerfile_path)
-    if not copies:
+    if not candidate_copies:
         result.skipped_reason = (
             "service has no source bind mounts to bake (no relative-path "
             "volumes)."
+        )
+        return result
+
+    # rc-4mf: filter out COPYs whose host source is .dockerignored. Without
+    # this, docker build dies with 'failed to compute cache key: ...
+    # "<host>": not found'. We surface the skipped pairs so the caller can
+    # warn.
+    ctx_path = _resolve_build_context(compose_path, svc_compose)
+    ignored = _load_dockerignore(ctx_path) if ctx_path else set()
+    copies: list[tuple[str, str]] = []
+    for host, container in candidate_copies:
+        if _is_dockerignored(host, ignored):
+            result.skipped_dockerignored.append((host, container))
+        else:
+            copies.append((host, container))
+
+    if not copies:
+        result.skipped_reason = (
+            "every source bind mount is excluded by .dockerignore — nothing "
+            "to bake. Remove the dockerignore entries for paths you want "
+            "baked into the image, or accept that ECS won't have these dirs."
         )
         return result
 

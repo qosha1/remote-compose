@@ -37,6 +37,11 @@ class ImageBuildSpec:
     # always want mode=max so intermediate stages survive across machines.
     cache_from: list[str] = field(default_factory=list)
     cache_to: list[str] = field(default_factory=list)
+    # rc-2kp: when True, build with --no-cache and skip cache_from. Set
+    # by the deploy path when an `rc fix *` subcommand has touched files
+    # since the last build (the registry cache may otherwise return
+    # stale layers that don't reflect the user's edits).
+    no_cache: bool = False
 
 
 # rc-mtt: env-var knobs.
@@ -91,6 +96,15 @@ class ImageBuilder:
             )
             cache_to = []
             cache_from = []
+        if spec.no_cache:
+            # rc-2kp: an `rc fix *` subcommand touched files since the last
+            # build. Drop cache_from so we don't pull stale layers, and
+            # set the --no-cache flag so docker rebuilds every step.
+            self._emit(
+                f"  rc-2kp: no_cache=True for {spec.service!r} — building "
+                f"without --cache-from (an `rc fix *` change is in flight)."
+            )
+            cache_from = []
 
         try:
             return self._run_build(spec, cache_from, cache_to)
@@ -144,6 +158,12 @@ class ImageBuilder:
             cmd += ["--target", spec.target]
         if spec.platform:
             cmd += ["--platform", spec.platform]
+        if spec.no_cache:
+            # rc-2kp: --no-cache forces every layer to rebuild from scratch.
+            # Combined with the empty cache_from above, this guarantees the
+            # next build reflects on-disk source state, not the registry's
+            # frozen idea of it.
+            cmd += ["--no-cache"]
         for key, value in spec.build_args.items():
             cmd += ["--build-arg", f"{key}={value}"]
         for ref in cache_from:

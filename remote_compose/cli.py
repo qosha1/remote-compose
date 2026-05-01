@@ -34,6 +34,30 @@ from .cli_commands.destroy import _teardown_infrastructure  # noqa: F401, E402
 from .cli_commands.list_stacks import _format_relative_time  # noqa: F401, E402
 
 
+def _warn_on_rc_yml_ambiguity() -> None:
+    """rc-td9: when multiple rc*.yml configs exist in cwd and no -c was
+    passed, the user may not realize 'rc' will silently use rc.yml. Once
+    bit (sentinal had rc.yml us-west-2 + rc.core.yml us-west-1; rc up
+    without -c started creating us-west-2 resources against a missing VPC).
+
+    Heuristic: scan cwd for rc.yml + rc.*.yml siblings. If >1 exists, emit
+    a stderr nudge listing them. Does NOT block — the user may genuinely
+    want the rc.yml default.
+    """
+    from pathlib import Path
+    cwd = Path.cwd()
+    candidates = sorted({p.name for p in cwd.glob("rc.yml")} |
+                        {p.name for p in cwd.glob("rc.*.yml")})
+    if len(candidates) <= 1:
+        return
+    click.echo(
+        f"  ! Multiple rc configs found in {cwd}: "
+        f"{', '.join(candidates)}. Defaulting to rc.yml — pass "
+        f"-c <file> to choose.",
+        err=True,
+    )
+
+
 @click.group()
 @click.option('-c', '--config', 'config_path', default=None, help='Path to rc.yml')
 @click.pass_context
@@ -41,6 +65,8 @@ def cli(ctx, config_path):
     """rc — Simple Remote Compose CLI for ECS deployments."""
     ctx.ensure_object(dict)
     ctx.obj['config_path'] = config_path
+    if config_path is None:
+        _warn_on_rc_yml_ambiguity()
 
 
 # =============================================================================

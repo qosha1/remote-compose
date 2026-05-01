@@ -181,6 +181,117 @@ class TestIdempotence:
         assert df.count("COPY ./backend /app") == 2
 
 
+class TestDockerignoreAwareness:
+    """rc-4mf: when the Dockerfile lives under a build context whose
+    .dockerignore excludes a host source dir, appending COPY <host>
+    <container> would produce a structurally-broken Dockerfile (docker
+    build fails: '<host>: not found'). The fix must skip those COPYs
+    and surface them so the user can either remove the dockerignore
+    entry or knowingly skip baking that path."""
+
+    def _scaffold_with_ignore(
+        self,
+        tmp_path: Path,
+        ignore_lines: str,
+        compose_yaml: str,
+    ) -> Path:
+        # .dockerignore lives at the build context root (the compose dir
+        # in our scaffold's default — context=.).
+        (tmp_path / ".dockerignore").write_text(ignore_lines)
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(compose_yaml)
+        df = tmp_path / "compose/local/django/Dockerfile"
+        df.parent.mkdir(parents=True, exist_ok=True)
+        df.write_text("FROM python:3.11\nCMD ['echo', 'hi']\n")
+        return compose
+
+    def test_skips_dockerignored_host_dir(self, tmp_path):
+        compose = self._scaffold_with_ignore(
+            tmp_path,
+            "test-fixtures\n",
+            textwrap.dedent("""
+                services:
+                  django:
+                    build:
+                      context: .
+                      dockerfile: compose/local/django/Dockerfile
+                    volumes:
+                      - ./backend:/app
+                      - ./test-fixtures:/app/test-fixtures
+            """).strip(),
+        )
+        result = bake_bind_mount_source(compose, "django")
+        # ./backend goes through; ./test-fixtures is dockerignored, skipped.
+        assert ("./backend", "/app") in result.copies_added
+        assert ("./test-fixtures", "/app/test-fixtures") not in result.copies_added
+        assert ("./test-fixtures", "/app/test-fixtures") in result.skipped_dockerignored
+        df_text = (tmp_path / "compose/local/django/Dockerfile").read_text()
+        assert "COPY ./backend /app" in df_text
+        assert "COPY ./test-fixtures" not in df_text
+
+    def test_skips_when_path_prefix_matches_dockerignore(self, tmp_path):
+        # .dockerignore says `backend/media` — bind mount of ./backend/media
+        # should be skipped. Bind mount of ./backend should NOT (parent dir
+        # of an ignored child is fine; docker copies the parent and skips
+        # the ignored child internally).
+        compose = self._scaffold_with_ignore(
+            tmp_path,
+            "backend/media\n",
+            textwrap.dedent("""
+                services:
+                  django:
+                    build:
+                      context: .
+                      dockerfile: compose/local/django/Dockerfile
+                    volumes:
+                      - ./backend/media:/app/media
+                      - ./backend:/app
+            """).strip(),
+        )
+        result = bake_bind_mount_source(compose, "django")
+        assert ("./backend/media", "/app/media") in result.skipped_dockerignored
+        assert ("./backend", "/app") in result.copies_added
+
+    def test_no_dockerignore_keeps_old_behavior(self, tmp_path):
+        # Backwards-compat: when there's no .dockerignore, every COPY is
+        # appended exactly as before.
+        compose = _scaffold(tmp_path, textwrap.dedent("""
+            services:
+              django:
+                build:
+                  context: .
+                  dockerfile: compose/local/django/Dockerfile
+                volumes:
+                  - ./backend:/app
+                  - ./test-fixtures:/app/test-fixtures
+        """).strip())
+        result = bake_bind_mount_source(compose, "django")
+        assert ("./backend", "/app") in result.copies_added
+        assert ("./test-fixtures", "/app/test-fixtures") in result.copies_added
+        assert result.skipped_dockerignored == []
+
+    def test_all_copies_dockerignored_emits_skip_reason(self, tmp_path):
+        compose = self._scaffold_with_ignore(
+            tmp_path,
+            "backend\ntest-fixtures\n",
+            textwrap.dedent("""
+                services:
+                  django:
+                    build:
+                      context: .
+                      dockerfile: compose/local/django/Dockerfile
+                    volumes:
+                      - ./backend:/app
+                      - ./test-fixtures:/app/test-fixtures
+            """).strip(),
+        )
+        result = bake_bind_mount_source(compose, "django")
+        assert result.copies_added == []
+        assert result.skipped_reason is not None
+        assert "dockerignore" in result.skipped_reason.lower()
+        assert len(result.skipped_dockerignored) == 2
+
+
 class TestLongFormVolumes:
     def test_long_form_dict(self, tmp_path):
         compose = _scaffold(tmp_path, textwrap.dedent("""

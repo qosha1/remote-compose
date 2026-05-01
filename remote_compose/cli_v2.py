@@ -614,6 +614,25 @@ def build_deploy_context(
                     aliases_tup = tuple(svc.aliases or ())
                     for k, v in fw.domain_env(svc.domain, aliases_tup).items():
                         env.setdefault(k, v)
+                    # rc-frx: when this is Django + domain set, the env-var
+                    # injection above is only half the fix — settings.py
+                    # must also READ the env var. If the rc-j08 marker is
+                    # missing, /admin POST will return 403 even though
+                    # CSRF_TRUSTED_ORIGINS is on the task def.
+                    if fw.name == "django":
+                        from .fix_django_tls import has_rc_j08_marker
+                        import click as _click
+                        project_dir = compose_path.parent.resolve()
+                        if has_rc_j08_marker(project_dir) is None:
+                            _click.echo(
+                                f"  ! service {name!r}: domain set + "
+                                f"CSRF_TRUSTED_ORIGINS injected, but the "
+                                f"rc-j08 marker is missing from your Django "
+                                f"settings module. Admin POST will return "
+                                f"403 'Origin checking failed'. Run: "
+                                f"`rc fix django-tls`",
+                                err=True,
+                            )
             primary_port = svc.port or (all_compose_ports[0] if all_compose_ports else None)
             extras = [p for p in all_compose_ports if p != primary_port]
             # rc-e5u.46.1: rc.yml services.<svc>.dockerfile overrides compose's
@@ -651,6 +670,7 @@ def build_deploy_context(
                 type=svc.type,
                 launch_type=svc.launch_type,
                 health_check_path=svc.health_check_path,
+                health_check_grace_period=svc.health_check_grace_period,
                 public=svc.public,
                 port=primary_port,
                 ephemeral_storage=svc.ephemeral_storage,

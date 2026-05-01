@@ -187,6 +187,12 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   }
 {%- endif %}
 
+{%- if svc.public and svc.health_check_grace_period is not none %}
+  # rc-05q: AWS default is 0s, which kills tasks before slow-booting
+  # services (Django migrate + collectstatic + uvicorn) can bind. 60s
+  # base; 180s when an auto_on_deploy lifecycle hook is declared.
+  health_check_grace_period_seconds = {{ svc.health_check_grace_period }}
+{%- endif %}
 {%- if svc.public %}
   load_balancer {
 {%- if svc.domain %}

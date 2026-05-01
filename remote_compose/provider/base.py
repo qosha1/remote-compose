@@ -49,6 +49,12 @@ class ServiceSpec:
     type: str = "application"
     launch_type: Optional[str] = None
     health_check_path: Optional[str] = None
+    # rc-05q: ECS service.health_check_grace_period_seconds. Only emitted
+    # for services with public=true (load_balancer block). When None the
+    # provider computes a default (60s base, 180s when any auto_on_deploy
+    # lifecycle hook is declared, since those run during rollout and
+    # extend the boot window).
+    health_check_grace_period: Optional[int] = None
     public: bool = False
     port: Optional[int] = None
     ephemeral_storage: Optional[int] = None
