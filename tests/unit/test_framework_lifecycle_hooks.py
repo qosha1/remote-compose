@@ -40,6 +40,13 @@ class TestFrameworkLifecycleMaps:
         # honors DJANGO_SUPERUSER_{EMAIL,USERNAME,PASSWORD} env.
         assert "--noinput" in DJANGO.lifecycle_hooks["createsuperuser"]
 
+    def test_django_has_loaddata_hook(self):
+        # rc-2kj: symmetric with Rails 'seed' for fixture seeding.
+        assert "loaddata" in DJANGO.lifecycle_hooks
+        assert DJANGO.lifecycle_hooks["loaddata"][:3] == (
+            "python", "manage.py", "loaddata",
+        )
+
     def test_rails_has_console_and_seed(self):
         assert "console" in RAILS.lifecycle_hooks
         assert "dbconsole" in RAILS.lifecycle_hooks

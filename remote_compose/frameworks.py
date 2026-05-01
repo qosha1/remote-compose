@@ -177,6 +177,14 @@ DJANGO = Framework(
         "shell": ("python", "manage.py", "shell"),
         # Database shell — same pattern.
         "dbshell": ("python", "manage.py", "dbshell"),
+        # rc-2kj: fixture seeding. Symmetric with Rails 'seed'. Defaults
+        # to fixtures/sample.json; override via env with the explicit
+        # `rc lifecycle loaddata <svc> -- python manage.py loaddata <path>`
+        # form when a different fixture file is needed.
+        "loaddata": (
+            "python", "manage.py", "loaddata",
+            "fixtures/sample.json",
+        ),
     },
 )
 
