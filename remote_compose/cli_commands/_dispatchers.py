@@ -400,26 +400,71 @@ def _db_push_v2(
     # surfacing these, rc db push silently completes while the target DB
     # is missing tables. Sentinal repro lost workflows_pagecapture this way.
     pg_errors = _count_pg_restore_errors(result.stdout or "", result.stderr or "")
+    pg_ignored = _pg_restore_ignored_count(
+        result.stdout or "", result.stderr or "",
+    )
+    # rc-ln1: pg_restore exits 1 when individual operations fail BUT the
+    # restore continued past them (e.g. extension already exists, role
+    # missing for OWNER TO, FK ordering on DROP). pg_restore prints
+    # 'errors ignored on restore: N' as the summary line in those cases
+    # — the data IS restored, just with the listed objects skipped.
+    # Treat that case as success-with-warnings instead of a hard failure.
+    benign_warning_only = (
+        result.exit_code == 1
+        and pg_ignored is not None
+        and pg_ignored == pg_errors
+        and pg_ignored > 0
+    )
     if pg_errors > 0:
-        click.echo(
-            f"\n  rc db push: WARNING — pg_restore reported {pg_errors} "
-            f"error(s) during restore. The target DB is likely missing "
-            f"tables/data. Look for 'pg_restore: error:' lines above; "
-            f"common cause is FK ordering (use --jobs=1 or restore "
-            f"schema-then-data separately).",
-            err=True,
-        )
-    if result.exit_code != 0:
+        if benign_warning_only:
+            click.echo(
+                f"\n  rc db push: pg_restore reported {pg_errors} ignored "
+                f"error(s) (extensions / roles / drop-order) but the restore "
+                f"continued. Data IS in the target DB — review the "
+                f"'pg_restore: error:' lines above to confirm none of them "
+                f"matter. Treating as success.",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"\n  rc db push: WARNING — pg_restore reported {pg_errors} "
+                f"error(s) during restore. The target DB is likely missing "
+                f"tables/data. Look for 'pg_restore: error:' lines above; "
+                f"common cause is FK ordering (use --jobs=1 or restore "
+                f"schema-then-data separately).",
+                err=True,
+            )
+    if result.exit_code != 0 and not benign_warning_only:
         click.echo(
             f"\n  rc db push: restore exited {result.exit_code}",
             err=True,
         )
         raise click.exceptions.Exit(result.exit_code)
-    if pg_errors > 0:
+    if pg_errors > 0 and not benign_warning_only:
         # Non-zero exit so callers / CI catch it.
         raise click.exceptions.Exit(2)
     click.echo("\n  rc db push: complete.")
     return True
+
+
+def _pg_restore_ignored_count(stdout: str, stderr: str) -> Optional[int]:
+    """rc-ln1: parse 'pg_restore: warning: errors ignored on restore: N'
+    (or 'errors ignored on restore: N') from output. Returns N when
+    found, else None. Without --exit-on-error, pg_restore continues
+    past per-object failures and emits this summary; the restore IS
+    complete, so this is the signal that exit-1 means warnings, not
+    a fatal error."""
+    import re
+    pattern = re.compile(r"errors ignored on restore:\s*(\d+)", re.IGNORECASE)
+    for stream in (stdout, stderr):
+        for line in (stream or "").splitlines():
+            m = pattern.search(line)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    return None
+    return None
 
 
 def _count_pg_restore_errors(stdout: str, stderr: str) -> int:

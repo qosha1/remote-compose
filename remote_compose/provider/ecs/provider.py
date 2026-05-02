@@ -772,6 +772,7 @@ class ECSProvider(Provider):
         runner = self.runner_factory(out_dir)
         runner.init()
         self._reconcile_orphan_log_groups(ctx, runner)
+        self._reconcile_orphan_backup_bucket(ctx, runner)
         runner.apply()
         outputs = runner.output()
 
@@ -1356,6 +1357,80 @@ class ECSProvider(Provider):
                 f"will likely fail with ResourceAlreadyExistsException; "
                 f"manually delete via: aws logs delete-log-group "
                 f"--log-group-name {log_group_name}"
+            )
+
+    def _reconcile_orphan_backup_bucket(
+        self, ctx: DeployContext, runner: TerraformRunner,
+    ) -> None:
+        """rc-nae: import an AWS-side S3 bucket whose name matches
+        backup.bucket but isn't in terraform state.
+
+        Pattern mirrors _reconcile_orphan_log_groups. When a user adds
+        backup.bucket to rc.yml AFTER the deploy is up (or migrates a
+        manually-created bucket under terraform), the next apply
+        otherwise dies with BucketAlreadyOwnedByYou. We probe via boto3
+        head_bucket to confirm we own it, then 'terraform import'.
+
+        Distinct from log-group case: S3 deletion is destructive (data
+        loss potential), so there is NO delete-then-recreate fallback.
+        If import fails, we surface a clear error and let the apply
+        crash naturally — better than silently nuking dump data.
+        """
+        backup_cfg = (ctx.rc_yml_v2 or {}).get("backup") or {}
+        bucket_name = backup_cfg.get("bucket")
+        managed = bool(backup_cfg.get("bucket_managed", True))
+        if not bucket_name or not managed:
+            return
+
+        try:
+            session = self.session_factory(ctx)
+            s3 = session.client("s3")
+            # head_bucket returns 200 when the bucket exists AND we own
+            # it (or have permission); 404 when it doesn't exist; 403
+            # when someone else owns it.
+            s3.head_bucket(Bucket=bucket_name)
+        except Exception as exc:  # noqa: BLE001
+            err_repr = repr(exc)
+            if (
+                "Not Found" in err_repr
+                or "404" in err_repr
+                or "NoSuchBucket" in err_repr
+            ):
+                # No orphan — terraform will create it from scratch. Normal.
+                return
+            self._emit(
+                f"warning: orphan backup-bucket reconcile skipped — "
+                f"could not query AWS for s3://{bucket_name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        try:
+            runner.import_resource(
+                "aws_s3_bucket.backups",
+                bucket_name,
+            )
+            self._emit(
+                f"imported orphan backup bucket s3://{bucket_name} "
+                f"into terraform state"
+            )
+        except TerraformError as exc:
+            msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
+            already_managed_signals = (
+                "already managed",
+                "is already managing",
+                "already exists in state",
+            )
+            if any(s in msg for s in already_managed_signals):
+                return  # already imported on a prior deploy
+            # No safe fallback — refusing to delete an S3 bucket that
+            # may contain dump data. Surface a clear next-step.
+            self._emit(
+                f"warning: backup-bucket import failed "
+                f"({exc.__class__.__name__}). The upcoming apply will "
+                f"likely fail with BucketAlreadyOwnedByYou. Manually "
+                f"import: terraform -chdir={self._tf_dir(ctx)} import "
+                f"aws_s3_bucket.backups {bucket_name}"
             )
 
     # Service-type rollout priority (rc-e5u.46.5). Force-rolls in this order
