@@ -1215,6 +1215,15 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
                 "  No-state mode: skipping terraform entirely. "
                 "Will only rebuild images + force-roll services."
             )
+        if kwargs.get("skip_build"):
+            # rc-44z: --no-build wires through to ECSProvider.deploy which
+            # skips _build_and_push_images. Force-roll still rolls the
+            # current :latest image.
+            ctx.skip_build = True
+            click.echo(
+                "  No-build mode: skipping image build+push. "
+                "Force-roll will use existing :latest images."
+            )
         if kwargs.get("skip_force_roll"):
             # rc-1bk: caller (today: rc up) wants to handle the rollout
             # itself after pushing secrets. Build + push images here, but

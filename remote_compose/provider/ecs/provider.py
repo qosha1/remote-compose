@@ -777,6 +777,29 @@ class ECSProvider(Provider):
         outputs = runner.output()
 
         warnings: list[str] = []
+        # rc-44z: --no-build skips _build_and_push_images entirely. Force-
+        # roll still rolls services so they pick up any task-def changes
+        # terraform just applied (e.g. new env var, new secret reference,
+        # bumped grace period, etc.).
+        if getattr(ctx, "skip_build", False):
+            self._emit(
+                "  rc-44z: --no-build set — skipping image build+push. "
+                "Rolling existing :latest images on all services."
+            )
+            roll_targets = (
+                sorted(services_filter)
+                if services_filter
+                else sorted(ctx.services.keys())
+            )
+            if not getattr(ctx, "skip_force_roll", False):
+                self._force_new_deployments(ctx, roll_targets)
+            return DeployResult(
+                revision_id=_revision_id_from_dir(out_dir),
+                services=roll_targets,
+                duration_s=time.monotonic() - start,
+                terraform_outputs=outputs,
+                warnings=warnings,
+            )
         pushed = self._build_and_push_images(
             ctx, outputs, warnings,
             services_filter=services_filter, requested_tag=tag,

@@ -142,6 +142,13 @@ class DeployContext:
     # then hang for 30+ minutes.
     skip_force_roll: bool = False
 
+    # rc-44z: when True, deploy() runs terraform apply + force-roll but
+    # SKIPS _build_and_push_images. Used by `rc deploy --no-build` for
+    # terraform-only changes (e.g. bumping a task-def field) so users
+    # don't pay the multi-minute image rebuild cost on a no-op image
+    # change. Force-roll still rolls the existing :latest image.
+    skip_build: bool = False
+
 
 @dataclass
 class ServiceStatus:

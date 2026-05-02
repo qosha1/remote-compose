@@ -164,6 +164,10 @@ def deploy_cmd(ctx, no_build, dry_run, tag, code_only, selected_services, ttl, d
             ctx.obj.get('config_path'), 'deploy',
             ttl=ttl, services=services_list, tag=tag, dev=dev_mode,
             skip_terraform=no_state,
+            # rc-44z: thread --no-build through to v2 path so terraform-only
+            # changes (bumping a task-def field, etc.) don't trigger a
+            # multi-minute image rebuild.
+            skip_build=no_build,
         )
     except TerraformError as exc:
         # Friendly rendering for the most common confusing failure: another
