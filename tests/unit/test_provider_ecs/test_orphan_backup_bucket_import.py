@@ -137,6 +137,37 @@ class TestOrphanBackupBucketImport:
         subcmds = [c.args[0] for c in holder["runner"].calls]
         assert subcmds == ["init", "apply", "output"]
 
+    def test_emits_recovered_followup_on_already_managed(self, tmp_path):
+        """rc-b0d: surface a '✓ already in state' follow-up when the
+        import recovery fires, so the prior raw stderr isn't alarming."""
+        sess = _s3_session(head_response="ok")
+        emitted: list[str] = []
+
+        class _AlreadyManagedRunner(RecordingTerraformRunner):
+            def import_resource(self, address, resource_id):
+                self.calls.append(
+                    type(self.calls[0])(args=["import", address, resource_id])
+                    if self.calls else None
+                )
+                raise TerraformError(
+                    cmd=["terraform", "import", address, resource_id],
+                    returncode=1,
+                    stdout="",
+                    stderr="Error: Resource already managed by Terraform",
+                )
+
+        runner = _AlreadyManagedRunner(tmp_path / "terraform")
+        provider = ECSProvider(
+            runner_factory=lambda out_dir: runner,
+            session_factory=lambda ctx: sess,
+            progress=emitted.append,
+        )
+        provider.deploy(_ctx(tmp_path))
+        joined = "\n".join(emitted)
+        assert "✓ backup bucket" in joined
+        assert "already in terraform state" in joined
+        assert "informational" in joined
+
     def test_swallows_already_managed_error(self, tmp_path):
         """If import fails because state already has it, do not crash."""
         sess = _s3_session(head_response="ok")

@@ -1344,6 +1344,14 @@ class ECSProvider(Provider):
                 "already exists in state",
             )
             if any(s in msg for s in already_managed_signals):
+                # rc-b0d: terraform's raw 'Error: Resource already managed'
+                # already hit the user's terminal via subprocess streaming.
+                # Emit a follow-up so they know rc handled it cleanly.
+                self._emit(
+                    f"  ✓ orphan log group {log_group_name} already in "
+                    f"terraform state — prior 'Error: Resource already "
+                    f"managed' is informational; deploy continues."
+                )
                 return  # already imported on a prior deploy
             # Import failed. Fall through to the boto3-delete fallback
             # below — apply otherwise blows up with
@@ -1445,6 +1453,14 @@ class ECSProvider(Provider):
                 "already exists in state",
             )
             if any(s in msg for s in already_managed_signals):
+                # rc-b0d: same as the log-group case — surface a follow-up
+                # so the prior raw 'Error: Resource already managed' isn't
+                # alarming.
+                self._emit(
+                    f"  ✓ backup bucket s3://{bucket_name} already in "
+                    f"terraform state — prior 'Error: Resource already "
+                    f"managed' is informational; deploy continues."
+                )
                 return  # already imported on a prior deploy
             # No safe fallback — refusing to delete an S3 bucket that
             # may contain dump data. Surface a clear next-step.
