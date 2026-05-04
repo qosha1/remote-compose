@@ -391,3 +391,29 @@ class SecurityGroupProvisioningError(SecurityGroupError):
     def __init__(self, message, security_group_id=None, **kwargs):
         super().__init__(message, **kwargs)
         self.details['security_group_id'] = security_group_id
+
+
+# DevHost Errors (15000-15999) — `rc dev` EC2 dev-host system
+class DevHostError(RemoteComposeError):
+    """Base class for `rc dev` errors."""
+    code = 15000
+
+
+class DevHostAlreadyExistsError(ValidationError):
+    """Raised when creating a dev host with a name already in state."""
+    code = 15001
+
+
+class DevHostNotFoundError(ValidationError):
+    """Raised when looking up a dev host that isn't in state."""
+    code = 15002
+
+
+class SourceDetectionError(ValidationError):
+    """Raised when auto-detecting a source from cwd fails (no git repo, etc.)."""
+    code = 15003
+
+
+class CloudInitRenderError(DevHostError):
+    """Raised when a SourceSpec.render_user_data() can't produce valid cloud-init."""
+    code = 15004

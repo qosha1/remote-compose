@@ -1,0 +1,368 @@
+"""DevHostService — orchestrates EC2 dev-host lifecycle for `rc dev`.
+
+Owns the .rc/dev-hosts.yml state file and drives terraform + boto3 to
+create/list/destroy per-agent EC2 instances. Each host is one EC2 with
+docker pre-installed, the source materialized at /home/ec2-user/<name>,
+and an ed25519 SSH key generated and stored via CredentialService.
+
+The service is composable: tests inject mock terraform_runner, credential_service,
+aws_client_factory; production wires the real ones via the constructor.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+import yaml
+
+from ..exceptions import (
+    DevHostAlreadyExistsError,
+    DevHostNotFoundError,
+)
+from ..utils.ec2_instance_types import get_arch
+from ..utils.ami_catalog import get_ami_id
+from .bootstrap import SourceSpec, source_from_dict
+
+
+# Minimal local stand-in for BaseService — avoids the from-django import
+# that BaseService pulls in. DevHostService only needs a logger and the
+# observer pattern (which it doesn't use yet); re-add BaseService inheritance
+# if/when those features are needed and Django is guaranteed available.
+class _StandaloneBase:
+    def __init__(self):
+        import logging
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    def log_info(self, msg, **_):
+        self.logger.info(msg)
+
+    def log_warning(self, msg, **_):
+        self.logger.warning(msg)
+
+    def log_error(self, msg, **_):
+        self.logger.error(msg)
+
+
+BaseService = _StandaloneBase
+
+
+class FilesystemKeyStore:
+    """Default keypair store for `rc dev` when Django isn't available.
+
+    Stores ed25519 keypairs in `<root>/<name>.pem` (mode 0600) and
+    `<root>/<name>.pub` (mode 0644). No encryption at rest — matches
+    how terraform/ansible/ssh handle local keys. Production deploys can
+    swap in CredentialService for Django-DB-backed Fernet encryption.
+    """
+
+    def __init__(self, root: Path | str = ".rc/dev-host-keys"):
+        self.root = Path(root)
+
+    def store_ssh_keypair(self, name: str, private_pem: str, public_openssh: str, **_):
+        self.root.mkdir(parents=True, exist_ok=True)
+        priv_path = self.root / f"{name}.pem"
+        pub_path = self.root / f"{name}.pub"
+        priv_path.write_text(private_pem)
+        priv_path.chmod(0o600)
+        pub_path.write_text(public_openssh)
+
+        # SimpleNamespace gives a generic credential-like object with .id and .name.
+        from types import SimpleNamespace
+        return SimpleNamespace(id=str(priv_path), name=name)
+
+    def get_credential(self, credential_id):
+        """Look up by either path or name; returns a credential-like object."""
+        from types import SimpleNamespace
+
+        path = Path(credential_id) if str(credential_id).endswith(".pem") else self.root / f"{credential_id}.pem"
+        return SimpleNamespace(id=str(path))
+
+    def get_ssh_keypair(self, credential) -> tuple[str, str]:
+        priv_path = Path(credential.id)
+        pub_path = priv_path.with_suffix(".pub")
+        return priv_path.read_text(), pub_path.read_text() if pub_path.exists() else ""
+
+
+@dataclass
+class DevHostRecord:
+    """In-memory and on-disk representation of a single dev host."""
+
+    name: str
+    source: dict
+    instance_type: str
+    region: str
+    ami: Optional[str] = None
+    instance_id: Optional[str] = None
+    public_ip: Optional[str] = None
+    public_dns: Optional[str] = None
+    ssh_key_credential_id: Optional[int] = None
+    created_at: Optional[str] = None
+    status: str = "pending"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ---------- ssh keypair generation ----------
+
+
+def _generate_ssh_keypair() -> tuple[str, str]:
+    """Generate an ed25519 keypair and return (private_pem, public_openssh).
+
+    Kept module-private and small so DevHostService can monkey-patch it in
+    tests if needed without touching the cryptography import.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    priv = Ed25519PrivateKey.generate()
+    private_pem = priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    public_openssh = (
+        priv.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH,
+        )
+        .decode("utf-8")
+    )
+    return private_pem, public_openssh
+
+
+# ---------- service ----------
+
+
+class DevHostService(BaseService):
+    """Lifecycle orchestrator for `rc dev` EC2 dev-hosts."""
+
+    def __init__(
+        self,
+        credential_service=None,
+        terraform_runner=None,
+        aws_client_factory=None,
+        state_path: Path | str | None = None,
+        keypair_factory: Callable[[], tuple[str, str]] = _generate_ssh_keypair,
+        ami_lookup: Callable[[str, str], str] = get_ami_id,
+    ):
+        super().__init__()
+        self.credential_service = credential_service
+        self.terraform_runner = terraform_runner
+        self.aws_client_factory = aws_client_factory
+        self.state_path = Path(state_path) if state_path else Path(".rc/dev-hosts.yml")
+        self._keypair_factory = keypair_factory
+        self._ami_lookup = ami_lookup
+
+    # ---------- state file I/O ----------
+
+    def _load_state(self) -> dict[str, dict]:
+        if not self.state_path.exists():
+            return {}
+        loaded = yaml.safe_load(self.state_path.read_text()) or {}
+        return loaded.get("hosts", {}) or {}
+
+    def _save_state(self, hosts: dict[str, dict]) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(yaml.safe_dump({"hosts": hosts}, sort_keys=True))
+
+    def _write_tfvars_if_possible(self, variables: dict) -> None:
+        """Write terraform.tfvars.json to runner.working_dir if it's a real path.
+
+        Mocks have a MagicMock for working_dir whose str() repr starts with
+        'MagicMock/' — writing that creates a stray directory in the project
+        root. Skip anything that doesn't look like a real Path or string.
+        """
+        import json
+
+        working_dir = getattr(self.terraform_runner, "working_dir", None)
+        if working_dir is None or not isinstance(working_dir, (str, Path)):
+            return
+        try:
+            working_dir = Path(working_dir)
+            working_dir.mkdir(parents=True, exist_ok=True)
+            (working_dir / "terraform.tfvars.json").write_text(
+                json.dumps(variables, indent=2)
+            )
+        except (TypeError, OSError):
+            return
+
+    def _read_outputs_if_possible(self) -> dict:
+        """Read TF outputs from a real runner; return {} for mocks."""
+        try:
+            raw = self.terraform_runner.output()
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        # terraform output -json wraps each value in {"value": ..., "type": ...}
+        return {k: v.get("value") if isinstance(v, dict) else v for k, v in raw.items()}
+
+    def _record_from_state_dict(self, name: str, d: dict) -> DevHostRecord:
+        return DevHostRecord(
+            name=name,
+            source=d.get("source", {}),
+            instance_type=d.get("instance_type", ""),
+            region=d.get("region", ""),
+            ami=d.get("ami"),
+            instance_id=d.get("instance_id"),
+            public_ip=d.get("public_ip"),
+            public_dns=d.get("public_dns"),
+            ssh_key_credential_id=d.get("ssh_key_credential_id"),
+            created_at=d.get("created_at"),
+            status=d.get("status", "unknown"),
+        )
+
+    # ---------- public API ----------
+
+    def create_host(
+        self,
+        name: str,
+        source: SourceSpec,
+        instance_type: str = "t4g.medium",
+        region: Optional[str] = None,
+        ebs_size_gb: int = 30,
+    ) -> DevHostRecord:
+        # validate inputs eagerly
+        arch = get_arch(instance_type)  # raises ValidationError on unknown
+        if not region:
+            raise DevHostNotFoundError(
+                "region must be provided (no rc.yml fallback in v1)"
+            )
+        ami = self._ami_lookup(region, arch)
+
+        hosts = self._load_state()
+        if name in hosts:
+            raise DevHostAlreadyExistsError(f"dev host {name!r} already exists")
+
+        # generate ssh keypair, store via credential service
+        private_pem, public_openssh = self._keypair_factory()
+        credential = self.credential_service.store_ssh_keypair(
+            name=f"dev-host-{name}-key",
+            private_pem=private_pem,
+            public_openssh=public_openssh,
+        )
+
+        # render cloud-init for the source
+        user_data = source.render_user_data() if hasattr(source, "render_user_data") else ""
+
+        tags = {
+            "DevHost": name,
+            "ManagedBy": "rc-dev",
+        }
+        variables = {
+            "name": name,
+            "instance_type": instance_type,
+            "ami_id": ami,
+            "ssh_public_key": public_openssh,
+            "user_data": user_data,
+            "ebs_size_gb": ebs_size_gb,
+            "tags": tags,
+            "region": region,
+        }
+        # Real TerraformRunner.apply() takes only (plan_file, auto_approve) —
+        # tfvars must be written to the working dir before apply. Mock runners
+        # in unit/integration tests accept extra kwargs and may return outputs
+        # directly; in those cases we use what the mock returns and skip the
+        # tfvars write (no working_dir to write into).
+        self._write_tfvars_if_possible(variables)
+        try:
+            apply_result = self.terraform_runner.apply(
+                variables=variables,
+                tags=tags,
+                user_data=user_data,
+                ssh_public_key=public_openssh,
+            )
+        except TypeError:
+            # real runner — apply() rejects kwargs; call with no args
+            apply_result = self.terraform_runner.apply()
+
+        tf_outputs = apply_result or self._read_outputs_if_possible()
+
+        record = DevHostRecord(
+            name=name,
+            source=_source_to_dict(source),
+            instance_type=instance_type,
+            region=region,
+            ami=ami,
+            instance_id=tf_outputs.get("instance_id"),
+            public_ip=tf_outputs.get("public_ip"),
+            public_dns=tf_outputs.get("public_dns"),
+            ssh_key_credential_id=getattr(credential, "id", None),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            status="running" if tf_outputs.get("instance_id") else "pending",
+        )
+
+        hosts[name] = record.to_dict()
+        self._save_state(hosts)
+        return record
+
+    def list_hosts(self) -> list[DevHostRecord]:
+        hosts = self._load_state()
+        return [self._record_from_state_dict(n, d) for n, d in hosts.items()]
+
+    def get_host(self, name: str) -> DevHostRecord:
+        hosts = self._load_state()
+        if name not in hosts:
+            raise DevHostNotFoundError(f"dev host {name!r} not found in state")
+        return self._record_from_state_dict(name, hosts[name])
+
+    def stop_host(self, name: str) -> None:
+        record = self.get_host(name)
+        ec2 = self.aws_client_factory.get_client("ec2", region_name=record.region)
+        if record.instance_id:
+            ec2.stop_instances(InstanceIds=[record.instance_id])
+        hosts = self._load_state()
+        hosts[name]["status"] = "stopped"
+        self._save_state(hosts)
+
+    def start_host(self, name: str) -> None:
+        record = self.get_host(name)
+        ec2 = self.aws_client_factory.get_client("ec2", region_name=record.region)
+        if record.instance_id:
+            ec2.start_instances(InstanceIds=[record.instance_id])
+        hosts = self._load_state()
+        hosts[name]["status"] = "running"
+        self._save_state(hosts)
+
+    def destroy_host(self, name: str, force: bool = False) -> None:
+        hosts = self._load_state()
+        if name not in hosts:
+            if force:
+                return  # idempotent no-op
+            raise DevHostNotFoundError(f"dev host {name!r} not found in state")
+
+        self.terraform_runner.destroy()
+        del hosts[name]
+        self._save_state(hosts)
+
+    def get_ssh_command(self, name: str) -> str:
+        """Return a shell-ready ssh invocation string for `rc dev ssh`."""
+        record = self.get_host(name)
+        host = record.public_ip or record.public_dns
+        if not host:
+            raise DevHostNotFoundError(
+                f"dev host {name!r} has no public address yet (instance may still be booting)"
+            )
+        # the actual key file is materialized by the CLI via
+        # CredentialService.get_ssh_key_file context manager — this method
+        # returns the command shape, not a runnable command.
+        return f"ssh -o StrictHostKeyChecking=no -i <key> ec2-user@{host}"
+
+
+def _source_to_dict(source: SourceSpec) -> dict:
+    """Serialize a SourceSpec dataclass to a state-file dict."""
+    if hasattr(source, "to_dict"):
+        return source.to_dict()
+    # dataclass fallback
+    from dataclasses import asdict as _asdict, is_dataclass
+
+    if is_dataclass(source):
+        return _asdict(source)
+    if isinstance(source, dict):
+        return source
+    raise TypeError(f"unsupported source type: {type(source)!r}")

@@ -1,7 +1,13 @@
-"""rc dev — hot-reload iteration on a deployed dev-mode stack (rc-e5u.45.9)."""
+"""rc dev — dev-host lifecycle commands.
+
+Two flavors live under this group:
+  - up/list/ssh/stop/start/destroy/status: EC2 dev-host (per-agent box)
+  - push: legacy ECS hot-reload (kept for backwards compat with rc-e5u.45)
+"""
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -10,19 +16,565 @@ import click
 
 @click.group(name='dev')
 def dev_group():
-    """Hot-reload iteration on a deployed dev-mode stack.
+    """Dev-host lifecycle: spin per-agent EC2 boxes with docker + your repo + claude.
 
     \b
     Workflow:
-      1. Add `dev_volumes:` entries to services in rc.yml.
-      2. `rc up --dev` — deploys with EFS-backed bind mounts at the
-         declared paths. The container will start empty until you push.
-      3. `rc dev push <service>` — streams local source into the EFS
-         mount via `aws ecs execute-command`. Django runserver et al.
-         auto-reload on file change.
-      4. `rc dev push --watch <service>` — keeps streaming on every
-         local edit (debounced ~250ms).
+      rc dev up alice                 # provision EC2, clone repo, start docker compose
+      rc dev list                     # see all dev hosts
+      rc dev ssh alice                # ssh into alice's box (claude is preinstalled)
+      rc dev stop alice               # stop EC2 (EBS preserved)
+      rc dev destroy alice            # tear down
+
+    \b
+    Source defaults to current directory's git remote + branch. Override:
+      rc dev up alice --repo URL --branch main
+      rc dev up alice --image nginx:alpine
     """
+
+
+# ---------- helpers ----------
+
+
+def _build_service():
+    """Construct a wired-up DevHostService for CLI use.
+
+    Uses FilesystemKeyStore for SSH keys (no Django dependency) and the
+    boto3 default session for AWS calls (honors AWS_PROFILE env var).
+
+    Imports dev_host_service directly to bypass services/__init__.py which
+    pulls in Django-dependent modules (TargetService, AuditService, etc.).
+    """
+    import boto3
+
+    # Direct submodule import — bypasses services/__init__.py Django imports.
+    from remote_compose.dev_host.service import (
+        DevHostService,
+        FilesystemKeyStore,
+    )
+
+    class _BotoFactory:
+        def get_client(self, service_name, region_name=None):
+            return boto3.client(service_name, region_name=region_name)
+
+    return DevHostService(
+        credential_service=FilesystemKeyStore(),
+        terraform_runner=None,  # set per-command via _runner_for(host_name)
+        aws_client_factory=_BotoFactory(),
+    )
+
+
+def _runner_for(host_name: str, aws_profile: str | None = None,
+                region: str | None = None) -> "TerraformRunner":
+    """Materialize the per-host terraform working dir and return a runner."""
+    from shutil import copy2
+
+    from remote_compose import terraform as tf_pkg
+    from remote_compose.terraform.runner import TerraformRunner
+
+    src_module = Path(tf_pkg.__file__).parent / "dev_host"
+    work_dir = Path(".rc/terraform-state") / host_name
+    work_dir.mkdir(parents=True, exist_ok=True)
+    for f in src_module.iterdir():
+        if f.is_file():
+            copy2(f, work_dir / f.name)
+
+    # Inherit shell env so PATH etc work; override AWS_PROFILE/REGION when given.
+    env = dict(os.environ)
+    if aws_profile:
+        env["AWS_PROFILE"] = aws_profile
+    if region:
+        env["AWS_REGION"] = region
+        env["AWS_DEFAULT_REGION"] = region
+
+    return TerraformRunner(
+        work_dir,
+        env=env,
+        progress=lambda line: click.echo(f"  tf: {line}"),
+    )
+
+
+def _write_tfvars(host_name: str, variables: dict) -> Path:
+    """Write terraform.tfvars.json into the per-host working dir."""
+    import json
+
+    work_dir = Path(".rc/terraform-state") / host_name
+    work_dir.mkdir(parents=True, exist_ok=True)
+    tfvars_path = work_dir / "terraform.tfvars.json"
+    tfvars_path.write_text(json.dumps(variables, indent=2))
+    return tfvars_path
+
+
+# ---------- new EC2 dev-host commands ----------
+
+
+@dev_group.command(name='up')
+@click.argument('name')
+@click.option('--repo', 'repo_url', default=None, help='Git repo URL (default: cwd remote).')
+@click.option('--branch', 'branch', default=None, help='Branch / ref (default: cwd HEAD).')
+@click.option('--image', 'image', default=None, help='Docker image to run (alternative to --repo).')
+@click.option('--instance-type', 'instance_type', default='t4g.medium',
+              help='EC2 instance type (default: t4g.medium ARM).')
+@click.option('--region', 'region', default=None, help='AWS region (default: rc.yml region).')
+@click.option('--ebs-size-gb', 'ebs_size_gb', type=int, default=30,
+              help='Root EBS size in GiB (default: 30).')
+@click.option('--aws-profile', 'aws_profile', default=None,
+              help='AWS profile (default: $AWS_PROFILE or rc.yml aws_profile).')
+@click.option('--gh-token', 'gh_token', default=None, envvar='GH_TOKEN',
+              help='GitHub PAT for cloning private repos (default: $GH_TOKEN). '
+                   'WARNING: lands in EC2 user-data.')
+@click.option('--anthropic-key', 'anthropic_key', default=None, envvar='ANTHROPIC_API_KEY',
+              help='Pre-authenticate the in-box claude agent (default: $ANTHROPIC_API_KEY).')
+@click.option('--env', 'env_files', multiple=True, type=click.Path(exists=True),
+              help='Env file(s) to copy into the dev host (.envs/.local/.django etc). Repeatable.')
+@click.option('--port', 'extra_ports', multiple=True, type=int,
+              help='Extra TCP port(s) to open in the security group. Repeatable.')
+@click.option('--skip-permissions', 'skip_permissions', is_flag=True,
+              help='Boot the in-box claude with --dangerously-skip-permissions '
+                   '(autonomous mode, no per-tool confirmations).')
+@click.pass_context
+def dev_up_cmd(ctx, name, repo_url, branch, image, instance_type, region, ebs_size_gb,
+               aws_profile, gh_token, anthropic_key, env_files, extra_ports,
+               skip_permissions):
+    """Provision an EC2 dev-host and start the source's docker compose."""
+    from remote_compose.exceptions import RemoteComposeError
+    from remote_compose.dev_host.bootstrap import (
+        GitSource,
+        ImageSource,
+        detect_source_from_cwd,
+    )
+
+    # Resolve source
+    if image:
+        source = ImageSource(image=image)
+    elif repo_url:
+        source = GitSource(url=repo_url, ref=branch or 'main')
+    else:
+        try:
+            source = detect_source_from_cwd()
+        except RemoteComposeError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            click.echo("Hint: pass --repo / --branch or --image explicitly.", err=True)
+            sys.exit(1)
+        if branch:
+            source.ref = branch
+
+    # Inject secrets into the source (only GitSource supports gh_token/extra_env)
+    if isinstance(source, GitSource):
+        if gh_token:
+            source.gh_token = gh_token
+        if anthropic_key:
+            source.extra_env = dict(source.extra_env or {})
+            source.extra_env["ANTHROPIC_API_KEY"] = anthropic_key
+        if skip_permissions:
+            source.skip_permissions = True
+
+    # Resolve region
+    if not region:
+        region = _region_from_rc_yml(ctx) or os.environ.get('AWS_DEFAULT_REGION') or 'us-west-1'
+
+    click.echo(f"Provisioning dev-host '{name}' in {region} ({instance_type})...")
+    click.echo(f"  source: {type(source).__name__} {source}")
+
+    if not aws_profile:
+        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get('AWS_PROFILE')
+
+    service = _build_service()
+    service.terraform_runner = _runner_for(name, aws_profile=aws_profile, region=region)
+
+    # Pre-flight: init terraform working dir (downloads aws provider)
+    service.terraform_runner.init(backend=False)
+
+    try:
+        record = service.create_host(
+            name=name,
+            source=source,
+            instance_type=instance_type,
+            region=region,
+            ebs_size_gb=ebs_size_gb,
+        )
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"\n  ✓ dev-host '{name}' is {record.status}")
+    click.echo(f"  instance_id: {record.instance_id}")
+    click.echo(f"  public_ip:   {record.public_ip}")
+    click.echo(f"  ssh:         rc dev ssh {name}")
+    click.echo(f"  attach claude: rc dev attach {name}")
+
+    # Open extra ports in the SG (compose-declared ports user wants reachable)
+    if extra_ports:
+        click.echo(f"\n  Opening security group ports: {list(extra_ports)}")
+        sg_id = _sg_id_for_instance(record.instance_id, region, aws_profile)
+        if sg_id:
+            for port in extra_ports:
+                _authorize_sg_port(sg_id, int(port), region, aws_profile)
+                click.echo(f"  ✓ port {port} open")
+
+    # Copy env files into the box (requires SSH to be up — wait for it)
+    if env_files:
+        click.echo(f"\n  Copying {len(env_files)} env file(s) — waiting for SSH...")
+        keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
+        priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
+        # Repo name is needed to place env files inside the cloned repo dir
+        repo_name = ""
+        if isinstance(source, GitSource):
+            repo_name = source.url.rstrip("/").split("/")[-1].removesuffix(".git")
+        _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
+        click.echo(f"  ✓ env files copied to /home/ec2-user/{repo_name}/")
+
+
+@dev_group.command(name='list')
+def dev_list_cmd():
+    """List all dev hosts in this project."""
+    service = _build_service()
+    hosts = service.list_hosts()
+    if not hosts:
+        click.echo("No dev hosts. Try: rc dev up <name>")
+        return
+    click.echo(f"{'NAME':<20} {'STATUS':<10} {'TYPE':<14} {'PUBLIC_IP':<16} CREATED")
+    for h in hosts:
+        click.echo(
+            f"{h.name:<20} {h.status:<10} {h.instance_type:<14} "
+            f"{h.public_ip or '-':<16} {h.created_at or '-'}"
+        )
+
+
+@dev_group.command(name='attach')
+@click.argument('name')
+@click.option('--session', 'session', default='claude',
+              help='tmux session name to attach to (default: claude).')
+def dev_attach_cmd(name, session):
+    """Attach to the in-box claude tmux session (or create one)."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        record = service.get_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not record.public_ip:
+        click.echo(f"Error: dev host '{name}' has no public IP yet.", err=True)
+        sys.exit(1)
+
+    cred = service.credential_service.get_credential(record.ssh_key_credential_id)
+    private_pem, _ = service.credential_service.get_ssh_keypair(cred)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
+        keyfile.write(private_pem.encode('utf-8'))
+        keypath = keyfile.name
+    os.chmod(keypath, 0o600)
+
+    # -t forces a TTY so tmux works through ssh
+    remote_cmd = (
+        f"tmux attach -t {session} 2>/dev/null || "
+        f"tmux new-session -s {session} 'cd ~/$(ls ~ | head -1) 2>/dev/null; claude'"
+    )
+    cmd = ['ssh', '-t', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
+           '-o', 'UserKnownHostsFile=/dev/null',
+           f'ec2-user@{record.public_ip}', remote_cmd]
+    click.echo(f"$ {' '.join(cmd[:8])} ...")
+    os.execvp('ssh', cmd)
+
+
+@dev_group.command(name='ssh')
+@click.argument('name')
+def dev_ssh_cmd(name):
+    """SSH into a dev host (uses the auto-generated key)."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        record = service.get_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not record.public_ip:
+        click.echo(f"Error: dev host '{name}' has no public IP yet.", err=True)
+        sys.exit(1)
+
+    if not record.ssh_key_credential_id:
+        click.echo(f"Error: no SSH key registered for '{name}'.", err=True)
+        sys.exit(1)
+
+    # materialize the private key as a temp file for ssh -i
+    cred = service.credential_service.get_credential(record.ssh_key_credential_id)
+    private_pem, _ = service.credential_service.get_ssh_keypair(cred)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
+        keyfile.write(private_pem.encode('utf-8'))
+        keypath = keyfile.name
+    os.chmod(keypath, 0o600)
+
+    cmd = ['ssh', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
+           '-o', 'UserKnownHostsFile=/dev/null', f'ec2-user@{record.public_ip}']
+    click.echo(f"$ {' '.join(cmd)}")
+    os.execvp('ssh', cmd)
+
+
+@dev_group.command(name='stop')
+@click.argument('name')
+def dev_stop_cmd(name):
+    """Stop the EC2 instance (EBS preserved)."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        service.stop_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"  ✓ stopped '{name}'")
+
+
+@dev_group.command(name='start')
+@click.argument('name')
+def dev_start_cmd(name):
+    """Start a previously stopped EC2 dev host."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        service.start_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"  ✓ started '{name}'")
+
+
+@dev_group.command(name='destroy')
+@click.argument('name')
+@click.option('--force', is_flag=True, help='Tear down even if not in state.')
+@click.option('--aws-profile', 'aws_profile', default=None, help='AWS profile.')
+@click.pass_context
+def dev_destroy_cmd(ctx, name, force, aws_profile):
+    """Tear down the dev host (instance, SG, EIP, key)."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    if not aws_profile:
+        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get('AWS_PROFILE')
+
+    service = _build_service()
+    try:
+        record = service.get_host(name)
+        region = record.region
+    except RemoteComposeError:
+        region = None
+
+    service.terraform_runner = _runner_for(name, aws_profile=aws_profile, region=region)
+    try:
+        service.destroy_host(name, force=force)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"  ✓ destroyed '{name}'")
+
+
+@dev_group.command(name='logs')
+@click.argument('name')
+@click.option('--service', 'service_name', default=None,
+              help='Tail logs for one compose service (default: all).')
+@click.option('--follow', '-f', is_flag=True, help='Stream logs continuously.')
+@click.option('--tail', 'tail_n', type=int, default=100, help='Lines per service (default 100).')
+def dev_logs_cmd(name, service_name, follow, tail_n):
+    """Tail docker compose logs from the dev host."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        record = service.get_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not record.public_ip:
+        click.echo(f"Error: dev host '{name}' has no public IP yet.", err=True)
+        sys.exit(1)
+
+    cred = service.credential_service.get_credential(record.ssh_key_credential_id)
+    private_pem, _ = service.credential_service.get_ssh_keypair(cred)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
+        keyfile.write(private_pem.encode('utf-8'))
+        keypath = keyfile.name
+    os.chmod(keypath, 0o600)
+
+    # Best-effort repo dir guess (matches what cloud-init creates)
+    repo_dir = "$(ls -d /home/ec2-user/*/ 2>/dev/null | head -1)"
+    flags = f"--tail={tail_n}" + (" -f" if follow else "")
+    svc_arg = service_name or ""
+    remote = (
+        f"cd {repo_dir} 2>/dev/null && "
+        f"sudo docker compose -f $(ls docker-compose.yml local.yml compose.yml 2>/dev/null | head -1) "
+        f"logs {flags} {svc_arg}"
+    )
+    cmd = ['ssh', '-t', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
+           '-o', 'UserKnownHostsFile=/dev/null',
+           f'ec2-user@{record.public_ip}', remote]
+    os.execvp('ssh', cmd)
+
+
+@dev_group.command(name='status')
+@click.argument('name')
+def dev_status_cmd(name):
+    """Show dev-host status, IP, source, uptime."""
+    from remote_compose.exceptions import RemoteComposeError
+
+    service = _build_service()
+    try:
+        record = service.get_host(name)
+    except RemoteComposeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"name:          {record.name}")
+    click.echo(f"status:        {record.status}")
+    click.echo(f"instance_type: {record.instance_type}")
+    click.echo(f"region:        {record.region}")
+    click.echo(f"ami:           {record.ami}")
+    click.echo(f"instance_id:   {record.instance_id}")
+    click.echo(f"public_ip:     {record.public_ip}")
+    click.echo(f"public_dns:    {record.public_dns}")
+    click.echo(f"created_at:    {record.created_at}")
+    click.echo(f"source:        {record.source}")
+
+
+# ---------- helpers shared with existing rc dev push ----------
+
+
+def _region_from_rc_yml(ctx) -> str | None:
+    """Best-effort load region from rc.yml — returns None if unavailable."""
+    import yaml
+
+    config_path = (ctx.obj or {}).get('config_path') or 'rc.yml'
+    p = Path(config_path)
+    if not p.exists():
+        return None
+    try:
+        cfg = yaml.safe_load(p.read_text()) or {}
+    except yaml.YAMLError:
+        return None
+    return cfg.get('region') or (cfg.get('aws') or {}).get('region')
+
+
+def _sg_id_for_instance(instance_id: str | None, region: str, aws_profile: str | None) -> str | None:
+    """Look up the SG attached to a dev-host instance."""
+    if not instance_id:
+        return None
+    import boto3
+
+    session = boto3.Session(profile_name=aws_profile, region_name=region)
+    ec2 = session.client("ec2")
+    resp = ec2.describe_instances(InstanceIds=[instance_id])
+    try:
+        return resp["Reservations"][0]["Instances"][0]["SecurityGroups"][0]["GroupId"]
+    except (IndexError, KeyError):
+        return None
+
+
+def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | None) -> None:
+    """Best-effort open one TCP port in a security group; ignore "already exists"."""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    session = boto3.Session(profile_name=aws_profile, region_name=region)
+    ec2 = session.client("ec2")
+    try:
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_id,
+            IpPermissions=[{
+                "IpProtocol": "tcp",
+                "FromPort": port,
+                "ToPort": port,
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+            }],
+        )
+    except ClientError as exc:
+        if "InvalidPermission.Duplicate" in str(exc):
+            return
+        raise
+
+
+def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
+                               env_files: tuple, repo_name: str) -> None:
+    """Wait for SSH, then SCP each env file under /home/ec2-user/<repo_name>.
+
+    Uses sudo mkdir+chown for the destination because /home/ec2-user may
+    still be root-owned at the moment SCP runs (cloud-init bootstrap is
+    likely still in flight and hasn't done its chown yet).
+    """
+    import subprocess
+    import tempfile
+    import time
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+
+    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if subprocess.call(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "true"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            break
+        time.sleep(5)
+    else:
+        raise click.ClickException("SSH never came up within 3 minutes")
+
+    # Stage to /tmp/rc-dev-envs first (always writable), then sudo-cp into the
+    # repo dir. This avoids racing the cloud-init chown of /home/ec2-user.
+    subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}",
+                    "mkdir -p /tmp/rc-dev-envs"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for f in env_files:
+        rel = Path(f)
+        try:
+            rel = rel.relative_to(Path.cwd())
+        except ValueError:
+            rel = Path(rel.name)
+        # encode subpath using __ as separator (since scp can't make dirs)
+        flat = str(rel).replace("/", "__")
+        subprocess.run(
+            ["scp"] + ssh_opts + [str(f), f"ec2-user@{public_ip}:/tmp/rc-dev-envs/{flat}"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Restore the subpath under /home/ec2-user/<repo_name>/
+        target = f"/home/ec2-user/{repo_name}/{rel}"
+        cmd = (
+            f"sudo mkdir -p $(dirname {target}) && "
+            f"sudo cp /tmp/rc-dev-envs/{flat} {target} && "
+            f"sudo chown -R ec2-user:ec2-user /home/ec2-user/{repo_name}"
+        )
+        subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", cmd],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _aws_profile_from_rc_yml(ctx) -> str | None:
+    """Best-effort load aws_profile from rc.yml."""
+    import yaml
+
+    config_path = (ctx.obj or {}).get('config_path') or 'rc.yml'
+    p = Path(config_path)
+    if not p.exists():
+        return None
+    try:
+        cfg = yaml.safe_load(p.read_text()) or {}
+    except yaml.YAMLError:
+        return None
+    return cfg.get('aws_profile') or (cfg.get('aws') or {}).get('profile')
+
+
+# ---------- legacy ECS dev push (kept for backwards compat) ----------
 
 
 @dev_group.command(name='push')
@@ -33,10 +585,10 @@ def dev_group():
                    'inotifywait (Linux).')
 @click.pass_context
 def dev_push_cmd(ctx, service, watch):
-    """Push local dev_volume source(s) to a running task via EFS.
+    """[Legacy ECS] Push local dev_volume source(s) to a running ECS task via EFS.
 
-    With no SERVICE arg, pushes EVERY service that declares dev_volumes.
-    With --watch, runs forever, re-pushing on every local edit.
+    Superseded by `rc dev up` (EC2 dev-host) for new workflows. Kept
+    in place for stacks that already use the ECS dev_volume path.
     """
     from remote_compose.dev_push import (
         DevPushError, push_all, watch_and_push,

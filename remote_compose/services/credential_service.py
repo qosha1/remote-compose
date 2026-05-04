@@ -302,3 +302,48 @@ class CredentialService(BaseService):
         ]
 
         return any(header in key_content for header in valid_headers)
+
+    def store_ssh_keypair(
+        self,
+        name: str,
+        private_pem: str,
+        public_openssh: str,
+        description: str = '',
+        created_by: str = '',
+    ) -> SecureCredential:
+        """Store an SSH keypair (private + public) as a single credential.
+
+        Used by `rc dev` for per-host ed25519 keys. The private key is
+        Fernet-encrypted; the public key is bundled in the same encrypted
+        blob (JSON-packed) so a single credential row holds both halves.
+        """
+        import json
+
+        if not self._validate_ssh_key(private_pem):
+            raise ValidationError("Invalid SSH private key format")
+
+        bundle = json.dumps({"private": private_pem, "public": public_openssh})
+        encrypted = encrypt_value(bundle)
+
+        credential = SecureCredential.objects.create(
+            name=name,
+            credential_type=SecureCredential.CredentialType.SSH_PRIVATE_KEY,
+            encrypted_value=encrypted,
+            description=description or f"SSH keypair: {name}",
+            created_by=created_by,
+        )
+        self.log_info(f"Stored SSH keypair: {name}")
+        self.notify_observers('credential_created', credential=credential)
+        return credential
+
+    def get_ssh_keypair(self, credential: SecureCredential) -> tuple[str, str]:
+        """Return (private_pem, public_openssh) from a stored keypair credential."""
+        import json
+
+        decrypted = self.get_decrypted_value(credential)
+        # backwards-compat: if not JSON, treat as plain private key (no public)
+        try:
+            bundle = json.loads(decrypted)
+            return bundle["private"], bundle.get("public", "")
+        except (json.JSONDecodeError, KeyError):
+            return decrypted, ""

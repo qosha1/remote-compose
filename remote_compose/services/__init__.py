@@ -60,6 +60,7 @@ from .security_group_service import SecurityGroupService
 from .alb_service import ALBService
 from .secrets_service import SecretsService
 from .service_connect_service import ServiceConnectService
+# dev_host moved to remote_compose.dev_host (top-level package, Django-free)
 
 __all__ = [
     # Base

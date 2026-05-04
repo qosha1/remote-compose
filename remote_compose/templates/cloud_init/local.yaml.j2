@@ -1,0 +1,16 @@
+#cloud-config
+package_update: true
+packages:
+  - docker
+  - rsync
+
+write_files:
+  - path: /etc/profile.d/rc-dev.sh
+    permissions: '0644'
+    content: |
+      export RC_DEV_LOCAL_TARGET="/home/ec2-user/{{ target_name }}"
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ec2-user
+  - install -d -o ec2-user -g ec2-user /home/ec2-user/{{ target_name }}

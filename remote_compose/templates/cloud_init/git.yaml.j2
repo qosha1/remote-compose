@@ -1,0 +1,94 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - docker
+  - git
+  - tmux
+  - jq
+
+write_files:
+  # Bootstrap script in /usr/local/bin (always writable as root, no
+  # ec2-user dependency). Avoids the cloud-init race where /home/ec2-user
+  # might not be ec2-user-owned at write_files time on AL2023.
+  - path: /usr/local/bin/rc-dev-bootstrap.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      # Ensure ec2-user owns its home (cloud-init sometimes leaves it root-owned)
+      chown -R ec2-user:ec2-user /home/ec2-user
+      # Move staged env file (written via cloud-init write_files in /tmp) into place
+      if [ -f /tmp/rc-dev-env-staging ]; then
+        cp /tmp/rc-dev-env-staging /home/ec2-user/.rc-dev-env
+        chown ec2-user:ec2-user /home/ec2-user/.rc-dev-env
+        chmod 0600 /home/ec2-user/.rc-dev-env
+        rm -f /tmp/rc-dev-env-staging
+      fi
+      cd /home/ec2-user
+      # Source env (GH_TOKEN, ANTHROPIC_API_KEY, etc.) if present
+      if [ -f /home/ec2-user/.rc-dev-env ]; then
+        set -a && source /home/ec2-user/.rc-dev-env && set +a
+      fi
+      # Clone with optional GH token (set via SSM-injected env or runcmd export)
+      if [ -n "${GH_TOKEN:-}" ]; then
+        sudo -u ec2-user GH_TOKEN="${GH_TOKEN}" git clone "https://x-access-token:${GH_TOKEN}@github.com/{{ url | replace('https://github.com/', '') }}" {{ repo_name }}
+      else
+        sudo -u ec2-user git clone {{ url }} {{ repo_name }}
+      fi
+      cd {{ repo_name }}
+      sudo -u ec2-user git checkout {{ ref }} || sudo -u ec2-user git checkout -b {{ ref }}
+      # Try the common compose file names — first match wins.
+      for f in docker-compose.yml local.yml compose.yml docker-compose.local.yml; do
+        if [ -f "$f" ]; then
+          docker compose -f "$f" up -d --build
+          break
+        fi
+      done
+
+  - path: /usr/local/bin/rc-dev-start-claude.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      # Start claude in a detached tmux session ec2-user can attach to.
+      cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user
+      if [ -f /home/ec2-user/.rc-dev-env ]; then
+        set -a && source /home/ec2-user/.rc-dev-env && set +a
+      fi
+      tmux kill-session -t claude 2>/dev/null || true
+      tmux new-session -d -s claude "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude {{ claude_flags }}"
+      echo "claude tmux session started — attach with: tmux attach -t claude"
+
+  - path: /etc/profile.d/rc-dev.sh
+    permissions: '0644'
+    content: |
+      export RC_DEV_REPO_URL="{{ url }}"
+      export RC_DEV_REPO_REF="{{ ref }}"
+      export RC_DEV_REPO_DIR="/home/ec2-user/{{ repo_name }}"
+      cd "$RC_DEV_REPO_DIR" 2>/dev/null || true
+{% if has_env %}
+  # Write to /tmp first — /home/ec2-user might not be ec2-user-owned at
+  # write_files time. Bootstrap script copies + chowns it after fixing perms.
+  - path: /tmp/rc-dev-env-staging
+    permissions: '0600'
+    owner: root:root
+    content: |
+{{ rc_dev_env_content | indent(6, True) }}
+{% endif %}
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ec2-user
+  - mkdir -p /usr/local/lib/docker/cli-plugins
+  - curl -SL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-{{ docker_arch }}" -o /usr/local/lib/docker/cli-plugins/docker-compose
+  - chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+  # Node 20 + Claude Code agent CLI
+  - curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+  - dnf install -y nodejs
+  - npm install -g @anthropic-ai/claude-code
+  # Run repo bootstrap (handles ownership + clone + compose up)
+  - bash /usr/local/bin/rc-dev-bootstrap.sh
+  # Start claude in a tmux session so user attaches into a ready agent
+  - sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh

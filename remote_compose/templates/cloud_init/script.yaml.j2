@@ -1,0 +1,9 @@
+#cloud-config
+package_update: true
+packages:
+  - docker
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ec2-user
+  - {{ script | replace("\n", " && ") }}
