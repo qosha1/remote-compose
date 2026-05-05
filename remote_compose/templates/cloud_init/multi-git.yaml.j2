@@ -34,6 +34,21 @@ write_files:
       fi
       sudo -u ec2-user git -C /home/ec2-user/{{ repo.target }} checkout {{ repo.ref }} || sudo -u ec2-user git -C /home/ec2-user/{{ repo.target }} checkout -b {{ repo.ref }}
       {% endfor %}
+      # Place any env files staged by `rc dev up --env <file>` into their
+      # original cwd-relative paths under /home/ec2-user/. Done HERE (after
+      # clones) to avoid pre-creating subdirs that would block git clone.
+      if [ -d /tmp/rc-dev-envs ]; then
+        for staged in /tmp/rc-dev-envs/*; do
+          [ -f "$staged" ] || continue
+          name=$(basename "$staged")
+          # Decode __ back to / for the original subpath.
+          rel=$(echo "$name" | sed 's|__|/|g')
+          target=/home/ec2-user/$rel
+          mkdir -p "$(dirname $target)"
+          cp "$staged" "$target"
+          chown ec2-user:ec2-user "$target"
+        done
+      fi
       # Wait up to 5 min for the user-supplied compose file to land via SCP
       # (rc dev up CLI uploads it post-boot once SSH is reachable).
       for i in $(seq 1 60); do
@@ -47,6 +62,10 @@ write_files:
         exit 0
       fi
       cd /home/ec2-user
+      # Final ownership sweep — defends against the race where post-boot SCP
+      # ops (compose file, env files, claude config tarball) accidentally
+      # landed root-owned files in the home dir (rc-7v6).
+      chown -R ec2-user:ec2-user /home/ec2-user
       docker compose -f {{ compose_filename }} up -d --build || true
 
   - path: /usr/local/bin/rc-dev-start-claude.sh
@@ -84,5 +103,16 @@ runcmd:
   - curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
   - dnf install -y nodejs
   - npm install -g @anthropic-ai/claude-code
-  - bash /usr/local/bin/rc-dev-bootstrap.sh &
+  # NOTE: bootstrap runs SYNCHRONOUSLY (no '&'). The race where parallel
+  # CLI-side SCP/tar operations corrupted git checkout perms (rc-7v6) is
+  # avoided by serializing here. Cost: cloud-init reports 'done' later
+  # (after compose up), but rc dev up's CLI-side post-boot operations now
+  # only run after bootstrap finishes — so they never collide.
+  #
+  # Wrinkle: bootstrap WAITS for the compose file to be SCP'd by the CLI
+  # post-SSH. Since SSH comes up well before runcmd reaches bootstrap, the
+  # CLI's _scp_compose_file races bootstrap's `for i in $(seq 1 60)` wait
+  # loop — by design. CLI wins (SCP completes in <5s); bootstrap then
+  # proceeds with `docker compose up`.
+  - bash /usr/local/bin/rc-dev-bootstrap.sh
   - sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh

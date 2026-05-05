@@ -39,6 +39,23 @@ write_files:
       fi
       cd {{ repo_name }}
       sudo -u ec2-user git checkout {{ ref }} || sudo -u ec2-user git checkout -b {{ ref }}
+      # Place any env files staged by `rc dev up --env <file>` into their
+      # original cwd-relative paths under /home/ec2-user/. Done HERE (after
+      # clone+checkout) to avoid pre-creating subdirs that block clone.
+      if [ -d /tmp/rc-dev-envs ]; then
+        for staged in /tmp/rc-dev-envs/*; do
+          [ -f "$staged" ] || continue
+          name=$(basename "$staged")
+          rel=$(echo "$name" | sed 's|__|/|g')
+          target=/home/ec2-user/$rel
+          mkdir -p "$(dirname $target)"
+          cp "$staged" "$target"
+          chown ec2-user:ec2-user "$target"
+        done
+      fi
+      # Final ownership sweep — defends against the race where post-boot SCP
+      # ops landed root-owned files in the home dir (rc-7v6).
+      chown -R ec2-user:ec2-user /home/ec2-user
       # Try the common compose file names — first match wins.
       for f in docker-compose.yml local.yml compose.yml docker-compose.local.yml; do
         if [ -f "$f" ]; then

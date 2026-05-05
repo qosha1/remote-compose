@@ -246,7 +246,7 @@ def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, reg
             repo_name = "_envs"  # workspace-level, not under any single repo
         if env_files:
             _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
-            click.echo(f"  ✓ env files copied to /home/ec2-user/{repo_name}/")
+            click.echo(f"  ✓ env files staged in /tmp/rc-dev-envs/ — bootstrap places them post-clone")
         if compose_file:
             _scp_compose_file(record.public_ip, priv_pem, compose_file)
             click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(compose_file).name}")
@@ -698,27 +698,25 @@ def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
                     "mkdir -p /tmp/rc-dev-envs"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    # Stage every env file in /tmp/rc-dev-envs/ ONLY. The bootstrap script
+    # picks them up AFTER cloning the repos and places them into the right
+    # subpaths. This avoids the race where pre-creating /home/ec2-user/<repo>/
+    # subdirs before bootstrap's git clone causes "destination already exists"
+    # errors (rc-7v6 follow-up).
     for f in env_files:
-        rel = Path(f)
+        abs_f = Path(f).resolve()
+        cwd_abs = Path.cwd().resolve()
         try:
-            rel = rel.relative_to(Path.cwd())
+            rel = abs_f.relative_to(cwd_abs)
         except ValueError:
-            rel = Path(rel.name)
-        # encode subpath using __ as separator (since scp can't make dirs)
+            rel = Path(abs_f.name)
+        # __ encodes path separators so the flat filename round-trips back
+        # to the original subpath in the bootstrap script's placement loop.
         flat = str(rel).replace("/", "__")
         subprocess.run(
-            ["scp"] + ssh_opts + [str(f), f"ec2-user@{public_ip}:/tmp/rc-dev-envs/{flat}"],
+            ["scp"] + ssh_opts + [str(abs_f), f"ec2-user@{public_ip}:/tmp/rc-dev-envs/{flat}"],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        # Restore the subpath under /home/ec2-user/<repo_name>/
-        target = f"/home/ec2-user/{repo_name}/{rel}"
-        cmd = (
-            f"sudo mkdir -p $(dirname {target}) && "
-            f"sudo cp /tmp/rc-dev-envs/{flat} {target} && "
-            f"sudo chown -R ec2-user:ec2-user /home/ec2-user/{repo_name}"
-        )
-        subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", cmd],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _aws_profile_from_rc_yml(ctx) -> str | None:
