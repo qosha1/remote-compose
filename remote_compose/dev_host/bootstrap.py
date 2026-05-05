@@ -119,7 +119,50 @@ class ScriptSource:
         return _render("script.yaml.j2", script=self.script)
 
 
-SourceSpec = Union[GitSource, ImageSource, LocalSource, ScriptSource]
+@dataclass
+class MultiGitSource:
+    """Multi-repo dev-host source: clone N repos to N target dirs and run a
+    user-supplied top-level docker-compose at /home/ec2-user/.
+
+    The compose file itself is NOT rendered into cloud-init (it might be large
+    and contain secrets); the CLI SCPs it post-boot via _wait_for_ssh_and_copy_env.
+    Cloud-init only does the clones + waits for the compose file to land.
+    """
+
+    repos: list = field(default_factory=list)  # [{"url": "...", "ref": "main"}, ...]
+    compose_filename: str = "docker-compose.full.yml"
+    type: Literal["multi-git"] = "multi-git"
+    gh_token: str = ""
+    extra_env: dict = field(default_factory=dict)
+    skip_permissions: bool = False
+
+    def render_user_data(self, *, docker_arch: str = "aarch64") -> str:
+        # Normalize each repo entry: ensure url, ref, target keys
+        normalized = []
+        for r in self.repos:
+            url = r["url"]
+            normalized.append({
+                "url": url,
+                "ref": r.get("ref", "main"),
+                "target": r.get("target") or _repo_name_from_url(url),
+            })
+        env_lines = []
+        if self.gh_token:
+            env_lines.append(f"export GH_TOKEN={self.gh_token!r}")
+        for k, v in (self.extra_env or {}).items():
+            env_lines.append(f"export {k}={v!r}")
+        return _render(
+            "multi-git.yaml.j2",
+            repos=normalized,
+            compose_filename=self.compose_filename,
+            docker_arch=docker_arch,
+            rc_dev_env_content="\n".join(env_lines),
+            has_env=bool(env_lines),
+            claude_flags="--dangerously-skip-permissions" if self.skip_permissions else "",
+        )
+
+
+SourceSpec = Union[GitSource, ImageSource, LocalSource, ScriptSource, MultiGitSource]
 
 
 _SOURCE_CLASSES: dict[str, type] = {
@@ -127,6 +170,7 @@ _SOURCE_CLASSES: dict[str, type] = {
     "image": ImageSource,
     "local": LocalSource,
     "script": ScriptSource,
+    "multi-git": MultiGitSource,
 }
 
 

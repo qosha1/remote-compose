@@ -192,6 +192,105 @@ class TestScriptSource:
         assert "echo hello && touch /tmp/marker" in rendered
 
 
+class TestMultiGitSource:
+    def test_defaults(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[
+                {"url": "https://github.com/owner/backend.git"},
+                {"url": "https://github.com/owner/frontend.git"},
+            ],
+            compose_filename="docker-compose.full.yml",
+        )
+
+        assert src.type == "multi-git"
+        assert len(src.repos) == 2
+        assert src.compose_filename == "docker-compose.full.yml"
+        assert src.gh_token == ""
+        assert src.skip_permissions is False
+
+    def test_render_clones_each_repo(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[
+                {"url": "https://github.com/owner/backend.git", "ref": "main"},
+                {"url": "https://github.com/owner/frontend.git", "ref": "alice/feat-x"},
+            ],
+            compose_filename="docker-compose.full.yml",
+        )
+        rendered = src.render_user_data()
+
+        assert rendered.startswith("#cloud-config")
+        # both clones must appear
+        assert "github.com/owner/backend.git" in rendered
+        assert "github.com/owner/frontend.git" in rendered
+        # branches preserved
+        assert "alice/feat-x" in rendered
+        # compose-file wait + apply present
+        assert "docker-compose.full.yml" in rendered
+        assert "docker compose -f docker-compose.full.yml up" in rendered
+
+    def test_render_uses_url_basename_as_target_dir(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[{"url": "https://github.com/qosha1/sentinal.git"}],
+            compose_filename="x.yml",
+        )
+        rendered = src.render_user_data()
+
+        # default target dir = repo basename without .git
+        assert "/home/ec2-user/sentinal" in rendered
+
+    def test_render_with_gh_token_writes_env_staging(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/repo.git"}],
+            compose_filename="x.yml",
+            gh_token="ghp_secret",
+        )
+        rendered = src.render_user_data()
+
+        assert "path: /tmp/rc-dev-env-staging" in rendered
+        assert "ghp_secret" in rendered
+
+    def test_skip_permissions_propagates_to_claude_command(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        rendered = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/repo.git"}],
+            compose_filename="x.yml",
+            skip_permissions=True,
+        ).render_user_data()
+
+        assert "--dangerously-skip-permissions" in rendered
+
+    def test_yaml_round_trips_through_state(self):
+        """source_from_dict should reconstruct a MultiGitSource from its dict form."""
+        from remote_compose.dev_host.bootstrap import (
+            MultiGitSource,
+            source_from_dict,
+        )
+
+        original = MultiGitSource(
+            repos=[
+                {"url": "https://github.com/a/b.git", "ref": "main"},
+                {"url": "https://github.com/c/d.git", "ref": "v2"},
+            ],
+            compose_filename="x.yml",
+        )
+        from dataclasses import asdict
+
+        restored = source_from_dict(asdict(original))
+        assert isinstance(restored, MultiGitSource)
+        assert len(restored.repos) == 2
+        assert restored.repos[0]["url"] == "https://github.com/a/b.git"
+        assert restored.compose_filename == "x.yml"
+
+
 class TestSourceAutodetect:
     def test_detect_from_git_repo_returns_gitsource(self, tmp_path, monkeypatch):
         """In a git repo cwd, factory returns GitSource with detected url+branch."""

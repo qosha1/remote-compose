@@ -110,8 +110,13 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
 
 @dev_group.command(name='up')
 @click.argument('name')
-@click.option('--repo', 'repo_url', default=None, help='Git repo URL (default: cwd remote).')
-@click.option('--branch', 'branch', default=None, help='Branch / ref (default: cwd HEAD).')
+@click.option('--repo', 'repos', multiple=True,
+              help='Git repo URL (repeatable). With 2+ → MultiGitSource (multi-repo deploy). '
+                   'With 1 → GitSource. With 0 → auto-detect from cwd.')
+@click.option('--branch', 'branch', default=None,
+              help='Branch / ref applied to all --repos (default: cwd HEAD or main).')
+@click.option('--compose', 'compose_file', type=click.Path(exists=True), default=None,
+              help='Top-level compose file to SCP onto the host (required for multi-repo).')
 @click.option('--image', 'image', default=None, help='Docker image to run (alternative to --repo).')
 @click.option('--instance-type', 'instance_type', default='t4g.medium',
               help='EC2 instance type (default: t4g.medium ARM).')
@@ -133,22 +138,32 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
               help='Boot the in-box claude with --dangerously-skip-permissions '
                    '(autonomous mode, no per-tool confirmations).')
 @click.pass_context
-def dev_up_cmd(ctx, name, repo_url, branch, image, instance_type, region, ebs_size_gb,
-               aws_profile, gh_token, anthropic_key, env_files, extra_ports,
+def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, region,
+               ebs_size_gb, aws_profile, gh_token, anthropic_key, env_files, extra_ports,
                skip_permissions):
     """Provision an EC2 dev-host and start the source's docker compose."""
     from remote_compose.exceptions import RemoteComposeError
     from remote_compose.dev_host.bootstrap import (
         GitSource,
         ImageSource,
+        MultiGitSource,
         detect_source_from_cwd,
     )
 
-    # Resolve source
-    if image:
+    # Resolve source: 2+ repos → multi; 1 repo → single git; 0 + image → image;
+    # 0 + nothing → autodetect from cwd.
+    if len(repos) >= 2:
+        if not compose_file:
+            click.echo("Error: --compose <file> is required when passing 2+ --repo flags.", err=True)
+            sys.exit(1)
+        source = MultiGitSource(
+            repos=[{"url": u, "ref": branch or "main"} for u in repos],
+            compose_filename=Path(compose_file).name,
+        )
+    elif image:
         source = ImageSource(image=image)
-    elif repo_url:
-        source = GitSource(url=repo_url, ref=branch or 'main')
+    elif len(repos) == 1:
+        source = GitSource(url=repos[0], ref=branch or 'main')
     else:
         try:
             source = detect_source_from_cwd()
@@ -159,8 +174,8 @@ def dev_up_cmd(ctx, name, repo_url, branch, image, instance_type, region, ebs_si
         if branch:
             source.ref = branch
 
-    # Inject secrets into the source (only GitSource supports gh_token/extra_env)
-    if isinstance(source, GitSource):
+    # Inject secrets — GitSource and MultiGitSource share the same fields
+    if isinstance(source, (GitSource, MultiGitSource)):
         if gh_token:
             source.gh_token = gh_token
         if anthropic_key:
@@ -213,16 +228,23 @@ def dev_up_cmd(ctx, name, repo_url, branch, image, instance_type, region, ebs_si
                 click.echo(f"  ✓ port {port} open")
 
     # Copy env files into the box (requires SSH to be up — wait for it)
-    if env_files:
-        click.echo(f"\n  Copying {len(env_files)} env file(s) — waiting for SSH...")
+    if env_files or compose_file:
+        click.echo("\n  Copying files into the box — waiting for SSH...")
         keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
         priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
-        # Repo name is needed to place env files inside the cloned repo dir
+        # Repo name is needed to place env files inside the cloned repo dir.
+        # For MultiGitSource we drop env files at /home/ec2-user/_envs/ instead.
         repo_name = ""
         if isinstance(source, GitSource):
             repo_name = source.url.rstrip("/").split("/")[-1].removesuffix(".git")
-        _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
-        click.echo(f"  ✓ env files copied to /home/ec2-user/{repo_name}/")
+        elif isinstance(source, MultiGitSource):
+            repo_name = "_envs"  # workspace-level, not under any single repo
+        if env_files:
+            _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
+            click.echo(f"  ✓ env files copied to /home/ec2-user/{repo_name}/")
+        if compose_file:
+            _scp_compose_file(record.public_ip, priv_pem, compose_file)
+            click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(compose_file).name}")
 
 
 @dev_group.command(name='list')
@@ -500,6 +522,32 @@ def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | No
         if "InvalidPermission.Duplicate" in str(exc):
             return
         raise
+
+
+def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> None:
+    """SCP a docker-compose file to /home/ec2-user/<basename> on the box.
+
+    The cloud-init bootstrap waits up to 5min for this file before running
+    `docker compose up`. Only relevant for MultiGitSource flows.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+    basename = Path(compose_path).name
+    # Stage to /tmp first (always writable) then sudo cp + chown — same race
+    # as env files: /home/ec2-user might still be root-owned at this point.
+    subprocess.run(["scp"] + ssh_opts + [compose_path, f"ec2-user@{public_ip}:/tmp/{basename}"],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}",
+                    f"sudo cp /tmp/{basename} /home/ec2-user/{basename} && "
+                    f"sudo chown ec2-user:ec2-user /home/ec2-user/{basename}"],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,

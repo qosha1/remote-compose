@@ -1,0 +1,88 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - docker
+  - git
+  - tmux
+  - jq
+
+write_files:
+  - path: /usr/local/bin/rc-dev-bootstrap.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      chown -R ec2-user:ec2-user /home/ec2-user
+      if [ -f /tmp/rc-dev-env-staging ]; then
+        cp /tmp/rc-dev-env-staging /home/ec2-user/.rc-dev-env
+        chown ec2-user:ec2-user /home/ec2-user/.rc-dev-env
+        chmod 0600 /home/ec2-user/.rc-dev-env
+        rm -f /tmp/rc-dev-env-staging
+      fi
+      cd /home/ec2-user
+      if [ -f /home/ec2-user/.rc-dev-env ]; then
+        set -a && source /home/ec2-user/.rc-dev-env && set +a
+      fi
+      # Clone each repo to its target dir.
+      {% for repo in repos %}
+      if [ -n "${GH_TOKEN:-}" ]; then
+        sudo -u ec2-user GH_TOKEN="${GH_TOKEN}" git clone "https://x-access-token:${GH_TOKEN}@github.com/{{ repo.url | replace('https://github.com/', '') }}" {{ repo.target }}
+      else
+        sudo -u ec2-user git clone {{ repo.url }} {{ repo.target }}
+      fi
+      sudo -u ec2-user git -C /home/ec2-user/{{ repo.target }} checkout {{ repo.ref }} || sudo -u ec2-user git -C /home/ec2-user/{{ repo.target }} checkout -b {{ repo.ref }}
+      {% endfor %}
+      # Wait up to 5 min for the user-supplied compose file to land via SCP
+      # (rc dev up CLI uploads it post-boot once SSH is reachable).
+      for i in $(seq 1 60); do
+        if [ -f /home/ec2-user/{{ compose_filename }} ]; then
+          break
+        fi
+        sleep 5
+      done
+      if [ ! -f /home/ec2-user/{{ compose_filename }} ]; then
+        echo "WARNING: {{ compose_filename }} did not arrive within 5min — skipping compose up. SCP it manually and run docker compose up." >&2
+        exit 0
+      fi
+      cd /home/ec2-user
+      docker compose -f {{ compose_filename }} up -d --build || true
+
+  - path: /usr/local/bin/rc-dev-start-claude.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      cd /home/ec2-user
+      if [ -f /home/ec2-user/.rc-dev-env ]; then
+        set -a && source /home/ec2-user/.rc-dev-env && set +a
+      fi
+      tmux kill-session -t claude 2>/dev/null || true
+      tmux new-session -d -s claude "cd /home/ec2-user; claude {{ claude_flags }}"
+      echo "claude tmux session started — attach with: tmux attach -t claude"
+
+  - path: /etc/profile.d/rc-dev.sh
+    permissions: '0644'
+    content: |
+      export RC_DEV_WORKSPACE="/home/ec2-user"
+      cd "$RC_DEV_WORKSPACE" 2>/dev/null || true
+{% if has_env %}
+  - path: /tmp/rc-dev-env-staging
+    permissions: '0600'
+    owner: root:root
+    content: |
+{{ rc_dev_env_content | indent(6, True) }}
+{% endif %}
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ec2-user
+  - mkdir -p /usr/local/lib/docker/cli-plugins
+  - curl -SL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-{{ docker_arch }}" -o /usr/local/lib/docker/cli-plugins/docker-compose
+  - chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+  - curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+  - dnf install -y nodejs
+  - npm install -g @anthropic-ai/claude-code
+  - bash /usr/local/bin/rc-dev-bootstrap.sh &
+  - sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh
