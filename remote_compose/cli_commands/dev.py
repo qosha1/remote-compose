@@ -137,10 +137,15 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
 @click.option('--skip-permissions', 'skip_permissions', is_flag=True,
               help='Boot the in-box claude with --dangerously-skip-permissions '
                    '(autonomous mode, no per-tool confirmations).')
+@click.option('--no-claude-config', 'no_claude_config', is_flag=True,
+              help='Skip auto-copy of local ~/.claude config + auth (default: copy).')
+@click.option('--claude-config-from', 'claude_config_from', type=click.Path(exists=True),
+              default=None,
+              help='Path to a custom .claude/ directory to copy (default: $HOME/.claude).')
 @click.pass_context
 def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, region,
                ebs_size_gb, aws_profile, gh_token, anthropic_key, env_files, extra_ports,
-               skip_permissions):
+               skip_permissions, no_claude_config, claude_config_from):
     """Provision an EC2 dev-host and start the source's docker compose."""
     from remote_compose.exceptions import RemoteComposeError
     from remote_compose.dev_host.bootstrap import (
@@ -245,6 +250,20 @@ def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, reg
         if compose_file:
             _scp_compose_file(record.public_ip, priv_pem, compose_file)
             click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(compose_file).name}")
+
+    # Auto-copy local Claude config + auth (default ON; --no-claude-config to opt out)
+    if not no_claude_config:
+        keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
+        priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
+        click.echo("\n  Copying local Claude config (~/.claude + ~/.claude.json)...")
+        try:
+            _copy_claude_config(
+                record.public_ip, priv_pem,
+                claude_dir=Path(claude_config_from) if claude_config_from else None,
+            )
+            click.echo("  ✓ in-box claude is pre-authenticated — `rc dev attach` lands ready")
+        except Exception as exc:
+            click.echo(f"  ! claude config copy failed: {exc} — you'll need to login on first attach", err=True)
 
 
 @dev_group.command(name='list')
@@ -522,6 +541,101 @@ def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | No
         if "InvalidPermission.Duplicate" in str(exc):
             return
         raise
+
+
+def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
+    """Tar up ONLY the small auth + settings files from ~/.claude.
+
+    Skips projects/, backups/, cache/, history.jsonl, etc. — those are
+    per-machine session state, not auth, and total ~7GB on a typical install.
+    Returns path to the gz'd tarball (caller is responsible for cleanup).
+    """
+    import tarfile
+    import tempfile
+
+    # Anything beyond this short list is per-machine session state and
+    # would bloat the SCP without making the in-box claude any more useful.
+    ALLOWED_SUBPATHS = ["settings.json", "CLAUDE.md", "agents", "commands"]
+
+    fd, tarpath = tempfile.mkstemp(suffix=".tar.gz", prefix="rc-claude-cfg-")
+    os.close(fd)
+    with tarfile.open(tarpath, "w:gz") as tar:
+        if claude_json.exists():
+            tar.add(claude_json, arcname=".claude.json")
+        if claude_dir.exists():
+            for member in ALLOWED_SUBPATHS:
+                p = claude_dir / member
+                if p.exists():
+                    tar.add(p, arcname=f".claude/{member}")
+    return Path(tarpath)
+
+
+def _copy_claude_config(public_ip: str, private_pem: str,
+                        claude_dir: Path | None = None,
+                        claude_json: Path | None = None) -> None:
+    """Stage local claude auth + minimal config onto the box and restart its tmux.
+
+    Default sources: ~/.claude/ and ~/.claude.json. Override via the kwargs
+    or via --claude-config-from on the CLI. Restarts the in-box tmux 'claude'
+    session afterward so it picks up the freshly copied auth.
+
+    SECURITY: the config bundle includes OAuth/API tokens. They land on the
+    EC2 instance and are readable by anyone who can SSH in or read the disk.
+    Acceptable for personal dev hosts, NOT for shared/multi-tenant infra.
+    """
+    import subprocess
+    import tempfile
+
+    src_dir = Path(claude_dir) if claude_dir else Path.home() / ".claude"
+    src_json = Path(claude_json) if claude_json else Path.home() / ".claude.json"
+
+    if not src_json.exists() and not src_dir.exists():
+        click.echo("  ! no local Claude config found at ~/.claude — skipping copy")
+        return
+
+    tarball = _build_claude_config_tarball(src_dir, src_json)
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+
+    try:
+        # Stage the tarball
+        subprocess.run(
+            ["scp"] + ssh_opts + [str(tarball),
+                                  f"ec2-user@{public_ip}:/tmp/rc-claude-cfg.tar.gz"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Extract + chown — done via sudo so it works regardless of /home/ec2-user perm state
+        subprocess.run(
+            ["ssh"] + ssh_opts + [
+                f"ec2-user@{public_ip}",
+                "sudo tar -xzf /tmp/rc-claude-cfg.tar.gz -C /home/ec2-user/ && "
+                "sudo chown -R ec2-user:ec2-user /home/ec2-user/.claude /home/ec2-user/.claude.json 2>/dev/null || true && "
+                "sudo chmod 600 /home/ec2-user/.claude.json 2>/dev/null || true && "
+                "rm -f /tmp/rc-claude-cfg.tar.gz"
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Restart the in-box claude tmux so it picks up the new config (cloud-init
+        # may have started a session earlier with no auth — that one is killed).
+        # Best-effort: the start script may not exist yet if cloud-init hasn't
+        # finished; the user will get a fresh session on first `rc dev attach`.
+        subprocess.run(
+            ["ssh"] + ssh_opts + [
+                f"ec2-user@{public_ip}",
+                "sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh 2>/dev/null || true"
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    finally:
+        try:
+            tarball.unlink()
+        except OSError:
+            pass
 
 
 def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> None:

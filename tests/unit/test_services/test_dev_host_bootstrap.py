@@ -291,6 +291,89 @@ class TestMultiGitSource:
         assert restored.compose_filename == "x.yml"
 
 
+class TestClaudeConfigTarball:
+    """Unit tests for _build_claude_config_tarball — the local helper that
+    packs only auth + minimal settings (NOT the 7GB of project history)."""
+
+    def test_includes_claude_json(self, tmp_path):
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text('{"oauth": "token"}')
+
+        tarball = _build_claude_config_tarball(claude_dir, json_path)
+
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+        assert ".claude.json" in names
+
+    def test_includes_settings_and_agents_when_present(self, tmp_path):
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text("{}")
+        (claude_dir / "CLAUDE.md").write_text("# global mem")
+        (claude_dir / "agents").mkdir()
+        (claude_dir / "agents" / "my-agent.md").write_text("---\nname: x\n---\nbody")
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text('{}')
+
+        tarball = _build_claude_config_tarball(claude_dir, json_path)
+
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+        assert ".claude/settings.json" in names
+        assert ".claude/CLAUDE.md" in names
+        assert ".claude/agents" in names
+
+    def test_excludes_projects_and_cache_dirs(self, tmp_path):
+        """The 7GB anti-bloat assertion: do NOT pack projects/, backups/, cache/."""
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        for d in ("projects", "backups", "cache", "history.jsonl",
+                  "shell-snapshots", "telemetry", "statsig"):
+            p = claude_dir / d
+            if d.endswith(".jsonl"):
+                p.write_text("history")
+            else:
+                p.mkdir()
+                (p / "junk.bin").write_bytes(b"x" * 1024)
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text("{}")
+
+        tarball = _build_claude_config_tarball(claude_dir, json_path)
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+
+        for excluded in ("projects", "backups", "cache", "history.jsonl",
+                         "shell-snapshots", "telemetry", "statsig"):
+            for n in names:
+                assert excluded not in n, f"tarball should not contain {excluded}, found {n}"
+
+    def test_handles_missing_claude_dir_gracefully(self, tmp_path):
+        """If ~/.claude doesn't exist (fresh machine), still tarball whatever
+        files do exist (e.g. just .claude.json)."""
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text('{"x":1}')
+        # No claude_dir — pass a path that doesn't exist
+        tarball = _build_claude_config_tarball(tmp_path / "nonexistent", json_path)
+
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+        assert ".claude.json" in names
+
+
 class TestSourceAutodetect:
     def test_detect_from_git_repo_returns_gitsource(self, tmp_path, monkeypatch):
         """In a git repo cwd, factory returns GitSource with detected url+branch."""
