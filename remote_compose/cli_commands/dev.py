@@ -581,7 +581,10 @@ def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
 
     # Anything beyond this short list is per-machine session state and
     # would bloat the SCP without making the in-box claude any more useful.
-    ALLOWED_SUBPATHS = ["settings.json", "CLAUDE.md", "agents", "commands"]
+    # 'hooks' is included so the SessionStart/Stop/UserPromptSubmit hooks
+    # the local user has configured fire on the box too — assumes those
+    # hooks use $HOME or ~ paths (not hardcoded /Users/<name>/...).
+    ALLOWED_SUBPATHS = ["settings.json", "CLAUDE.md", "agents", "commands", "hooks"]
 
     fd, tarpath = tempfile.mkstemp(suffix=".tar.gz", prefix="rc-claude-cfg-")
     os.close(fd)

@@ -370,6 +370,27 @@ class TestClaudeConfigTarball:
             for n in names:
                 assert excluded not in n, f"tarball should not contain {excluded}, found {n}"
 
+    def test_includes_hooks_dir_when_present(self, tmp_path):
+        """Hooks copied to the box so local SessionStart/Stop hooks fire there
+        too. Assumes hooks use $HOME paths (we fix the user's settings.json
+        to be portable, see git history)."""
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        hooks = claude_dir / "hooks"
+        hooks.mkdir()
+        (hooks / "my_hook.py").write_text("#!/usr/bin/env python3\nprint('hi')\n")
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text("{}")
+
+        tarball = _build_claude_config_tarball(claude_dir, json_path)
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+        assert ".claude/hooks" in names
+        assert ".claude/hooks/my_hook.py" in names
+
     def test_includes_credentials_when_file_exists(self, tmp_path, monkeypatch):
         """When ~/.claude/.credentials.json exists (Linux path), it must be
         in the tarball — without it, in-box claude is 'Not logged in'."""
