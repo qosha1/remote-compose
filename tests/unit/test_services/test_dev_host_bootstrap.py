@@ -132,6 +132,18 @@ class TestGitSource:
 
         assert "--dangerously-skip-permissions" in rendered
 
+    def test_bd_beads_installed_in_runcmd(self):
+        """Local Claude settings.json calls 'bd prime' on SessionStart —
+        the in-box claude needs bd available or it errors at startup."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+
+        # arch detection + tarball url + extract
+        assert "steveyegge/beads/releases/download" in rendered
+        assert "/usr/local/bin/bd" in rendered
+        assert "uname -m" in rendered  # arch detect
+
 
 class TestImageSource:
     def test_image_source_defaults(self):

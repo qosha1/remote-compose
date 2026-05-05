@@ -105,6 +105,9 @@ runcmd:
   - curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
   - dnf install -y nodejs
   - npm install -g @anthropic-ai/claude-code
+  # bd (beads) — issue tracker the local Claude session expects (settings.json
+  # SessionStart hook calls 'bd prime'). v1.0.3 pinned for reproducibility.
+  - 'arch=$(uname -m); case "$arch" in aarch64) bd_arch=arm64 ;; x86_64) bd_arch=amd64 ;; *) bd_arch="" ;; esac; if [ -n "$bd_arch" ]; then curl -sL "https://github.com/steveyegge/beads/releases/download/v1.0.3/beads_1.0.3_linux_${bd_arch}.tar.gz" | tar -xz -C /usr/local/bin bd && chmod +x /usr/local/bin/bd; fi'
   # Run repo bootstrap (handles ownership + clone + compose up)
   - bash /usr/local/bin/rc-dev-bootstrap.sh
   # Start claude in a tmux session so user attaches into a ready agent
