@@ -121,23 +121,34 @@ class ScriptSource:
 
 @dataclass
 class MultiGitSource:
-    """Multi-repo dev-host source: clone N repos to N target dirs and run a
-    user-supplied top-level docker-compose at /home/ec2-user/.
+    """Multi-repo dev-host source: clone N repos to N target dirs and run one
+    or more user-supplied top-level docker-compose files at /home/ec2-user/.
 
-    The compose file itself is NOT rendered into cloud-init (it might be large
-    and contain secrets); the CLI SCPs it post-boot via _wait_for_ssh_and_copy_env.
-    Cloud-init only does the clones + waits for the compose file to land.
+    Each compose file becomes its own `docker compose -p <basename>` project
+    so service-name conflicts across repos are avoided (e.g. sentinal and
+    browser-mgr both define a service named 'django' — they live in separate
+    Compose projects on the same docker daemon).
+
+    The compose files themselves are NOT rendered into cloud-init (they may
+    be large or sensitive); the CLI SCPs them post-boot. Cloud-init waits.
     """
 
-    repos: list = field(default_factory=list)  # [{"url": "...", "ref": "main"}, ...]
-    compose_filename: str = "docker-compose.full.yml"
+    repos: list = field(default_factory=list)
+    # New (preferred): list of compose filenames. Backwards-compat: still
+    # accepts the old `compose_filename: str` via __post_init__ below.
+    compose_filenames: list = field(default_factory=list)
+    compose_filename: str = ""  # legacy single-file field, see __post_init__
     type: Literal["multi-git"] = "multi-git"
     gh_token: str = ""
     extra_env: dict = field(default_factory=dict)
     skip_permissions: bool = False
 
+    def __post_init__(self):
+        # Migrate legacy single-file kwarg into the new list.
+        if self.compose_filename and not self.compose_filenames:
+            self.compose_filenames = [self.compose_filename]
+
     def render_user_data(self, *, docker_arch: str = "aarch64") -> str:
-        # Normalize each repo entry: ensure url, ref, target keys
         normalized = []
         for r in self.repos:
             url = r["url"]
@@ -154,7 +165,7 @@ class MultiGitSource:
         return _render(
             "multi-git.yaml.j2",
             repos=normalized,
-            compose_filename=self.compose_filename,
+            compose_filenames=self.compose_filenames,
             docker_arch=docker_arch,
             rc_dev_env_content="\n".join(env_lines),
             has_env=bool(env_lines),

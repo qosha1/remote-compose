@@ -115,8 +115,10 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
                    'With 1 → GitSource. With 0 → auto-detect from cwd.')
 @click.option('--branch', 'branch', default=None,
               help='Branch / ref applied to all --repos (default: cwd HEAD or main).')
-@click.option('--compose', 'compose_file', type=click.Path(exists=True), default=None,
-              help='Top-level compose file to SCP onto the host (required for multi-repo).')
+@click.option('--compose', 'compose_files', type=click.Path(exists=True), multiple=True,
+              help='Top-level compose file(s) to SCP onto the host (repeatable). '
+                   'Each runs as a separate `docker compose -p <basename>` project '
+                   'so service-name conflicts across repos are avoided.')
 @click.option('--image', 'image', default=None, help='Docker image to run (alternative to --repo).')
 @click.option('--instance-type', 'instance_type', default='t4g.medium',
               help='EC2 instance type (default: t4g.medium ARM).')
@@ -143,7 +145,7 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
               default=None,
               help='Path to a custom .claude/ directory to copy (default: $HOME/.claude).')
 @click.pass_context
-def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, region,
+def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, region,
                ebs_size_gb, aws_profile, gh_token, anthropic_key, env_files, extra_ports,
                skip_permissions, no_claude_config, claude_config_from):
     """Provision an EC2 dev-host and start the source's docker compose."""
@@ -158,12 +160,12 @@ def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, reg
     # Resolve source: 2+ repos → multi; 1 repo → single git; 0 + image → image;
     # 0 + nothing → autodetect from cwd.
     if len(repos) >= 2:
-        if not compose_file:
-            click.echo("Error: --compose <file> is required when passing 2+ --repo flags.", err=True)
+        if not compose_files:
+            click.echo("Error: at least one --compose <file> is required when passing 2+ --repo flags.", err=True)
             sys.exit(1)
         source = MultiGitSource(
             repos=[{"url": u, "ref": branch or "main"} for u in repos],
-            compose_filename=Path(compose_file).name,
+            compose_filenames=[Path(c).name for c in compose_files],
         )
     elif image:
         source = ImageSource(image=image)
@@ -233,23 +235,21 @@ def dev_up_cmd(ctx, name, repos, branch, compose_file, image, instance_type, reg
                 click.echo(f"  ✓ port {port} open")
 
     # Copy env files into the box (requires SSH to be up — wait for it)
-    if env_files or compose_file:
+    if env_files or compose_files:
         click.echo("\n  Copying files into the box — waiting for SSH...")
         keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
         priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
-        # Repo name is needed to place env files inside the cloned repo dir.
-        # For MultiGitSource we drop env files at /home/ec2-user/_envs/ instead.
         repo_name = ""
         if isinstance(source, GitSource):
             repo_name = source.url.rstrip("/").split("/")[-1].removesuffix(".git")
         elif isinstance(source, MultiGitSource):
-            repo_name = "_envs"  # workspace-level, not under any single repo
+            repo_name = "_envs"
         if env_files:
             _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
             click.echo(f"  ✓ env files staged in /tmp/rc-dev-envs/ — bootstrap places them post-clone")
-        if compose_file:
-            _scp_compose_file(record.public_ip, priv_pem, compose_file)
-            click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(compose_file).name}")
+        for cf in compose_files:
+            _scp_compose_file(record.public_ip, priv_pem, cf)
+            click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(cf).name}")
 
     # Auto-copy local Claude config + auth (default ON; --no-claude-config to opt out)
     if not no_claude_config:

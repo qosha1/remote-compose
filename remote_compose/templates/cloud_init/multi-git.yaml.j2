@@ -49,24 +49,29 @@ write_files:
           chown ec2-user:ec2-user "$target"
         done
       fi
-      # Wait up to 5 min for the user-supplied compose file to land via SCP
-      # (rc dev up CLI uploads it post-boot once SSH is reachable).
-      for i in $(seq 1 60); do
-        if [ -f /home/ec2-user/{{ compose_filename }} ]; then
-          break
-        fi
-        sleep 5
-      done
-      if [ ! -f /home/ec2-user/{{ compose_filename }} ]; then
-        echo "WARNING: {{ compose_filename }} did not arrive within 5min — skipping compose up. SCP it manually and run docker compose up." >&2
-        exit 0
-      fi
+      # Wait up to 5 min for ALL user-supplied compose files to land via SCP.
       cd /home/ec2-user
+      for cf in {{ compose_filenames | join(' ') }}; do
+        for i in $(seq 1 60); do
+          [ -f "/home/ec2-user/$cf" ] && break
+          sleep 5
+        done
+        if [ ! -f "/home/ec2-user/$cf" ]; then
+          echo "WARNING: $cf did not arrive within 5min — skipping. SCP it and run docker compose up manually." >&2
+        fi
+      done
       # Final ownership sweep — defends against the race where post-boot SCP
-      # ops (compose file, env files, claude config tarball) accidentally
-      # landed root-owned files in the home dir (rc-7v6).
+      # ops accidentally landed root-owned files in the home dir (rc-7v6).
       chown -R ec2-user:ec2-user /home/ec2-user
-      docker compose -f {{ compose_filename }} up -d --build || true
+      # Run each compose file as a SEPARATE project (-p <basename>) so
+      # service-name conflicts across repos don't collide.
+      for cf in {{ compose_filenames | join(' ') }}; do
+        if [ -f "/home/ec2-user/$cf" ]; then
+          project=$(basename "$cf" .yml | sed 's/^docker-compose\.//' | sed 's/[^a-zA-Z0-9]/-/g')
+          echo "Starting compose project: $project (from $cf)"
+          docker compose -f "/home/ec2-user/$cf" -p "$project" up -d --build || true
+        fi
+      done
 
   - path: /usr/local/bin/rc-dev-start-claude.sh
     permissions: '0755'

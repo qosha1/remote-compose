@@ -213,12 +213,12 @@ class TestMultiGitSource:
                 {"url": "https://github.com/owner/backend.git"},
                 {"url": "https://github.com/owner/frontend.git"},
             ],
-            compose_filename="docker-compose.full.yml",
+            compose_filenames=["docker-compose.full.yml"],
         )
 
         assert src.type == "multi-git"
         assert len(src.repos) == 2
-        assert src.compose_filename == "docker-compose.full.yml"
+        assert src.compose_filenames == ["docker-compose.full.yml"]
         assert src.gh_token == ""
         assert src.skip_permissions is False
 
@@ -230,7 +230,7 @@ class TestMultiGitSource:
                 {"url": "https://github.com/owner/backend.git", "ref": "main"},
                 {"url": "https://github.com/owner/frontend.git", "ref": "alice/feat-x"},
             ],
-            compose_filename="docker-compose.full.yml",
+            compose_filenames=["docker-compose.full.yml"],
         )
         rendered = src.render_user_data()
 
@@ -242,14 +242,15 @@ class TestMultiGitSource:
         assert "alice/feat-x" in rendered
         # compose-file wait + apply present
         assert "docker-compose.full.yml" in rendered
-        assert "docker compose -f docker-compose.full.yml up" in rendered
+        assert "docker-compose.full.yml" in rendered
+        assert "docker compose -f" in rendered
 
     def test_render_uses_url_basename_as_target_dir(self):
         from remote_compose.dev_host.bootstrap import MultiGitSource
 
         src = MultiGitSource(
             repos=[{"url": "https://github.com/qosha1/sentinal.git"}],
-            compose_filename="x.yml",
+            compose_filenames=["x.yml"],
         )
         rendered = src.render_user_data()
 
@@ -261,7 +262,7 @@ class TestMultiGitSource:
 
         src = MultiGitSource(
             repos=[{"url": "https://github.com/owner/repo.git"}],
-            compose_filename="x.yml",
+            compose_filenames=["x.yml"],
             gh_token="ghp_secret",
         )
         rendered = src.render_user_data()
@@ -274,11 +275,41 @@ class TestMultiGitSource:
 
         rendered = MultiGitSource(
             repos=[{"url": "https://github.com/owner/repo.git"}],
-            compose_filename="x.yml",
+            compose_filenames=["x.yml"],
             skip_permissions=True,
         ).render_user_data()
 
         assert "--dangerously-skip-permissions" in rendered
+
+    def test_multiple_compose_files_each_run_as_separate_project(self):
+        """Each --compose file runs as its own `docker compose -p <basename>`
+        project so service-name conflicts across repos don't collide."""
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        rendered = MultiGitSource(
+            repos=[
+                {"url": "https://github.com/owner/sentinal.git"},
+                {"url": "https://github.com/owner/browser-mgr.git"},
+            ],
+            compose_filenames=["docker-compose.full.yml", "docker-compose.browser-mgr.yml"],
+        ).render_user_data()
+
+        # Both filenames must appear in the bootstrap (wait + up loops)
+        assert "docker-compose.full.yml" in rendered
+        assert "docker-compose.browser-mgr.yml" in rendered
+        # Project naming logic must be present (basename-with-prefix-stripped)
+        assert "docker compose -f" in rendered
+        assert " -p " in rendered
+
+    def test_legacy_compose_filename_kwarg_still_accepted(self):
+        """Backwards-compat: old single-file kwarg migrates to the list."""
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/repo.git"}],
+            compose_filename="legacy.yml",
+        )
+        assert src.compose_filenames == ["legacy.yml"]
 
     def test_yaml_round_trips_through_state(self):
         """source_from_dict should reconstruct a MultiGitSource from its dict form."""
@@ -292,7 +323,7 @@ class TestMultiGitSource:
                 {"url": "https://github.com/a/b.git", "ref": "main"},
                 {"url": "https://github.com/c/d.git", "ref": "v2"},
             ],
-            compose_filename="x.yml",
+            compose_filenames=["x.yml"],
         )
         from dataclasses import asdict
 
@@ -300,7 +331,7 @@ class TestMultiGitSource:
         assert isinstance(restored, MultiGitSource)
         assert len(restored.repos) == 2
         assert restored.repos[0]["url"] == "https://github.com/a/b.git"
-        assert restored.compose_filename == "x.yml"
+        assert restored.compose_filenames == ["x.yml"]
 
 
 class TestClaudeConfigTarball:
