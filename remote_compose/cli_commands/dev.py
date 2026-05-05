@@ -543,6 +543,32 @@ def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | No
         raise
 
 
+def _read_claude_credentials() -> str | None:
+    """Get the OAuth credentials JSON. Linux: file. macOS: keychain.
+
+    Linux Claude Code stores OAuth in ~/.claude/.credentials.json. macOS
+    Claude Code stores it in the user's Keychain under service name
+    'Claude Code-credentials' (no on-disk file). Without these credentials
+    the in-box claude shows 'Not logged in' even with .claude.json present.
+    """
+    import subprocess
+    import sys
+
+    creds_file = Path.home() / ".claude" / ".credentials.json"
+    if creds_file.exists():
+        return creds_file.read_text()
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, check=True,
+            )
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+    return None
+
+
 def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
     """Tar up ONLY the small auth + settings files from ~/.claude.
 
@@ -567,6 +593,23 @@ def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
                 p = claude_dir / member
                 if p.exists():
                     tar.add(p, arcname=f".claude/{member}")
+        # OAuth credentials (live in macOS Keychain on Macs, on-disk on Linux).
+        # Without them the in-box claude shows 'Not logged in'.
+        creds = _read_claude_credentials()
+        if creds:
+            creds_fd, creds_tmp = tempfile.mkstemp(suffix=".json", prefix="rc-claude-creds-")
+            try:
+                with os.fdopen(creds_fd, "w") as fh:
+                    fh.write(creds)
+                # tar.add writes with whatever uid/perms the temp file has;
+                # the Linux Claude Code expects 0600 for .credentials.json.
+                os.chmod(creds_tmp, 0o600)
+                tar.add(creds_tmp, arcname=".claude/.credentials.json")
+            finally:
+                try:
+                    os.unlink(creds_tmp)
+                except OSError:
+                    pass
     return Path(tarpath)
 
 

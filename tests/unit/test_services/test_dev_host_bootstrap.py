@@ -358,6 +358,25 @@ class TestClaudeConfigTarball:
             for n in names:
                 assert excluded not in n, f"tarball should not contain {excluded}, found {n}"
 
+    def test_includes_credentials_when_file_exists(self, tmp_path, monkeypatch):
+        """When ~/.claude/.credentials.json exists (Linux path), it must be
+        in the tarball — without it, in-box claude is 'Not logged in'."""
+        from remote_compose.cli_commands.dev import _build_claude_config_tarball
+        import tarfile
+
+        # Simulate a Linux home with a credentials file
+        monkeypatch.setenv("HOME", str(tmp_path))
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / ".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"sk-x"}}')
+        json_path = tmp_path / ".claude.json"
+        json_path.write_text('{}')
+
+        tarball = _build_claude_config_tarball(claude_dir, json_path)
+        with tarfile.open(tarball, "r:gz") as tar:
+            names = tar.getnames()
+        assert ".claude/.credentials.json" in names
+
     def test_handles_missing_claude_dir_gracefully(self, tmp_path):
         """If ~/.claude doesn't exist (fresh machine), still tarball whatever
         files do exist (e.g. just .claude.json)."""
