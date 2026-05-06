@@ -38,6 +38,9 @@ write_files:
       # original cwd-relative paths under /home/ec2-user/. Done HERE (after
       # clones) to avoid pre-creating subdirs that would block git clone.
       if [ -d /tmp/rc-dev-envs ]; then
+        # shopt -s dotglob so files like .django / .postgres (hidden by
+        # default bash glob) are iterated.
+        shopt -s dotglob nullglob
         for staged in /tmp/rc-dev-envs/*; do
           [ -f "$staged" ] || continue
           name=$(basename "$staged")
@@ -48,6 +51,7 @@ write_files:
           cp "$staged" "$target"
           chown ec2-user:ec2-user "$target"
         done
+        shopt -u dotglob nullglob
       fi
       # Wait up to 5 min for ALL user-supplied compose files to land via SCP.
       cd /home/ec2-user

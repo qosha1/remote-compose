@@ -43,6 +43,7 @@ write_files:
       # original cwd-relative paths under /home/ec2-user/. Done HERE (after
       # clone+checkout) to avoid pre-creating subdirs that block clone.
       if [ -d /tmp/rc-dev-envs ]; then
+        shopt -s dotglob nullglob
         for staged in /tmp/rc-dev-envs/*; do
           [ -f "$staged" ] || continue
           name=$(basename "$staged")
@@ -52,6 +53,7 @@ write_files:
           cp "$staged" "$target"
           chown ec2-user:ec2-user "$target"
         done
+        shopt -u dotglob nullglob
       fi
       # Final ownership sweep — defends against the race where post-boot SCP
       # ops landed root-owned files in the home dir (rc-7v6).

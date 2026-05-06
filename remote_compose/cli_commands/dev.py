@@ -750,8 +750,11 @@ def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
     # subdirs before bootstrap's git clone causes "destination already exists"
     # errors (rc-7v6 follow-up).
     for f in env_files:
-        abs_f = Path(f).resolve()
-        cwd_abs = Path.cwd().resolve()
+        # Use absolute() instead of resolve() so symlinks in cwd (e.g.
+        # `<workspace>/browser-mgr -> /elsewhere/browser-mgr`) don't escape
+        # the workspace and force a basename-only fallback (rc-7v6 follow-up).
+        abs_f = Path(f).absolute()
+        cwd_abs = Path.cwd().absolute()
         try:
             rel = abs_f.relative_to(cwd_abs)
         except ValueError:
