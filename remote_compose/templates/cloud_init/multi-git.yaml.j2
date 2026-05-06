@@ -94,6 +94,10 @@ write_files:
     permissions: '0644'
     content: |
       export RC_DEV_WORKSPACE="/home/ec2-user"
+      # Source rc-dev-env so GH_TOKEN etc. are in interactive shells.
+      if [ -f "$HOME/.rc-dev-env" ]; then
+        set -a && . "$HOME/.rc-dev-env" && set +a
+      fi
       cd "$RC_DEV_WORKSPACE" 2>/dev/null || true
 {% if has_env %}
   - path: /tmp/rc-dev-env-staging
@@ -115,6 +119,9 @@ runcmd:
   # bd (beads) — issue tracker the local Claude session expects (settings.json
   # SessionStart hook calls 'bd prime'). v1.0.3 pinned for reproducibility.
   - 'arch=$(uname -m); case "$arch" in aarch64) bd_arch=arm64 ;; x86_64) bd_arch=amd64 ;; *) bd_arch="" ;; esac; if [ -n "$bd_arch" ]; then curl -sL "https://github.com/steveyegge/beads/releases/download/v1.0.3/beads_1.0.3_linux_${bd_arch}.tar.gz" | tar -xz -C /usr/local/bin bd && chmod +x /usr/local/bin/bd; fi'
+  # gh CLI — picks up $GH_TOKEN from rc-dev-env (sourced by profile.d), so
+  # 'gh repo clone' / 'gh pr' work without re-authing. v2.92.0 pinned.
+  - 'arch=$(uname -m); case "$arch" in aarch64) gh_arch=arm64 ;; x86_64) gh_arch=amd64 ;; *) gh_arch="" ;; esac; if [ -n "$gh_arch" ]; then dnf install -y "https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_${gh_arch}.rpm"; fi'
   # NOTE: bootstrap runs SYNCHRONOUSLY (no '&'). The race where parallel
   # CLI-side SCP/tar operations corrupted git checkout perms (rc-7v6) is
   # avoided by serializing here. Cost: cloud-init reports 'done' later

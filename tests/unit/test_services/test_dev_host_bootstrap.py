@@ -144,6 +144,16 @@ class TestGitSource:
         assert "/usr/local/bin/bd" in rendered
         assert "uname -m" in rendered  # arch detect
 
+    def test_gh_cli_installed_in_runcmd(self):
+        """gh CLI is needed for 'gh pr', 'gh repo clone', etc. inside the box."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+
+        assert "github.com/cli/cli/releases/download" in rendered
+        assert "gh_" in rendered
+        assert ".rpm" in rendered  # AL2023 uses dnf install <url>.rpm
+
 
 class TestImageSource:
     def test_image_source_defaults(self):
