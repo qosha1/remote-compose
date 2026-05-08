@@ -1,47 +1,39 @@
 # remote-compose
 
-**Deploy any `docker-compose.yml` to a real cloud stack with one command.**
+**Take any `docker-compose.yml` and put it on AWS — as a fresh dev box with Claude already running inside, or as production infrastructure.**
 
+Two flavors of one tool:
+
+### 🚀 `rc dev up` — disposable cloud dev environments with an agent inside
+
+```bash
+rc dev up alice \
+  --repo https://github.com/owner/myapp \
+  --compose docker-compose.yml \
+  --gh-token "$(gh auth token)" --skip-permissions
 ```
-  docker-compose.yml  ──▶  Provider  ──▶  terraform HCL  ──▶  terraform apply  ──▶  running stack
-         +                (ecs / k8s / …)      │                      │
-   rc.yml (v2)                                 │                      └─▶ backend state (s3 / gcs / local)
-         +                                     │
-   ImageBuilder                                └─▶ self-contained module — you can `cd terraform/ && terraform apply`
-   ImagePusher                                     without rc, no lock-in
+
+In ~5 minutes you get a fresh EC2 box with: docker, your repo cloned, the compose stack running, and **Claude Code pre-authenticated in a tmux session** waiting for you to attach. `rc dev attach alice` drops you into it. One box per agent or per branch. Work in parallel on isolated infra. `rc dev destroy` when done.
+
+Multi-repo deploys, env-file shipping, `gh`/`bd` pre-installed, shared SSH key + auth lifecycle — all built in.
+
+### 🏗️ `rc deploy` — generate a real terraform module from your compose
+
+```bash
+rc up --from-compose docker-compose.yml
 ```
 
-`rc` is a generator + convenience wrapper around terraform. It reads your
-existing `docker-compose.yml`, applies tuning from a small `rc.yml`, builds
-images, pushes to the registry, emits a complete terraform module, and runs
-it. Then it gives you everyday verbs (`rc deploy`, `rc lifecycle migrate`,
-`rc db push`, `rc destroy`) so you don't have to invent a playbook per
-project.
+Reads your compose, asks for the handful of things compose can't express (CPU/memory, secrets, public hostname, EFS uid), generates a clean ECS terraform module, applies it. Then everyday verbs: `rc deploy`, `rc lifecycle migrate`, `rc db push`, `rc destroy`. The module is yours — `cd terraform/ && terraform apply` works without `rc`.
 
-The active branch is **`portable-deploy`**. The legacy v1 (Django-app +
-SSH) is preserved below the portable section for users on `main`.
-
-> **Status: alpha, hand-tested against a real production-grade Django stack
-> (sentinal: postgres, redis, django, celery worker, celery beat, nginx
-> fronting two subdomains, full data restore from a 569 MB local dump).**
-> See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the validation
-> ladder. See [AGENTS.md](AGENTS.md) for how the project is developed.
+> **Status: alpha. Hand-tested against a real production Django stack.** Active branch: **`portable-deploy`**. Legacy v1 (SSH/Django-app) lives below for users on `main`. See [ARCHITECTURE.md](ARCHITECTURE.md) for design + validation, [AGENTS.md](AGENTS.md) for workflow.
 
 ---
 
-## Why this exists
+## Why both modes share one tool
 
-Most deploy tooling forces you to choose:
+Same insight, two surfaces. Compose is already the spec for "how my services fit together." For dev we ship that spec to an EC2 box and start an agent inside. For production we render it to ECS terraform. You write the compose file once.
 
-- **Cloud-specific knobs** (ECS task defs, Kubernetes manifests, Helm charts) — you write the same app config in three places.
-- **Magic black-box PaaS** (Heroku, Fly, Render) — opinionated, locked-in, hard to escape.
-- **Hand-rolled terraform** — flexible but a 500-line module per service.
-
-`remote-compose` takes a different bet: **your `docker-compose.yml` already
-describes the topology you want**. The deployer should consume that file
-verbatim, ask only for the few things compose can't express (CPU/mem,
-secrets, public hostname, EFS uid), and produce a clean terraform module
-you fully own.
+Most deploy tooling makes you choose between cloud-specific knobs (ECS task defs, k8s manifests, Helm), opinionated black-box PaaS (Heroku, Fly, Render), or hand-rolled terraform (flexible but a 500-line module per service). `remote-compose` takes the other bet: your compose file is the topology. The tool's job is to add the few things compose can't express and emit something clean — terraform you own, or an EC2 box that disappears when you're done with it.
 
 ---
 
