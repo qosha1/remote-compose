@@ -1,3 +1,6 @@
+<img width="1672" height="941" alt="ChatGPT Image May 8, 2026, 11_07_11 AM" src="https://github.com/user-attachments/assets/f4920e46-ee34-4824-a2d3-7debf3292898" />
+
+
 # remote-compose
 
 **Take any `docker-compose.yml` and put it on AWS — as a fresh dev box with Claude already running inside, or as production infrastructure.**
