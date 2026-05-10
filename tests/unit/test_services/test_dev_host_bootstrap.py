@@ -467,6 +467,112 @@ class TestClaudeConfigTarball:
         assert ".claude.json" in names
 
 
+class TestSanitizedSourceRepr:
+    """rc-h40: stdout-printed source repr must not leak secret-bearing fields."""
+
+    def test_redacts_gh_token(self):
+        from remote_compose.cli_commands.dev import _sanitized_source_repr
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        src = GitSource(url="https://github.com/x/y.git", gh_token="ghp_secret")
+        out = _sanitized_source_repr(src)
+
+        assert "ghp_secret" not in out
+        assert "<redacted>" in out
+
+    def test_redacts_extra_env_secret_keys(self):
+        from remote_compose.cli_commands.dev import _sanitized_source_repr
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        src = GitSource(
+            url="https://github.com/x/y.git",
+            extra_env={"ANTHROPIC_API_KEY": "sk-ant-leak", "MY_PORT": "8002"},
+        )
+        out = _sanitized_source_repr(src)
+
+        assert "sk-ant-leak" not in out
+        assert "MY_PORT" in out and "8002" in out  # non-secret env preserved
+
+    def test_no_secrets_renders_normally(self):
+        from remote_compose.cli_commands.dev import _sanitized_source_repr
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        out = _sanitized_source_repr(GitSource(url="https://github.com/x/y.git", ref="main"))
+
+        assert "https://github.com/x/y.git" in out
+        assert "main" in out
+
+
+class TestComposePortAutoDetect:
+    """rc-5c0: compose host ports auto-extracted for SG --port default."""
+
+    def test_simple_string_ports(self, tmp_path):
+        from remote_compose.cli_commands.dev import _ports_from_compose
+
+        cf = tmp_path / "docker-compose.yml"
+        cf.write_text("""
+services:
+  django:
+    ports:
+      - "8002:8002"
+      - "8003:8003/tcp"
+  postgres:
+    ports:
+      - "5434"
+""")
+        assert _ports_from_compose([cf]) == [5434, 8002, 8003]
+
+    def test_long_form_dict_ports(self, tmp_path):
+        from remote_compose.cli_commands.dev import _ports_from_compose
+
+        cf = tmp_path / "docker-compose.yml"
+        cf.write_text("""
+services:
+  api:
+    ports:
+      - target: 8002
+        published: 8012
+        protocol: tcp
+""")
+        assert _ports_from_compose([cf]) == [8012]
+
+    def test_follows_include_directive_one_level(self, tmp_path):
+        from remote_compose.cli_commands.dev import _ports_from_compose
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "local.yml").write_text("""
+services:
+  django:
+    ports: ["8002:8002"]
+""")
+        cf = tmp_path / "docker-compose.full.yml"
+        cf.write_text("""
+include:
+  - path: sub/local.yml
+services:
+  react:
+    ports: ["3011:3011"]
+""")
+        assert _ports_from_compose([cf]) == [3011, 8002]
+
+    def test_dedupes_across_multiple_compose_files(self, tmp_path):
+        from remote_compose.cli_commands.dev import _ports_from_compose
+
+        cf1 = tmp_path / "a.yml"
+        cf1.write_text('services:\n  s1:\n    ports: ["8000:8000"]\n')
+        cf2 = tmp_path / "b.yml"
+        cf2.write_text('services:\n  s2:\n    ports: ["8000:8000", "9000:9000"]\n')
+        assert _ports_from_compose([cf1, cf2]) == [8000, 9000]
+
+    def test_handles_no_ports_gracefully(self, tmp_path):
+        from remote_compose.cli_commands.dev import _ports_from_compose
+
+        cf = tmp_path / "docker-compose.yml"
+        cf.write_text("services:\n  worker:\n    image: alpine\n")
+        assert _ports_from_compose([cf]) == []
+
+
 class TestSourceAutodetect:
     def test_detect_from_git_repo_returns_gitsource(self, tmp_path, monkeypatch):
         """In a git repo cwd, factory returns GitSource with detected url+branch."""

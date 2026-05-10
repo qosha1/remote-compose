@@ -185,6 +185,15 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
     if isinstance(source, (GitSource, MultiGitSource)):
         if gh_token:
             source.gh_token = gh_token
+            # rc-h40: token leaks easily when passed via flag (shell history,
+            # /tmp/* logs from wrappers, ps -aux). Prefer env var.
+            if os.environ.get("GH_TOKEN") != gh_token:
+                click.echo(
+                    "  ⚠️  --gh-token was passed as a flag — leaks into shell "
+                    "history and any wrapper-script logs. Prefer "
+                    "'GH_TOKEN=$(gh auth token) rc dev up ...' (envvar is "
+                    "auto-picked up).", err=True,
+                )
         if anthropic_key:
             source.extra_env = dict(source.extra_env or {})
             source.extra_env["ANTHROPIC_API_KEY"] = anthropic_key
@@ -196,7 +205,11 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
         region = _region_from_rc_yml(ctx) or os.environ.get('AWS_DEFAULT_REGION') or 'us-west-1'
 
     click.echo(f"Provisioning dev-host '{name}' in {region} ({instance_type})...")
-    click.echo(f"  source: {type(source).__name__} {source}")
+    # rc-h40: sanitize source repr so secrets (gh_token, ANTHROPIC_API_KEY)
+    # in dataclass fields don't print to stdout / scrollback / wrapper logs.
+    click.echo(f"  source: {_sanitized_source_repr(source)}")
+    if isinstance(source, (GitSource, MultiGitSource)) and source.skip_permissions:
+        click.echo("  claude: --dangerously-skip-permissions (autonomous mode)")
 
     if not aws_profile:
         aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get('AWS_PROFILE')
@@ -225,6 +238,14 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
     click.echo(f"  ssh:         rc dev ssh {name}")
     click.echo(f"  attach claude: rc dev attach {name}")
 
+    # rc-5c0: when user didn't pass --port, default to whatever host ports
+    # the compose file(s) actually publish. Avoids silent SG/compose drift
+    # (deploy works, curl fails because port mapped to 8012 but SG opens 8002).
+    if not extra_ports and compose_files:
+        detected = _ports_from_compose(compose_files)
+        if detected:
+            click.echo(f"  auto-detected compose host ports: {detected}")
+            extra_ports = tuple(detected)
     # Open extra ports in the SG (compose-declared ports user wants reachable)
     if extra_ports:
         click.echo(f"\n  Opening security group ports: {list(extra_ports)}")
@@ -682,6 +703,79 @@ def _copy_claude_config(public_ip: str, private_pem: str,
             tarball.unlink()
         except OSError:
             pass
+
+
+_SECRET_FIELDS = ("gh_token", "anthropic_key", "anthropic_api_key", "api_key", "secret", "password", "token")
+
+
+def _sanitized_source_repr(source) -> str:
+    """Render a source dataclass for stdout WITHOUT leaking secret-bearing
+    fields (gh_token, ANTHROPIC_API_KEY in extra_env, etc.). rc-h40."""
+    from dataclasses import asdict, is_dataclass
+
+    cls = type(source).__name__
+    if not is_dataclass(source):
+        return f"{cls}({source!r})"
+    d = asdict(source)
+    safe = {}
+    for k, v in d.items():
+        if any(s in k.lower() for s in _SECRET_FIELDS):
+            safe[k] = "<redacted>" if v else ""
+        elif k == "extra_env" and isinstance(v, dict):
+            safe[k] = {
+                kk: ("<redacted>" if any(s in kk.lower() for s in _SECRET_FIELDS) else vv)
+                for kk, vv in v.items()
+            }
+        else:
+            safe[k] = v
+    return f"{cls}({safe})"
+
+
+def _ports_from_compose(compose_paths) -> list[int]:
+    """Extract host ports from compose `services.*.ports[*]` mappings.
+
+    Follows top-level `include:` directives one level (relative to each
+    compose file's own dir, matching Docker Compose semantics). Returns
+    deduplicated, sorted host port list — used by `rc dev up` to default
+    the SG --port allowlist when the user doesn't pass --port explicitly.
+    """
+    import yaml
+
+    seen: set[int] = set()
+
+    def _scan(path: Path):
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            return
+        for inc in (data.get("include") or []):
+            inc_path = inc.get("path") if isinstance(inc, dict) else inc
+            if inc_path:
+                resolved = (path.parent / inc_path).resolve()
+                if resolved.exists():
+                    _scan(resolved)
+        for _, svc in (data.get("services") or {}).items():
+            if not isinstance(svc, dict):
+                continue
+            for p in (svc.get("ports") or []):
+                if isinstance(p, str):
+                    # "host:container" or "host:container/proto" or "host"
+                    host = p.split(":")[0].split("/")[0]
+                    try:
+                        seen.add(int(host))
+                    except ValueError:
+                        pass
+                elif isinstance(p, dict):
+                    pub = p.get("published") or p.get("target")
+                    try:
+                        seen.add(int(pub)) if pub else None
+                    except (TypeError, ValueError):
+                        pass
+                elif isinstance(p, int):
+                    seen.add(p)
+    for cp in compose_paths:
+        _scan(Path(cp).resolve())
+    return sorted(seen)
 
 
 def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> None:
