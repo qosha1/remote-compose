@@ -62,12 +62,46 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
                 click.echo("    done (via terraform_dir fallback).")
                 continue
             click.echo(
-                f"    WARN: rc.yml not found at {rc_path} AND no usable "
-                f"terraform_dir on this record. Leaving registry entry "
-                f"in place — clean up manually.",
+                f"    rc.yml + terraform_dir both missing — "
+                f"falling back to AWS audit for project={r.project} "
+                f"region={r.region}."
+            )
+            try:
+                import boto3
+                from remote_compose.audit import audit_project
+                session = boto3.Session(
+                    region_name=r.region, profile_name=r.aws_profile,
+                )
+                report = audit_project(
+                    session, project=r.project, region=r.region,
+                )
+            except Exception as exc:
+                click.echo(f"    FAILED: audit fallback: {exc}", err=True)
+                failures.append((r.project, f"audit fallback: {exc}"))
+                continue
+            if report.is_clean:
+                remove_stack(project=r.project, region=r.region)
+                succeeded += 1
+                click.echo(
+                    "    audit clean — no AWS resources match. "
+                    "Removed orphan registry entry."
+                )
+                continue
+            click.echo(
+                f"    audit found {len(report.findings)} leftover "
+                f"resource(s) — leaving registry entry. Clean up with:",
                 err=True,
             )
-            failures.append((r.project, "rc.yml + terraform_dir both missing"))
+            click.echo(
+                f"      rc audit --project {r.project} --region {r.region}"
+                + (f" --profile {r.aws_profile}" if r.aws_profile else ""),
+                err=True,
+            )
+            failures.append(
+                (r.project,
+                 f"rc.yml + terraform_dir missing; "
+                 f"{len(report.findings)} AWS leftover(s) need manual cleanup"),
+            )
             continue
         try:
             version, raw, v2 = load_rc_yml(rc_path)
@@ -352,6 +386,118 @@ def destroy_cmd(ctx, infra, yes, all_ephemeral, force_delete_secrets):
     click.echo("\n  Teardown complete.")
 
 
+_LAUNCHD_LABEL = "com.remote-compose.reaper"
+
+
+def _launchd_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{_LAUNCHD_LABEL}.plist"
+
+
+def _install_reaper_schedule(interval_minutes: int) -> None:
+    """Write + load a launchd job that runs `rc reap -y` every N minutes."""
+    import os, shutil, subprocess
+
+    if sys.platform != "darwin":
+        click.echo(
+            "  --install-schedule is macOS-only today. On Linux, add a cron "
+            "entry like: */30 * * * * /abs/path/to/rc reap -y",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+
+    rc_bin = shutil.which("rc")
+    if not rc_bin:
+        click.echo(
+            "  Could not find 'rc' on PATH. Activate your venv first, "
+            "or rerun from the env where 'rc' resolves.",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+
+    plist_path = _launchd_plist_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir = Path.home() / ".config" / "remote-compose"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "reaper.log"
+    interval_seconds = max(60, int(interval_minutes) * 60)
+    bin_dir = str(Path(rc_bin).parent)
+    user_path = f"{bin_dir}:{os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{_LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{rc_bin}</string>
+        <string>reap</string>
+        <string>-y</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>{interval_seconds}</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{user_path}</string>
+        <key>HOME</key>
+        <string>{Path.home()}</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
+</dict>
+</plist>
+"""
+    plist_path.write_text(plist_content)
+
+    # Best-effort unload (idempotent) + load.
+    subprocess.run(
+        ["launchctl", "unload", str(plist_path)],
+        check=False, capture_output=True,
+    )
+    res = subprocess.run(
+        ["launchctl", "load", str(plist_path)],
+        check=False, capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        click.echo(
+            f"  Wrote {plist_path} but launchctl load failed:\n"
+            f"    {res.stderr.strip()}\n"
+            f"  Load manually with: launchctl load {plist_path}",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+    click.echo(
+        f"  Installed {_LAUNCHD_LABEL} — runs `rc reap -y` every "
+        f"{interval_seconds // 60} min."
+    )
+    click.echo(f"  plist: {plist_path}")
+    click.echo(f"  log:   {log_path}")
+
+
+def _uninstall_reaper_schedule() -> None:
+    import subprocess
+
+    if sys.platform != "darwin":
+        click.echo("  --uninstall-schedule is macOS-only today.", err=True)
+        raise click.exceptions.Exit(2)
+    plist_path = _launchd_plist_path()
+    if plist_path.exists():
+        subprocess.run(
+            ["launchctl", "unload", str(plist_path)],
+            check=False, capture_output=True,
+        )
+        plist_path.unlink()
+        click.echo(f"  Removed {plist_path}.")
+    else:
+        click.echo(f"  No reaper schedule installed at {plist_path}.")
+
+
 @click.command(name='reap')
 @click.option('--dry-run', is_flag=True, help='List past-due stacks without destroying.')
 @click.option(
@@ -359,7 +505,20 @@ def destroy_cmd(ctx, infra, yes, all_ephemeral, force_delete_secrets):
     help='Destroy every ephemeral stack regardless of TTL.',
 )
 @click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt.')
-def reap_cmd(dry_run, reap_all, yes):
+@click.option(
+    '--install-schedule', 'install_sched', is_flag=True,
+    help='Install a launchd job (macOS) that runs `rc reap -y` periodically. '
+         'Default interval 30 min — tune with --interval-minutes.',
+)
+@click.option(
+    '--uninstall-schedule', 'uninstall_sched', is_flag=True,
+    help='Remove the launchd reaper job.',
+)
+@click.option(
+    '--interval-minutes', 'interval_minutes', default=30, show_default=True,
+    type=int, help='Reaper schedule interval, in minutes. Used with --install-schedule.',
+)
+def reap_cmd(dry_run, reap_all, yes, install_sched, uninstall_sched, interval_minutes):
     """Destroy ephemeral stacks past their TTL.
 
     Reads the local registry (~/.config/remote-compose/ephemeral.json)
@@ -368,6 +527,13 @@ def reap_cmd(dry_run, reap_all, yes):
     on one stack does not stop the rest. Successfully destroyed stacks
     are removed from the registry.
     """
+    if install_sched:
+        _install_reaper_schedule(interval_minutes)
+        return
+    if uninstall_sched:
+        _uninstall_reaper_schedule()
+        return
+
     from remote_compose.ephemeral import (
         DEFAULT_REGISTRY_PATH, list_records, find_expired,
     )

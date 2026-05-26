@@ -154,22 +154,55 @@ def test_failure_on_one_does_not_stop_others(runner, tmp_path):
 # Missing rc.yml -> registry entry left in place, error reported
 # ---------------------------------------------------------------------------
 
-def test_missing_rc_yml_AND_missing_terraform_dir_keeps_registry_entry(runner, tmp_path):
+def test_missing_files_falls_back_to_audit_clean_removes_entry(runner, tmp_path):
+    """rc-b9z: rc.yml + tf_dir both missing → fall back to AWS audit.
+    Audit clean → registry entry removed, exit code 0."""
+    from remote_compose.audit import AuditReport
     records = [_make_record(
         "proj-a",
         rc_yml_path=str(tmp_path / "does-not-exist.yml"),
         terraform_dir=str(tmp_path / "also-does-not-exist"),
     )]
+    clean_report = AuditReport(project="proj-a", region="us-west-1", findings=[])
     with patch("remote_compose.ephemeral.list_records", return_value=records), \
          patch("remote_compose.ephemeral.remove_stack") as rm, \
-         patch("remote_compose.cli_v2.load_rc_yml") as load:
+         patch("remote_compose.cli_v2.load_rc_yml") as load, \
+         patch("remote_compose.audit.audit_project", return_value=clean_report) as audit, \
+         patch("boto3.Session"):
         result = runner.invoke(cli, ["destroy", "--all-ephemeral", "--yes"])
-    # rc.yml AND terraform_dir both missing → load_rc_yml never called, no removal.
+    load.assert_not_called()
+    audit.assert_called_once()
+    rm.assert_called_once_with(project="proj-a", region="us-west-1")
+    assert result.exit_code == 0
+    output = result.output + (result.stderr if hasattr(result, 'stderr') else "")
+    assert "audit clean" in output
+
+
+def test_missing_files_falls_back_to_audit_dirty_keeps_entry(runner, tmp_path):
+    """rc-b9z: rc.yml + tf_dir both missing → audit fallback finds leftovers.
+    Registry entry stays, exit code non-zero, manual cleanup hint printed."""
+    from remote_compose.audit import AuditReport, AuditFinding
+    records = [_make_record(
+        "proj-a",
+        rc_yml_path=str(tmp_path / "does-not-exist.yml"),
+        terraform_dir=str(tmp_path / "also-does-not-exist"),
+    )]
+    dirty_report = AuditReport(
+        project="proj-a", region="us-west-1",
+        findings=[AuditFinding(resource_type="log_group", identifier="/aws/leftover")],
+    )
+    with patch("remote_compose.ephemeral.list_records", return_value=records), \
+         patch("remote_compose.ephemeral.remove_stack") as rm, \
+         patch("remote_compose.cli_v2.load_rc_yml") as load, \
+         patch("remote_compose.audit.audit_project", return_value=dirty_report), \
+         patch("boto3.Session"):
+        result = runner.invoke(cli, ["destroy", "--all-ephemeral", "--yes"])
     load.assert_not_called()
     rm.assert_not_called()
     assert result.exit_code != 0
     output = result.output + (result.stderr if hasattr(result, 'stderr') else "")
-    assert "rc.yml not found" in output
+    assert "1 leftover" in output
+    assert "rc audit --project proj-a" in output
 
 
 # ---------------------------------------------------------------------------
