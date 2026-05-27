@@ -853,6 +853,35 @@ class ECSProvider(Provider):
         start = time.monotonic()
         warnings: list[str] = []
 
+        # rc-5h8.12: --no-build in no-state mode. Images are built+pushed out
+        # of band (e.g. CodeBuild / CI), so rc builds nothing — but it must
+        # still force-roll so ECS pulls the freshly-pushed :latest. The normal
+        # path below only rolls services it pushed, so with --no-build (or a
+        # stack whose services declare no build context) `pushed` is empty and
+        # nothing rolls — a silent no-op that reports success. Short-circuit:
+        # force-roll the requested services (or all) and return. Skips ECR repo
+        # discovery entirely, so --no-build deploys don't even need ECR perms.
+        if getattr(ctx, "skip_build", False):
+            roll_targets = (
+                sorted(services_filter)
+                if services_filter
+                else sorted(ctx.services.keys())
+            )
+            self._emit(
+                "  no-state + --no-build: force-rolling "
+                f"{len(roll_targets)} service(s) onto existing :latest "
+                f"({', '.join(roll_targets)})."
+            )
+            if not getattr(ctx, "skip_force_roll", False):
+                self._force_new_deployments(ctx, roll_targets)
+            return DeployResult(
+                revision_id=f"{ctx.project}-no-state-{int(start)}",
+                services=roll_targets,
+                duration_s=time.monotonic() - start,
+                terraform_outputs={},
+                warnings=warnings,
+            )
+
         # Synthesize a terraform-outputs-shaped dict so _build_and_push_images
         # can be reused unchanged. Keys: repo URL keyed by service name.
         ecs_cfg = _ecs_cfg(ctx)
