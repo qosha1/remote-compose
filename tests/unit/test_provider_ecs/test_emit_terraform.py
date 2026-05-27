@@ -86,16 +86,43 @@ class TestEmitTerraformStructural:
         assert "profile =" not in (out / "providers.tf").read_text()
 
     def test_aws_profile_passed_to_boto3_session(self, tmp_path):
+        """A configured aws_profile is forwarded to boto3.Session."""
+        from unittest import mock
+
         from remote_compose.provider.ecs.provider import _default_session_factory
         ctx = _ctx(tmp_path, aws_profile="debuggai", region="us-west-1")
-        try:
-            session = _default_session_factory(ctx)
-        except Exception as exc:
-            # ProfileNotFound is fine — we only care the profile was forwarded.
-            assert "debuggai" in str(exc)
-            return
-        assert session.profile_name == "debuggai"
-        assert session.region_name == "us-west-1"
+        with mock.patch("boto3.Session") as MockSession:
+            _default_session_factory(ctx)
+        MockSession.assert_called_once_with(
+            region_name="us-west-1", profile_name="debuggai"
+        )
+
+    def test_session_falls_back_when_profile_missing(self, tmp_path):
+        """A configured profile that doesn't resolve (CI/OIDC, no shared AWS
+        config) falls back to the default credential chain instead of raising."""
+        from unittest import mock
+
+        from botocore.exceptions import ProfileNotFound
+
+        from remote_compose.provider.ecs.provider import _default_session_factory
+        ctx = _ctx(tmp_path, aws_profile="ghost", region="us-west-1")
+        calls = []
+
+        def fake_session(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("profile_name"):
+                raise ProfileNotFound(profile=kwargs["profile_name"])
+            return mock.sentinel.session
+
+        with mock.patch("boto3.Session", side_effect=fake_session):
+            result = _default_session_factory(ctx)
+
+        assert result is mock.sentinel.session
+        # tried the named profile first, then fell back without it
+        assert calls == [
+            {"region_name": "us-west-1", "profile_name": "ghost"},
+            {"region_name": "us-west-1"},
+        ]
 
     def test_missing_region_rejected(self, tmp_path):
         ctx = _ctx(tmp_path)

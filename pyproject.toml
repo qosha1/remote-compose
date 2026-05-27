@@ -84,6 +84,11 @@ remote_compose = [
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
+# Put the repo root on sys.path so `tests.settings` (and the `tests` package)
+# imports under a bare `pytest` invocation, not just `python -m pytest`. Without
+# this, pytest-django fails at startup with "No module named 'tests'" in CI,
+# where `pytest` is called directly and CWD is not auto-added to sys.path.
+pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
 markers = [
