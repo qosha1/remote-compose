@@ -166,6 +166,70 @@ class TestCreateHost:
                 region="us-west-1",
             )
 
+    def test_create_host_rolls_back_on_terraform_apply_failure(
+        self, service, git_source, mock_terraform_runner, tmp_path
+    ):
+        """rc-xiq: partial terraform failure (e.g. EIP quota) MUST trigger
+        terraform destroy in the same working dir so we don't leak AWS
+        resources. Failed creates must NOT pollute the registry."""
+        import yaml
+        from remote_compose.terraform.runner import TerraformError
+
+        mock_terraform_runner.apply.side_effect = TerraformError(
+            cmd=["terraform", "apply"],
+            returncode=1,
+            stdout="",
+            stderr="Error: AddressLimitExceeded",
+        )
+
+        with pytest.raises(TerraformError) as exc_info:
+            service.create_host(
+                name="alice", source=git_source,
+                instance_type="t4g.medium", region="us-west-1",
+            )
+
+        # Original exception is re-raised, not wrapped
+        assert "AddressLimitExceeded" in str(exc_info.value)
+        # Rollback was attempted
+        mock_terraform_runner.destroy.assert_called_once()
+        # Registry NOT polluted by the failed attempt
+        state_file = tmp_path / "dev-hosts.yml"
+        if state_file.exists():
+            loaded = yaml.safe_load(state_file.read_text()) or {}
+            assert "alice" not in (loaded.get("hosts") or {})
+
+    def test_create_host_when_rollback_fails_writes_failed_marker(
+        self, service, git_source, mock_terraform_runner, tmp_path
+    ):
+        """If terraform destroy also fails after a failed apply, write a
+        'failed' registry entry so the user can retry rc dev destroy later
+        instead of having an invisible orphan."""
+        import yaml
+        from remote_compose.terraform.runner import TerraformError
+
+        mock_terraform_runner.apply.side_effect = TerraformError(
+            cmd=["terraform", "apply"], returncode=1,
+            stdout="", stderr="apply fail",
+        )
+        mock_terraform_runner.destroy.side_effect = TerraformError(
+            cmd=["terraform", "destroy"], returncode=1,
+            stdout="", stderr="destroy fail too",
+        )
+
+        with pytest.raises(TerraformError):
+            service.create_host(
+                name="alice", source=git_source,
+                instance_type="t4g.medium", region="us-west-1",
+            )
+
+        state_file = tmp_path / "dev-hosts.yml"
+        assert state_file.exists()
+        loaded = yaml.safe_load(state_file.read_text()) or {}
+        entry = (loaded.get("hosts") or {}).get("alice")
+        assert entry is not None
+        assert entry["status"] == "failed"
+        assert "apply fail" in entry.get("failure_reason", "")
+
 
 class TestListHosts:
     def test_list_empty(self, service):

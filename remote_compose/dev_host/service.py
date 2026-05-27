@@ -270,16 +270,65 @@ class DevHostService(BaseService):
         # directly; in those cases we use what the mock returns and skip the
         # tfvars write (no working_dir to write into).
         self._write_tfvars_if_possible(variables)
+        # apply() may partially succeed — e.g. EC2 instance created but EIP
+        # allocation fails (quota exceeded). Without rollback the AWS resources
+        # leak indefinitely (rc-xiq: 13 boxes + 7 EIPs leaked over 24h before
+        # we noticed). On any apply failure: attempt terraform destroy from the
+        # same working dir (which still has the partial tfstate), then re-raise.
         try:
-            apply_result = self.terraform_runner.apply(
-                variables=variables,
-                tags=tags,
-                user_data=user_data,
-                ssh_public_key=public_openssh,
-            )
-        except TypeError:
-            # real runner — apply() rejects kwargs; call with no args
-            apply_result = self.terraform_runner.apply()
+            try:
+                apply_result = self.terraform_runner.apply(
+                    variables=variables,
+                    tags=tags,
+                    user_data=user_data,
+                    ssh_public_key=public_openssh,
+                )
+            except TypeError:
+                # real runner — apply() rejects kwargs; call with no args
+                apply_result = self.terraform_runner.apply()
+        except Exception as apply_exc:
+            rollback_note = ""
+            try:
+                self.terraform_runner.destroy()
+                rollback_note = " (rolled back via terraform destroy)"
+            except Exception as destroy_exc:
+                # Couldn't roll back — write a 'failed' state entry so the user
+                # can retry `rc dev destroy <name> --force` later. Better a
+                # tracked orphan than an invisible one.
+                try:
+                    hosts = self._load_state()
+                    hosts[name] = {
+                        "name": name,
+                        "source": _source_to_dict(source),
+                        "instance_type": instance_type,
+                        "region": region,
+                        "ami": ami,
+                        "instance_id": None,
+                        "public_ip": None,
+                        "public_dns": None,
+                        "ssh_key_credential_id": getattr(credential, "id", None),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "status": "failed",
+                        "failure_reason": str(apply_exc)[:500],
+                    }
+                    self._save_state(hosts)
+                    rollback_note = (
+                        f" (rollback ALSO failed: {destroy_exc}; "
+                        f"registry entry marked status=failed for retry)"
+                    )
+                except Exception:
+                    rollback_note = (
+                        f" (rollback failed: {destroy_exc}; "
+                        f"registry write also failed — manual AWS cleanup required)"
+                    )
+            # Re-raise the original apply error. We don't wrap it because some
+            # exception types (e.g. TerraformError) have non-trivial __init__
+            # signatures — wrapping changes the exception class and breaks
+            # except-clauses upstream. Instead attach rollback context as a
+            # PEP 678 note (Python 3.11+; harmless on older versions).
+            if rollback_note and hasattr(apply_exc, "add_note"):
+                apply_exc.add_note(rollback_note.strip())
+            raise
 
         tf_outputs = apply_result or self._read_outputs_if_possible()
 
