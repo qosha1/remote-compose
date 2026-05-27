@@ -595,7 +595,12 @@ class TestSourceAutodetect:
             check=True,
         )
         subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init", "-q"],
+            [
+                "git",
+                "-c", "user.email=test@example.com",
+                "-c", "user.name=test",
+                "commit", "--allow-empty", "-m", "init", "-q",
+            ],
             cwd=repo,
             check=True,
         )
