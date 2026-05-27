@@ -113,11 +113,23 @@ def _default_session_factory(ctx: DeployContext) -> Any:
     Imported lazily so core + FakeProvider never drag boto3 in.
     """
     import boto3  # noqa: WPS433 (intentional local import)
+    from botocore.exceptions import ProfileNotFound  # noqa: WPS433
+
     ecs_cfg = _ecs_cfg(ctx)
-    return boto3.Session(
-        region_name=ecs_cfg.get("region"),
-        profile_name=ecs_cfg.get("aws_profile"),
-    )
+    region = ecs_cfg.get("region")
+    profile = ecs_cfg.get("aws_profile")
+    # A named profile (e.g. `aws_profile: default` in rc.yml) only resolves when
+    # a shared AWS config/credentials file is present. In CI or any env-credential
+    # context — GitHub OIDC, assumed role, AWS_ACCESS_KEY_ID in the environment —
+    # that file is absent and boto3 raises ProfileNotFound. Fall back to the
+    # default credential chain (env vars, container/instance role, ...) so
+    # `rc deploy` works from a CI runner, not just a developer laptop.
+    if profile:
+        try:
+            return boto3.Session(region_name=region, profile_name=profile)
+        except ProfileNotFound:
+            pass
+    return boto3.Session(region_name=region)
 
 
 def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, Any]:
