@@ -51,15 +51,21 @@ jobs:
         run: flake8 remote_compose/ tests/ scripts/
 
   fast-tier:
-    name: Unit + contract (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    name: Unit + contract (${{ matrix.os }} py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # rc-nq6.4 will broaden this to add macOS; the fast tier is all-mock
-        # so a single OS catches the vast majority of regressions cheaply.
+        # rc-nq6.4: full python coverage on ubuntu; macOS on the primary
+        # python only — the fast tier is all-mock, so one macOS combo catches
+        # path/subprocess/SSH platform breakage without paying for the full
+        # 2x2 grid on the pricier runner.
+        os: [ubuntu-latest]
         python: ['3.11', '3.12']
+        include:
+          - os: macos-latest
+            python: '3.12'
     steps:
       - uses: actions/checkout@v5
 
@@ -76,3 +82,42 @@ jobs:
       - name: Run unit + contract tier
         run: |
           pytest tests/unit tests/contract -q
+
+  coverage:
+    # rc-nq6.3: enforce a coverage floor on the fast tier and publish the
+    # report. Floor is set below the current measured fast-tier coverage
+    # (57.65%) to absorb cross-version noise; ratchet it upward as the suite
+    # grows. Runs once (ubuntu/py3.12) — coverage of mocked code is
+    # platform-independent, so a matrix would only add cost + variance.
+    name: Coverage (fast tier, floor 57%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,ecs]"
+
+      - name: Run fast tier with coverage (fail under 57%)
+        run: |
+          pytest tests/unit tests/contract -q \
+            --cov=remote_compose \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-fail-under=57
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-html
+          path: htmlcov/
+          if-no-files-found: ignore
