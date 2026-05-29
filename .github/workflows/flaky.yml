@@ -1,0 +1,56 @@
+name: Flaky test detection
+
+# rc-0b3.2: nightly flaky / order-dependence detection. This does NOT gate
+# PRs — the blocking CI gate (ci.yml) already runs the fast tier once with
+# pytest-randomly active (random order, seed printed for reproduction). This
+# workflow goes further on a schedule:
+#   1. runs the fast tier several times with a fresh random seed each run, so
+#      an order-dependent test that happens to pass on one ordering gets
+#      caught on another;
+#   2. runs once more with --reruns and reports any test that FAILED then
+#      PASSED on retry (the classic flaky signature).
+# A failure here is a real signal to fix or quarantine a test — not noise.
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # 07:00 UTC nightly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flaky:
+    name: Fast tier — random order x3 + rerun report
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,ecs]"
+
+      - name: Run fast tier 3x with fresh random order (order-dependence)
+        run: |
+          for i in 1 2 3; do
+            echo "::group::run $i (fresh seed)"
+            # No --randomly-seed → pytest-randomly picks a new seed each run
+            # and prints it, so any failure is reproducible.
+            pytest tests/unit tests/contract -q -p randomly
+            echo "::endgroup::"
+          done
+
+      - name: Rerun-on-failure report (flag pass-only-on-retry tests)
+        if: always()
+        run: |
+          # -r aR surfaces the rerun summary so flaky tests are named in the
+          # job log even though --reruns lets the step pass.
+          pytest tests/unit tests/contract -q -p randomly \
+            --reruns 2 --reruns-delay 1 -r aR

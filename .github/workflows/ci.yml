@@ -80,6 +80,10 @@ jobs:
           pip install -e ".[dev,ecs]"
 
       - name: Run unit + contract tier
+        # pytest-randomly (a dev dep) auto-activates here, so the gate runs in
+        # a randomized order every time and prints its seed — surfacing
+        # order-dependence on the very next PR. Deeper flaky detection (repeat
+        # runs + rerun report) lives in flaky.yml (nightly). rc-0b3.2.
         run: |
           pytest tests/unit tests/contract -q
 

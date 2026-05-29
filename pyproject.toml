@@ -54,6 +54,12 @@ dev = [
     "pytest-django>=4.5.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.10",
+    # rc-0b3.2: flaky-test detection. pytest-randomly shuffles test order
+    # every run (with a printed seed) to surface order-dependence;
+    # pytest-rerunfailures powers the nightly flaky-detection job (reruns
+    # failures and reports which only pass on retry).
+    "pytest-randomly>=3.15",
+    "pytest-rerunfailures>=14.0",
     "factory-boy>=3.3.0",
     "black>=23.7.0",
     "flake8>=6.1.0",
