@@ -43,7 +43,7 @@ jobs:
             echo "::group::run $i (fresh seed)"
             # No --randomly-seed → pytest-randomly picks a new seed each run
             # and prints it, so any failure is reproducible.
-            pytest tests/unit tests/contract -q -p randomly
+            pytest tests/unit tests/contract -q -p randomly --timeout=60
             echo "::endgroup::"
           done
 
@@ -52,5 +52,5 @@ jobs:
         run: |
           # -r aR surfaces the rerun summary so flaky tests are named in the
           # job log even though --reruns lets the step pass.
-          pytest tests/unit tests/contract -q -p randomly \
+          pytest tests/unit tests/contract -q -p randomly --timeout=60 \
             --reruns 2 --reruns-delay 1 -r aR

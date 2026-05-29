@@ -84,8 +84,10 @@ jobs:
         # a randomized order every time and prints its seed — surfacing
         # order-dependence on the very next PR. Deeper flaky detection (repeat
         # runs + rerun report) lives in flaky.yml (nightly). rc-0b3.2.
+        # --timeout=60: per-test hang guard (rc-0b3.3) — a fast-tier test that
+        # runs >60s is a hang (unmocked network, deadlock), killed deterministically.
         run: |
-          pytest tests/unit tests/contract -q
+          pytest tests/unit tests/contract -q --timeout=60
 
   coverage:
     # rc-nq6.3: enforce a coverage floor on the fast tier and publish the
@@ -112,6 +114,7 @@ jobs:
       - name: Run fast tier with coverage (fail under 57%)
         run: |
           pytest tests/unit tests/contract -q \
+            --timeout=60 \
             --cov=remote_compose \
             --cov-report=term-missing \
             --cov-report=xml \

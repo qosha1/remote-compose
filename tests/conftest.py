@@ -135,3 +135,56 @@ def mock_ssh_success(mocker):
 
     mocker.patch("paramiko.SSHClient", return_value=mock_client)
     return mock_client
+
+
+# ---------------------------------------------------------------------------
+# rc-0b3.3: runtime-budget guard — keep the fast loop fast.
+# ---------------------------------------------------------------------------
+# Any unit/contract test whose call phase exceeds the budget without an
+# explicit @pytest.mark.slow is a regression in feedback speed: either speed
+# it up, or mark it slow (so `-m "not slow"` deselects it from the fast loop).
+# The threshold sits well above today's slowest fast-tier test (~3s) so normal
+# runner variance doesn't trip it; override via RC_TEST_SLOW_BUDGET_S.
+# Integration/e2e tiers are exempt — they're legitimately slow and run on
+# their own gated workflows.
+
+_FAST_TIER_SLOW_BUDGET_S = float(os.environ.get("RC_TEST_SLOW_BUDGET_S", "8.0"))
+_call_durations: dict[str, float] = {}
+_budget_offenders: list[tuple[str, float]] = []
+
+
+def pytest_runtest_logreport(report):
+    if report.when == "call":
+        _call_durations[report.nodeid] = report.duration
+
+
+def _is_fast_tier(nodeid: str) -> bool:
+    return "/unit/" in nodeid or "/contract/" in nodeid
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _budget_offenders.clear()
+    for item in session.items:
+        nodeid = item.nodeid
+        if not _is_fast_tier(nodeid):
+            continue
+        if any(m.name == "slow" for m in item.iter_markers()):
+            continue
+        dur = _call_durations.get(nodeid)
+        if dur is not None and dur > _FAST_TIER_SLOW_BUDGET_S:
+            _budget_offenders.append((nodeid, dur))
+    # Only escalate a passing run; never mask a real failure's exit code.
+    if _budget_offenders and session.exitstatus == 0:
+        session.exitstatus = 1
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    if not _budget_offenders:
+        return
+    terminalreporter.write_sep("=", "RUNTIME BUDGET VIOLATION", red=True, bold=True)
+    for nodeid, dur in sorted(_budget_offenders, key=lambda x: -x[1]):
+        terminalreporter.write_line(
+            f"  {dur:.1f}s  {nodeid}  — exceeds "
+            f"{_FAST_TIER_SLOW_BUDGET_S:.0f}s budget; mark @pytest.mark.slow "
+            f"or speed it up"
+        )
