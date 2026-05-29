@@ -24,7 +24,7 @@ class SecurityGroupService(BaseService):
     """
 
     # Security group purposes matching the model choices
-    PURPOSES = ['alb', 'ecs_tasks', 'database', 'cache', 'efs']
+    PURPOSES = ["alb", "ecs_tasks", "database", "cache", "efs"]
 
     def __init__(self, aws_factory: Optional[AWSClientFactory] = None, **kwargs):
         super().__init__(**kwargs)
@@ -91,7 +91,7 @@ class SecurityGroupService(BaseService):
             )
 
         self.notify_observers(
-            'security_groups_provisioned',
+            "security_groups_provisioned",
             cluster_name=cluster_name,
             sg_ids=sg_ids,
         )
@@ -139,7 +139,7 @@ class SecurityGroupService(BaseService):
         Raises:
             SecurityGroupProvisioningError: If creation fails.
         """
-        ec2 = self.aws_factory.get_client('ec2', region=region, credential=credential)
+        ec2 = self.aws_factory.get_client("ec2", region=region, credential=credential)
 
         last_duplicate_error: Optional[ClientError] = None
         for attempt in range(self._MAX_DUPLICATE_RETRIES):
@@ -147,28 +147,26 @@ class SecurityGroupService(BaseService):
             try:
                 response = ec2.describe_security_groups(
                     Filters=[
-                        {'Name': 'vpc-id', 'Values': [vpc_id]},
-                        {'Name': 'tag:Name', 'Values': [name]},
-                        {'Name': 'tag:remote-compose:managed', 'Values': ['true']},
+                        {"Name": "vpc-id", "Values": [vpc_id]},
+                        {"Name": "tag:Name", "Values": [name]},
+                        {"Name": "tag:remote-compose:managed", "Values": ["true"]},
                     ]
                 )
-                existing = response.get('SecurityGroups', [])
+                existing = response.get("SecurityGroups", [])
                 if existing:
-                    sg_id = existing[0]['GroupId']
+                    sg_id = existing[0]["GroupId"]
                     self.log_info(f"Found existing security group {name}: {sg_id}")
                     SecurityGroupConfig.objects.get_or_create(
                         cluster=cluster,
                         purpose=purpose,
                         defaults={
-                            'security_group_id': sg_id,
-                            'vpc_id': vpc_id,
+                            "security_group_id": sg_id,
+                            "vpc_id": vpc_id,
                         },
                     )
                     return sg_id
             except ClientError as e:
-                self.log_warning(
-                    f"Error searching for security group {name}: {e}"
-                )
+                self.log_warning(f"Error searching for security group {name}: {e}")
 
             # Try to create.
             try:
@@ -176,30 +174,35 @@ class SecurityGroupService(BaseService):
                     GroupName=name,
                     Description=description,
                     VpcId=vpc_id,
-                    TagSpecifications=[{
-                        'ResourceType': 'security-group',
-                        'Tags': [
-                            {'Key': 'Name', 'Value': name},
-                            {'Key': 'remote-compose:cluster', 'Value': cluster.name},
-                            {'Key': 'remote-compose:managed', 'Value': 'true'},
-                            {'Key': 'remote-compose:purpose', 'Value': purpose},
-                        ],
-                    }],
+                    TagSpecifications=[
+                        {
+                            "ResourceType": "security-group",
+                            "Tags": [
+                                {"Key": "Name", "Value": name},
+                                {
+                                    "Key": "remote-compose:cluster",
+                                    "Value": cluster.name,
+                                },
+                                {"Key": "remote-compose:managed", "Value": "true"},
+                                {"Key": "remote-compose:purpose", "Value": purpose},
+                            ],
+                        }
+                    ],
                 )
-                sg_id = response['GroupId']
+                sg_id = response["GroupId"]
                 self.log_info(f"Created security group {name}: {sg_id}")
                 SecurityGroupConfig.objects.update_or_create(
                     cluster=cluster,
                     purpose=purpose,
                     defaults={
-                        'security_group_id': sg_id,
-                        'vpc_id': vpc_id,
+                        "security_group_id": sg_id,
+                        "vpc_id": vpc_id,
                     },
                 )
                 return sg_id
             except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', '')
-                if error_code != 'InvalidGroup.Duplicate':
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code != "InvalidGroup.Duplicate":
                     raise SecurityGroupProvisioningError(
                         f"Failed to create security group {name}: {e}",
                         security_group_id=None,
@@ -241,85 +244,93 @@ class SecurityGroupService(BaseService):
             region: AWS region override.
             credential: SecureCredential for AWS access.
         """
-        ec2 = self.aws_factory.get_client('ec2', region=region, credential=credential)
+        ec2 = self.aws_factory.get_client("ec2", region=region, credential=credential)
 
         inbound_rules = []
         outbound_rules = []
 
-        if purpose == 'alb':
+        if purpose == "alb":
             inbound_rules = [
                 {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 80,
-                    'ToPort': 80,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTP from anywhere'}],
+                    "IpProtocol": "tcp",
+                    "FromPort": 80,
+                    "ToPort": 80,
+                    "IpRanges": [
+                        {"CidrIp": "0.0.0.0/0", "Description": "HTTP from anywhere"}
+                    ],
                 },
                 {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 443,
-                    'ToPort': 443,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTPS from anywhere'}],
-                },
-            ]
-            outbound_rules = [
-                {
-                    'IpProtocol': '-1',
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'All outbound traffic'}],
-                },
-            ]
-
-        elif purpose == 'ecs_tasks':
-            alb_sg = sg_ids_map.get('alb')
-            inbound_rules = [
-                {
-                    'IpProtocol': '-1',
-                    'UserIdGroupPairs': [
-                        {'GroupId': alb_sg, 'Description': 'All traffic from ALB'}
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "IpRanges": [
+                        {"CidrIp": "0.0.0.0/0", "Description": "HTTPS from anywhere"}
                     ],
                 },
             ]
             outbound_rules = [
                 {
-                    'IpProtocol': '-1',
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'All outbound traffic'}],
-                },
-            ]
-
-        elif purpose == 'database':
-            ecs_sg = sg_ids_map.get('ecs_tasks')
-            inbound_rules = [
-                {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 5432,
-                    'ToPort': 5432,
-                    'UserIdGroupPairs': [
-                        {'GroupId': ecs_sg, 'Description': 'PostgreSQL from ECS tasks'}
+                    "IpProtocol": "-1",
+                    "IpRanges": [
+                        {"CidrIp": "0.0.0.0/0", "Description": "All outbound traffic"}
                     ],
                 },
             ]
 
-        elif purpose == 'cache':
-            ecs_sg = sg_ids_map.get('ecs_tasks')
+        elif purpose == "ecs_tasks":
+            alb_sg = sg_ids_map.get("alb")
             inbound_rules = [
                 {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 6379,
-                    'ToPort': 6379,
-                    'UserIdGroupPairs': [
-                        {'GroupId': ecs_sg, 'Description': 'Redis from ECS tasks'}
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {"GroupId": alb_sg, "Description": "All traffic from ALB"}
+                    ],
+                },
+            ]
+            outbound_rules = [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [
+                        {"CidrIp": "0.0.0.0/0", "Description": "All outbound traffic"}
                     ],
                 },
             ]
 
-        elif purpose == 'efs':
-            ecs_sg = sg_ids_map.get('ecs_tasks')
+        elif purpose == "database":
+            ecs_sg = sg_ids_map.get("ecs_tasks")
             inbound_rules = [
                 {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 2049,
-                    'ToPort': 2049,
-                    'UserIdGroupPairs': [
-                        {'GroupId': ecs_sg, 'Description': 'NFS from ECS tasks'}
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "UserIdGroupPairs": [
+                        {"GroupId": ecs_sg, "Description": "PostgreSQL from ECS tasks"}
+                    ],
+                },
+            ]
+
+        elif purpose == "cache":
+            ecs_sg = sg_ids_map.get("ecs_tasks")
+            inbound_rules = [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 6379,
+                    "ToPort": 6379,
+                    "UserIdGroupPairs": [
+                        {"GroupId": ecs_sg, "Description": "Redis from ECS tasks"}
+                    ],
+                },
+            ]
+
+        elif purpose == "efs":
+            ecs_sg = sg_ids_map.get("ecs_tasks")
+            inbound_rules = [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 2049,
+                    "ToPort": 2049,
+                    "UserIdGroupPairs": [
+                        {"GroupId": ecs_sg, "Description": "NFS from ECS tasks"}
                     ],
                 },
             ]
@@ -332,7 +343,7 @@ class SecurityGroupService(BaseService):
                     IpPermissions=inbound_rules,
                 )
             except ClientError as e:
-                if 'InvalidPermission.Duplicate' not in str(e):
+                if "InvalidPermission.Duplicate" not in str(e):
                     raise SecurityGroupProvisioningError(
                         f"Failed to configure inbound rules for {purpose} SG {sg_id}: {e}",
                         security_group_id=sg_id,
@@ -347,7 +358,7 @@ class SecurityGroupService(BaseService):
                     IpPermissions=outbound_rules,
                 )
             except ClientError as e:
-                if 'InvalidPermission.Duplicate' not in str(e):
+                if "InvalidPermission.Duplicate" not in str(e):
                     raise SecurityGroupProvisioningError(
                         f"Failed to configure outbound rules for {purpose} SG {sg_id}: {e}",
                         security_group_id=sg_id,
@@ -359,18 +370,18 @@ class SecurityGroupService(BaseService):
             sg_config = SecurityGroupConfig.objects.get(security_group_id=sg_id)
             sg_config.inbound_rules = [self._serialize_rule(r) for r in inbound_rules]
             sg_config.outbound_rules = [self._serialize_rule(r) for r in outbound_rules]
-            sg_config.save(update_fields=['inbound_rules', 'outbound_rules'])
+            sg_config.save(update_fields=["inbound_rules", "outbound_rules"])
         except SecurityGroupConfig.DoesNotExist:
             self.log_warning(f"No database record found for SG {sg_id}")
 
     def _get_description(self, purpose: str, cluster_name: str) -> str:
         """Return a human-readable description for a security group purpose."""
         descriptions = {
-            'alb': f"Application Load Balancer for {cluster_name}",
-            'ecs_tasks': f"ECS Tasks for {cluster_name}",
-            'database': f"Database (PostgreSQL) access for {cluster_name}",
-            'cache': f"Cache (Redis) access for {cluster_name}",
-            'efs': f"EFS (NFS) access for {cluster_name}",
+            "alb": f"Application Load Balancer for {cluster_name}",
+            "ecs_tasks": f"ECS Tasks for {cluster_name}",
+            "database": f"Database (PostgreSQL) access for {cluster_name}",
+            "cache": f"Cache (Redis) access for {cluster_name}",
+            "efs": f"EFS (NFS) access for {cluster_name}",
         }
         return descriptions.get(purpose, f"{purpose} for {cluster_name}")
 

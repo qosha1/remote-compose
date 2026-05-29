@@ -18,20 +18,22 @@ from remote_compose.init_from_compose import (
     _zone_from_domain_drop_leftmost,
 )
 
-
 # ---------------------------------------------------------------------------
 # _zone_from_domain_drop_leftmost
 # ---------------------------------------------------------------------------
 
 
 class TestZoneFromDomainDropLeftmost:
-    @pytest.mark.parametrize("domain,expected", [
-        ("startsimpli-test.rctest.ezapps.ai", "rctest.ezapps.ai"),
-        ("api.example.com", "example.com"),
-        ("example.com", "example.com"),  # apex unchanged
-        ("a.b.c.d.e", "b.c.d.e"),  # drops only one label
-        ("ezapps.ai.", "ezapps.ai"),  # trailing dot stripped
-    ])
+    @pytest.mark.parametrize(
+        "domain,expected",
+        [
+            ("startsimpli-test.rctest.ezapps.ai", "rctest.ezapps.ai"),
+            ("api.example.com", "example.com"),
+            ("example.com", "example.com"),  # apex unchanged
+            ("a.b.c.d.e", "b.c.d.e"),  # drops only one label
+            ("ezapps.ai.", "ezapps.ai"),  # trailing dot stripped
+        ],
+    )
     def test_drops_leftmost_label(self, domain, expected):
         assert _zone_from_domain_drop_leftmost(domain) == expected
 
@@ -52,16 +54,17 @@ def _scaffold(tmp_path: Path, public_service: str = "nginx") -> Path:
         "services": {
             "django": {"cpu": 256, "memory": 512, "type": "application"},
             public_service: {
-                "cpu": 256, "memory": 512, "type": "proxy",
-                "public": True, "port": 80,
+                "cpu": 256,
+                "memory": 512,
+                "type": "proxy",
+                "public": True,
+                "port": 80,
             },
         },
     }
     rc_path = tmp_path / "rc.yml"
     rc_path.write_text(
-        "# header line\n"
-        "# another comment\n\n"
-        + yaml.safe_dump(rc, sort_keys=False)
+        "# header line\n" "# another comment\n\n" + yaml.safe_dump(rc, sort_keys=False)
     )
     return rc_path
 
@@ -90,7 +93,8 @@ class TestPatchRcYmlDomain:
         )
         out = yaml.safe_load(rc_path.read_text())
         assert out["services"]["nginx"]["aliases"] == [
-            "api.example.com", "www.app.example.com",
+            "api.example.com",
+            "www.app.example.com",
         ]
 
     def test_aliases_dedupes_and_filters_self(self, tmp_path):
@@ -123,9 +127,13 @@ class TestPatchRcYmlDomain:
 
     def test_idempotent_re_runs_produce_same_output(self, tmp_path):
         rc_path = _scaffold(tmp_path)
-        _patch_rc_yml_domain(rc_path, domain="app.example.com", aliases=["x.app.example.com"])
+        _patch_rc_yml_domain(
+            rc_path, domain="app.example.com", aliases=["x.app.example.com"]
+        )
         first = rc_path.read_text()
-        _patch_rc_yml_domain(rc_path, domain="app.example.com", aliases=["x.app.example.com"])
+        _patch_rc_yml_domain(
+            rc_path, domain="app.example.com", aliases=["x.app.example.com"]
+        )
         second = rc_path.read_text()
         assert first == second
 
@@ -157,15 +165,21 @@ class TestRcUpDomainFlag:
         from remote_compose.cli import cli
 
         # Mock Route 53 zone lookup.
-        zones = zones if zones is not None else [
-            {"Name": "rctest.ezapps.ai."},
-            {"Name": "example.com."},
-        ]
+        zones = (
+            zones
+            if zones is not None
+            else [
+                {"Name": "rctest.ezapps.ai."},
+                {"Name": "example.com."},
+            ]
+        )
 
-        with patch("boto3.Session") as boto_session, \
-             patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-             patch("remote_compose.cli._secrets_push_v2", return_value=True), \
-             patch("remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path"):
+        with (
+            patch("boto3.Session") as boto_session,
+            patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+            patch("remote_compose.cli._secrets_push_v2", return_value=True),
+            patch("remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path"),
+        ):
             r53 = MagicMock()
             r53.list_hosted_zones.return_value = {"HostedZones": zones}
             session = MagicMock()
@@ -176,12 +190,20 @@ class TestRcUpDomainFlag:
     def test_alias_without_domain_errors(self, tmp_path):
         from click.testing import CliRunner
         from remote_compose.cli import cli
+
         runner = CliRunner()
         rc_path = tmp_path / "rc.yml"
         rc_path.write_text("version: 2\nproject: x\n")
-        result = runner.invoke(cli, [
-            "-c", str(rc_path), "up", "--alias", "extra.example.com",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "-c",
+                str(rc_path),
+                "up",
+                "--alias",
+                "extra.example.com",
+            ],
+        )
         assert result.exit_code != 0
         assert "--alias requires --domain" in result.output
 
@@ -190,22 +212,31 @@ class TestRcUpDomainFlag:
         in the user's Route 53."""
         from click.testing import CliRunner
         from remote_compose.cli import cli
+
         runner = CliRunner()
         # Pre-existing rc.yml so we don't go through scaffold.
         rc_path = _scaffold(tmp_path)
 
         with patch("boto3.Session") as boto_session:
             r53 = MagicMock()
-            r53.list_hosted_zones.return_value = {"HostedZones": [
-                {"Name": "other-zone.example."},
-            ]}
+            r53.list_hosted_zones.return_value = {
+                "HostedZones": [
+                    {"Name": "other-zone.example."},
+                ]
+            }
             session = MagicMock()
             session.client.return_value = r53
             boto_session.return_value = session
-            result = runner.invoke(cli, [
-                "-c", str(rc_path), "up",
-                "--domain", "x.rctest.ezapps.ai",
-            ])
+            result = runner.invoke(
+                cli,
+                [
+                    "-c",
+                    str(rc_path),
+                    "up",
+                    "--domain",
+                    "x.rctest.ezapps.ai",
+                ],
+            )
 
         assert result.exit_code != 0
         assert "Route 53 hosted zone" in result.output
@@ -216,27 +247,39 @@ class TestRcUpDomainFlag:
         verifies the OVERRIDE zone, not the default."""
         from click.testing import CliRunner
         from remote_compose.cli import cli
+
         runner = CliRunner()
         rc_path = _scaffold(tmp_path)
 
-        with patch("boto3.Session") as boto_session, \
-             patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-             patch("remote_compose.cli._secrets_push_v2", return_value=True), \
-             patch("remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path"):
+        with (
+            patch("boto3.Session") as boto_session,
+            patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+            patch("remote_compose.cli._secrets_push_v2", return_value=True),
+            patch("remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path"),
+        ):
             r53 = MagicMock()
             # Only the OVERRIDE zone is present; the leftmost-drop derivation
             # would have failed.
-            r53.list_hosted_zones.return_value = {"HostedZones": [
-                {"Name": "weird-zone.example."},
-            ]}
+            r53.list_hosted_zones.return_value = {
+                "HostedZones": [
+                    {"Name": "weird-zone.example."},
+                ]
+            }
             session = MagicMock()
             session.client.return_value = r53
             boto_session.return_value = session
-            result = runner.invoke(cli, [
-                "-c", str(rc_path), "up",
-                "--domain", "a.b.c.d.e",
-                "--route53-zone", "weird-zone.example",
-            ])
+            result = runner.invoke(
+                cli,
+                [
+                    "-c",
+                    str(rc_path),
+                    "up",
+                    "--domain",
+                    "a.b.c.d.e",
+                    "--route53-zone",
+                    "weird-zone.example",
+                ],
+            )
 
         assert result.exit_code == 0, result.output
         out = yaml.safe_load(rc_path.read_text())

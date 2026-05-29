@@ -13,7 +13,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import yaml
 
@@ -40,6 +40,7 @@ def load_rc_yml(path: str | Path) -> tuple[int, dict, RcConfigV2 | None]:
     problem_mark line+column is included verbatim.
     """
     from .config._schema_types import ConfigError as _ConfigError
+
     path = Path(path)
     try:
         with path.open() as f:
@@ -50,15 +51,12 @@ def load_rc_yml(path: str | Path) -> tuple[int, dict, RcConfigV2 | None]:
         mark = getattr(exc, "problem_mark", None)
         if mark is not None:
             loc = f" (line {mark.line + 1}, column {mark.column + 1})"
-        raise _ConfigError(
-            f"rc.yml at {path}{loc}: YAML syntax error — {exc}"
-        ) from exc
+        raise _ConfigError(f"rc.yml at {path}{loc}: YAML syntax error — {exc}") from exc
     except OSError as exc:
         raise _ConfigError(f"rc.yml at {path}: cannot read — {exc}") from exc
     if not isinstance(raw, dict):
         raise _ConfigError(
-            f"rc.yml at {path}: must be a mapping, got "
-            f"{type(raw).__name__}"
+            f"rc.yml at {path}: must be a mapping, got " f"{type(raw).__name__}"
         )
     version = int(raw.get("version", 1))
     if version == 2:
@@ -129,7 +127,9 @@ def _expand_compose_vars(value: str) -> str:
     return _COMPOSE_VAR_RE.sub(repl, value)
 
 
-def _service_env(svc_compose: dict, compose_path: Optional[Path] = None) -> dict[str, str]:
+def _service_env(
+    svc_compose: dict, compose_path: Optional[Path] = None
+) -> dict[str, str]:
     """Extract compose `environment:` and `env_file:` into a flat dict.
 
     Merge order (later wins):
@@ -150,6 +150,7 @@ def _service_env(svc_compose: dict, compose_path: Optional[Path] = None) -> dict
             [env_files_raw] if isinstance(env_files_raw, str) else list(env_files_raw)
         )
         from .envfile import EnvFileError, parse as _parse_env
+
         for ref in env_files:
             ref_path = Path(ref)
             if not ref_path.is_absolute():
@@ -226,6 +227,7 @@ def _service_command(svc_compose: dict) -> list[str]:
     correctly.
     """
     import shlex
+
     cmd = svc_compose.get("command")
     if cmd is None:
         return []
@@ -285,7 +287,11 @@ def _merge_framework_lifecycle(
     # Interactive hooks (shell, console, dbshell, dbconsole) get
     # interactive=True so the lifecycle CLI attaches a tty when running.
     interactive_hook_names = {
-        "shell", "console", "dbshell", "dbconsole", "routes",
+        "shell",
+        "console",
+        "dbshell",
+        "dbconsole",
+        "routes",
     }
     for hook_name, argv in fw.lifecycle_hooks.items():
         if hook_name in out:
@@ -373,6 +379,7 @@ def _auto_secret_name_for(env_file_path: Path, compose_dir: Path) -> str:
     causing a deploy-time empty-secret cascade — see rc-e5u.44.20 + .44.22.
     """
     from .init_from_compose import secret_name_from_path
+
     try:
         rel = env_file_path.resolve().relative_to(compose_dir.resolve())
     except ValueError:
@@ -487,9 +494,13 @@ def _expand_env_file_auto(
     for name, abs_path in discovered.items():
         if name in rc_yml_names:
             continue
-        expanded.append(_SecRefV2(
-            name=name, source="file", path=str(abs_path),
-        ))
+        expanded.append(
+            _SecRefV2(
+                name=name,
+                source="file",
+                path=str(abs_path),
+            )
+        )
 
     # 4. Compute suppressed_keys (union across every discovered env_file)
     #    so legacy callers still get a global set. Per-service routing in
@@ -581,6 +592,7 @@ def build_deploy_context(
         # (or rc.yml's services.<svc>.env override) MUST survive — those
         # are user-intended plaintext overrides that win on collision.
         from .envfile import EnvFileError as _EFE, keys as _ekeys
+
         explicit_plaintext_keys: set[str] = set()
         compose_environment = svc_compose.get("environment")
         if isinstance(compose_environment, dict):
@@ -635,6 +647,7 @@ def build_deploy_context(
             # explicit user values in rc.yml.env / compose env override.
             if svc.domain:
                 from .frameworks import detect_framework as _detect_fw
+
                 fw = _detect_fw(svc_compose, compose_path)
                 if fw is not None:
                     aliases_tup = tuple(svc.aliases or ())
@@ -648,6 +661,7 @@ def build_deploy_context(
                     if fw.name == "django":
                         from .fix_django_tls import has_rc_j08_marker
                         import click as _click
+
                         project_dir = compose_path.parent.resolve()
                         if has_rc_j08_marker(project_dir) is None:
                             _click.echo(
@@ -659,7 +673,9 @@ def build_deploy_context(
                                 f"`rc fix django-tls`",
                                 err=True,
                             )
-            primary_port = svc.port or (all_compose_ports[0] if all_compose_ports else None)
+            primary_port = svc.port or (
+                all_compose_ports[0] if all_compose_ports else None
+            )
             extras = [p for p in all_compose_ports if p != primary_port]
             # rc-e5u.46.1: rc.yml services.<svc>.dockerfile overrides compose's
             # build.dockerfile. Path is interpreted relative to the build
@@ -711,7 +727,9 @@ def build_deploy_context(
                 env=env,
                 command=cmd,
                 lifecycle=_merge_framework_lifecycle(
-                    svc, svc_compose, compose_path,
+                    svc,
+                    svc_compose,
+                    compose_path,
                 ),
                 domain=svc.domain,
                 aliases=list(svc.aliases or []),
@@ -751,8 +769,11 @@ def build_deploy_context(
 
     secrets = [
         SecretRef(
-            name=s.name, source=s.source,
-            path=s.path, arn=s.arn, ref=s.ref,
+            name=s.name,
+            source=s.source,
+            path=s.path,
+            arn=s.arn,
+            ref=s.ref,
         )
         for s in v2_secrets_expanded
     ]
@@ -811,13 +832,18 @@ def resolve_provider(v2: RcConfigV2) -> Provider:
     # cls() for providers like FakeProvider that take no init args.
     import click as _click
     import inspect as _inspect
-    _emit_progress = lambda m: _click.echo(m)
+
+    def _emit_progress(m):
+        return _click.echo(m)
+
     try:
         sig = _inspect.signature(cls)
         if "progress" in sig.parameters and "runner_factory" in sig.parameters:
             from .terraform.runner import TerraformRunner as _TR
+
             def _runner_factory_with_progress(out_dir):
                 return _TR(out_dir, progress=_emit_progress)
+
             return cls(
                 progress=_emit_progress,
                 runner_factory=_runner_factory_with_progress,
@@ -835,7 +861,7 @@ def resolve_provider(v2: RcConfigV2) -> Provider:
 def render_plan(result) -> str:
     lines = [
         "",
-        f"  Terraform plan:",
+        "  Terraform plan:",
         f"    create:  {result.create}",
         f"    update:  {result.update}",
         f"    destroy: {result.destroy}",
@@ -856,7 +882,7 @@ def render_plan(result) -> str:
 def render_deploy(result) -> str:
     lines = [
         "",
-        f"  Deploy complete",
+        "  Deploy complete",
         f"    revision: {result.revision_id}",
         f"    services: {', '.join(sorted(result.services))}",
         f"    duration: {result.duration_s:.1f}s",
@@ -885,6 +911,7 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
     rather than fatal — the deploy already succeeded by the time we run.
     """
     import click
+
     secrets = list(v2.secrets or [])
     if not secrets:
         return
@@ -896,7 +923,9 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
         compose_path = (Path(rc_path).parent / compose_path).resolve()
     compose_services = _parse_compose_services(compose_path)
     expanded, _suppressed, _per_svc = _expand_env_file_auto(
-        secrets, compose_services, compose_path,
+        secrets,
+        compose_services,
+        compose_path,
     )
     file_secrets = [s for s in expanded if getattr(s, "source", None) == "file"]
     if not file_secrets:
@@ -910,6 +939,7 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
 
     try:
         from .cli import _detect_empty_file_secrets, _secrets_push_v2
+
         empty = _detect_empty_file_secrets(v2, region, aws_profile, file_secrets)
     except Exception as exc:  # noqa: BLE001
         click.echo(
@@ -922,12 +952,11 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
         return
 
     click.echo(
-        f"\n  Auto-pushing {len(empty)} empty secret(s): "
-        f"{', '.join(sorted(empty))}"
+        f"\n  Auto-pushing {len(empty)} empty secret(s): " f"{', '.join(sorted(empty))}"
     )
     click.echo(
-        f"  (terraform created these but `rc secrets push` was never run "
-        f"— pushing now so tasks can start)"
+        "  (terraform created these but `rc secrets push` was never run "
+        "— pushing now so tasks can start)"
     )
     try:
         _secrets_push_v2(str(rc_path), rollout=True)
@@ -960,9 +989,12 @@ def _wait_for_services_stable(
     """
     import os as _os
     import click as _click
+
     ecs_cfg = _ecs_cfg_for_v2(v2)
     cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
-    targets = sorted(set(services_filter)) if services_filter else sorted(v2.services.keys())
+    targets = (
+        sorted(set(services_filter)) if services_filter else sorted(v2.services.keys())
+    )
     if not targets:
         return
     try:
@@ -986,6 +1018,7 @@ def _wait_for_services_stable(
         f"to reach steady state before running auto_on_deploy hooks..."
     )
     from .heartbeat import heartbeat as _heartbeat
+
     _hb = _heartbeat(
         lambda m: _click.echo(m, err=True),
         f"waiting for {len(targets)} service(s) to reach steady state",
@@ -995,7 +1028,8 @@ def _wait_for_services_stable(
         while True:
             try:
                 desc = ecs_client.describe_services(
-                    cluster=cluster, services=targets,
+                    cluster=cluster,
+                    services=targets,
                 )
             except Exception as exc:  # noqa: BLE001
                 _click.echo(
@@ -1046,7 +1080,10 @@ def _ecs_cfg_for_v2(v2) -> dict:
 
 
 def _run_auto_on_deploy_hooks(
-    provider, ctx, v2, services_filter: Optional[list[str]] = None,
+    provider,
+    ctx,
+    v2,
+    services_filter: Optional[list[str]] = None,
     wait_for_stable: bool = True,
 ) -> None:
     """Run every services[*].lifecycle.<hook> with auto_on_deploy=true,
@@ -1063,6 +1100,7 @@ def _run_auto_on_deploy_hooks(
     the hook lands on the new task def rather than the old draining one.
     """
     import click as _click
+
     allowed = set(services_filter) if services_filter else None
     hooks: list[tuple[str, str, "object"]] = []
     for svc_name, svc in v2.services.items():
@@ -1075,7 +1113,9 @@ def _run_auto_on_deploy_hooks(
         return
     if wait_for_stable:
         _wait_for_services_stable(
-            provider, ctx, v2,
+            provider,
+            ctx,
+            v2,
             services_filter=services_filter,
         )
     _click.echo("\n  Running auto_on_deploy lifecycle hooks:")
@@ -1083,12 +1123,14 @@ def _run_auto_on_deploy_hooks(
         if hook.run_once and hook.probe:
             probe = provider.exec(ctx, svc_name, list(hook.probe))
             if probe.exit_code == 0:
-                _click.echo(f"    {hook_name} on {svc_name}: skipped (run_once probe satisfied)")
+                _click.echo(
+                    f"    {hook_name} on {svc_name}: skipped (run_once probe satisfied)"
+                )
                 continue
         _click.echo(f"    {hook_name} on {svc_name}...")
         result = provider.exec(ctx, svc_name, list(hook.command))
         if result.exit_code == 0:
-            _click.echo(f"      ok")
+            _click.echo("      ok")
         else:
             _click.echo(
                 f"      FAILED (exit {result.exit_code}); "
@@ -1116,6 +1158,7 @@ def run_auto_on_deploy_hooks_for_path(
     override via RC_HOOK_WAIT_TIMEOUT_S.
     """
     import click as _click
+
     p = Path(config_path) if config_path else Path.cwd() / "rc.yml"
     if not p.exists():
         return
@@ -1150,7 +1193,9 @@ def run_auto_on_deploy_hooks_for_path(
     # The wait_for_stable knob still threads through so callers that
     # want to skip the wait (e.g. tests) can opt out.
     _run_auto_on_deploy_hooks(
-        provider, ctx, v2,
+        provider,
+        ctx,
+        v2,
         services_filter=services_filter,
         wait_for_stable=wait_for_stable,
     )
@@ -1189,6 +1234,7 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
         # work even when the provider's own plan() doesn't populate
         # warnings (fake / k8s today). Merge & dedupe.
         from .compose_warnings import collect_compose_warnings
+
         compose_warns = collect_compose_warnings(ctx.compose_path, raw)
         existing = list(getattr(result, "warnings", []) or [])
         for w in compose_warns:
@@ -1234,8 +1280,11 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
         if ttl:
             from datetime import datetime, timezone
             from .ephemeral import (
-                parse_duration, register_stack, to_iso_utc,
+                parse_duration,
+                register_stack,
+                to_iso_utc,
             )
+
             try:
                 delta = parse_duration(ttl)
             except ValueError as exc:
@@ -1270,7 +1319,9 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
                 f"docker build is skipped + tag is re-applied as :latest."
             )
         result = provider.deploy(
-            ctx, services_filter=services_filter, tag=tag,
+            ctx,
+            services_filter=services_filter,
+            tag=tag,
         )
         click.echo(render_deploy(result))
         # rc-e5u.44.20: detect empty file-sourced SM secrets after deploy
@@ -1293,14 +1344,17 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
             # On --services deploys, only run hooks for the targeted service(s)
             # — e.g., `rc deploy --services django` triggers django.migrate but
             # not nginx.reload.
-            _run_auto_on_deploy_hooks(provider, ctx, v2, services_filter=services_filter)
+            _run_auto_on_deploy_hooks(
+                provider, ctx, v2, services_filter=services_filter
+            )
         return True
 
     if command == "destroy":
         if not kwargs.get("yes"):
             if not click.confirm(
                 f"\n  This will destroy ALL resources for {v2.project} via "
-                f"terraform. Continue?", default=False,
+                f"terraform. Continue?",
+                default=False,
             ):
                 click.echo("  aborted.")
                 raise click.exceptions.Exit(1)
@@ -1328,8 +1382,12 @@ def render_status(report) -> str:
         or getattr(s, "latest_revision", None) is not None
         for s in report.services
     )
-    headers = ["service".ljust(max_name), "desired".rjust(7),
-               "running".rjust(7), "health".ljust(10)]
+    headers = [
+        "service".ljust(max_name),
+        "desired".rjust(7),
+        "running".rjust(7),
+        "health".ljust(10),
+    ]
     if show_revs:
         headers.append("revision".ljust(12))
     lines = ["  " + "  ".join(headers)]

@@ -18,9 +18,9 @@ class VPCInfrastructure(TimestampedModel):
     """
 
     cluster = models.OneToOneField(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='vpc_infrastructure',
+        related_name="vpc_infrastructure",
     )
 
     vpc_id = models.CharField(
@@ -28,15 +28,13 @@ class VPCInfrastructure(TimestampedModel):
         unique=True,
         db_index=True,
     )
-    vpc_cidr = models.CharField(max_length=20, default='10.0.0.0/16')
+    vpc_cidr = models.CharField(max_length=20, default="10.0.0.0/16")
 
     public_subnet_ids = models.JSONField(
-        default=list,
-        help_text="Public subnet IDs (for ALB, NAT gateway)"
+        default=list, help_text="Public subnet IDs (for ALB, NAT gateway)"
     )
     private_subnet_ids = models.JSONField(
-        default=list,
-        help_text="Private subnet IDs (for ECS tasks)"
+        default=list, help_text="Private subnet IDs (for ECS tasks)"
     )
 
     internet_gateway_id = models.CharField(max_length=50, blank=True)
@@ -47,16 +45,15 @@ class VPCInfrastructure(TimestampedModel):
     private_route_table_id = models.CharField(max_length=50, blank=True)
 
     is_managed = models.BooleanField(
-        default=True,
-        help_text="Whether this VPC was created by remote-compose"
+        default=True, help_text="Whether this VPC was created by remote-compose"
     )
 
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_vpc_infrastructure'
-        verbose_name = 'VPC Infrastructure'
-        verbose_name_plural = 'VPC Infrastructures'
+        db_table = "remote_compose_vpc_infrastructure"
+        verbose_name = "VPC Infrastructure"
+        verbose_name_plural = "VPC Infrastructures"
 
     def __str__(self):
         return f"VPC {self.vpc_id} ({self.cluster.name})"
@@ -75,16 +72,16 @@ class SecurityGroupConfig(TimestampedModel):
     """
 
     class Purpose(models.TextChoices):
-        ALB = 'alb', 'Application Load Balancer'
-        ECS_TASKS = 'ecs_tasks', 'ECS Tasks'
-        DATABASE = 'database', 'Database (PostgreSQL)'
-        CACHE = 'cache', 'Cache (Redis)'
-        EFS = 'efs', 'Elastic File System'
+        ALB = "alb", "Application Load Balancer"
+        ECS_TASKS = "ecs_tasks", "ECS Tasks"
+        DATABASE = "database", "Database (PostgreSQL)"
+        CACHE = "cache", "Cache (Redis)"
+        EFS = "efs", "Elastic File System"
 
     cluster = models.ForeignKey(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='security_groups',
+        related_name="security_groups",
     )
 
     security_group_id = models.CharField(
@@ -99,21 +96,19 @@ class SecurityGroupConfig(TimestampedModel):
     vpc_id = models.CharField(max_length=50)
 
     inbound_rules = models.JSONField(
-        default=list,
-        help_text="Inbound security group rules"
+        default=list, help_text="Inbound security group rules"
     )
     outbound_rules = models.JSONField(
-        default=list,
-        help_text="Outbound security group rules"
+        default=list, help_text="Outbound security group rules"
     )
 
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_security_groups'
-        verbose_name = 'Security Group'
-        verbose_name_plural = 'Security Groups'
-        unique_together = [['cluster', 'purpose']]
+        db_table = "remote_compose_security_groups"
+        verbose_name = "Security Group"
+        verbose_name_plural = "Security Groups"
+        unique_together = [["cluster", "purpose"]]
 
     def __str__(self):
         return f"{self.get_purpose_display()} SG {self.security_group_id}"
@@ -125,9 +120,9 @@ class LoadBalancerConfig(TimestampedModel):
     """
 
     cluster = models.OneToOneField(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='load_balancer',
+        related_name="load_balancer",
     )
 
     alb_arn = models.CharField(
@@ -147,9 +142,9 @@ class LoadBalancerConfig(TimestampedModel):
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_load_balancers'
-        verbose_name = 'Load Balancer'
-        verbose_name_plural = 'Load Balancers'
+        db_table = "remote_compose_load_balancers"
+        verbose_name = "Load Balancer"
+        verbose_name_plural = "Load Balancers"
 
     def __str__(self):
         return f"ALB {self.alb_dns_name} ({self.cluster.name})"
@@ -161,14 +156,14 @@ class TargetGroupConfig(TimestampedModel):
     """
 
     cluster = models.ForeignKey(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='target_groups',
+        related_name="target_groups",
     )
     ecs_service = models.OneToOneField(
-        'ECSService',
+        "ECSService",
         on_delete=models.CASCADE,
-        related_name='target_group',
+        related_name="target_group",
         null=True,
         blank=True,
     )
@@ -180,24 +175,24 @@ class TargetGroupConfig(TimestampedModel):
     )
     target_group_name = models.CharField(max_length=32)
     port = models.IntegerField()
-    protocol = models.CharField(max_length=10, default='HTTP')
+    protocol = models.CharField(max_length=10, default="HTTP")
 
-    health_check_path = models.CharField(max_length=255, default='/health')
+    health_check_path = models.CharField(max_length=255, default="/health")
     health_check_interval = models.IntegerField(default=30)
     healthy_threshold = models.IntegerField(default=3)
     unhealthy_threshold = models.IntegerField(default=3)
 
     is_default = models.BooleanField(
         default=False,
-        help_text="Whether this is the default target group for the ALB listener"
+        help_text="Whether this is the default target group for the ALB listener",
     )
 
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_target_groups'
-        verbose_name = 'Target Group'
-        verbose_name_plural = 'Target Groups'
+        db_table = "remote_compose_target_groups"
+        verbose_name = "Target Group"
+        verbose_name_plural = "Target Groups"
 
     def __str__(self):
         return f"TG {self.target_group_name} (port {self.port})"
@@ -209,9 +204,9 @@ class SecretConfig(TimestampedModel):
     """
 
     cluster = models.ForeignKey(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='managed_secrets',
+        related_name="managed_secrets",
     )
 
     secret_arn = models.CharField(
@@ -221,23 +216,22 @@ class SecretConfig(TimestampedModel):
     )
     secret_name = models.CharField(max_length=512)
     env_var_name = models.CharField(
-        max_length=255,
-        help_text="Environment variable name this secret maps to"
+        max_length=255, help_text="Environment variable name this secret maps to"
     )
 
     source_file = models.CharField(
         max_length=512,
         blank=True,
-        help_text="Source env file this secret was read from"
+        help_text="Source env file this secret was read from",
     )
 
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_secret_configs'
-        verbose_name = 'Secret Config'
-        verbose_name_plural = 'Secret Configs'
-        unique_together = [['cluster', 'env_var_name']]
+        db_table = "remote_compose_secret_configs"
+        verbose_name = "Secret Config"
+        verbose_name_plural = "Secret Configs"
+        unique_together = [["cluster", "env_var_name"]]
 
     def __str__(self):
         return f"{self.env_var_name} -> {self.secret_name}"
@@ -249,9 +243,9 @@ class ServiceConnectNamespace(TimestampedModel):
     """
 
     cluster = models.OneToOneField(
-        'ECSCluster',
+        "ECSCluster",
         on_delete=models.CASCADE,
-        related_name='service_connect_namespace',
+        related_name="service_connect_namespace",
     )
 
     namespace_id = models.CharField(
@@ -262,17 +256,15 @@ class ServiceConnectNamespace(TimestampedModel):
     namespace_name = models.CharField(max_length=255)
     namespace_arn = models.CharField(max_length=512, blank=True)
     namespace_type = models.CharField(
-        max_length=20,
-        default='HTTP',
-        help_text="Namespace type: HTTP or DNS_PRIVATE"
+        max_length=20, default="HTTP", help_text="Namespace type: HTTP or DNS_PRIVATE"
     )
 
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
-        db_table = 'remote_compose_service_connect_namespaces'
-        verbose_name = 'Service Connect Namespace'
-        verbose_name_plural = 'Service Connect Namespaces'
+        db_table = "remote_compose_service_connect_namespaces"
+        verbose_name = "Service Connect Namespace"
+        verbose_name_plural = "Service Connect Namespaces"
 
     def __str__(self):
         return f"{self.namespace_name} ({self.namespace_id})"

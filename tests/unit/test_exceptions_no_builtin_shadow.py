@@ -11,9 +11,7 @@ were rc-domain errors. The fix renames our class to
 from __future__ import annotations
 
 import builtins
-import importlib
 
-import pytest
 
 import remote_compose.exceptions as rcx
 

@@ -24,18 +24,17 @@ import yaml
 from click.testing import CliRunner
 
 from remote_compose.cli import cli as rc_cli
-from remote_compose.cli_v2 import _run_auto_on_deploy_hooks, build_deploy_context, load_rc_yml
-from remote_compose.config.v2_schema import (
-    LifecycleHookV2,
-    RcConfigV2,
-    ServiceV2,
+from remote_compose.cli_v2 import (
+    _run_auto_on_deploy_hooks,
+    build_deploy_context,
+    load_rc_yml,
 )
 from remote_compose.provider.base import ExecResult
-
 
 # ---------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------
+
 
 def _write_v2_project(
     tmp_path: Path,
@@ -61,6 +60,7 @@ def _write_v2_project(
 def _reset_fake_provider():
     """FakeProvider holds class-level state between tests; isolate."""
     from remote_compose.provider.fake import FakeProvider
+
     FakeProvider.reset()
     yield
     FakeProvider.reset()
@@ -70,18 +70,22 @@ def _reset_fake_provider():
 # 1. rc lifecycle <hook> declarer resolution
 # ---------------------------------------------------------------------
 
+
 class TestLifecycleDeclarerResolution:
     def test_unique_declarer_runs_without_explicit_service(self, tmp_path):
         """One service declares 'migrate' → that service runs the hook."""
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "migrate": {"command": ["python", "manage.py", "migrate"]},
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "migrate": {"command": ["python", "manage.py", "migrate"]},
+                    },
                 },
+                "worker": {"image": "busybox"},
             },
-            "worker": {"image": "busybox"},
-        })
+        )
 
         # Mock provider.exec to record the call + return success.
         recorded = []
@@ -92,11 +96,13 @@ class TestLifecycleDeclarerResolution:
 
         with mock.patch(
             "remote_compose.provider.fake.FakeProvider.exec",
-            side_effect=fake_exec, autospec=False,
+            side_effect=fake_exec,
+            autospec=False,
         ):
             runner = CliRunner()
             result = runner.invoke(
-                rc_cli, ["--config", str(rc_path), "lifecycle", "migrate"],
+                rc_cli,
+                ["--config", str(rc_path), "lifecycle", "migrate"],
             )
 
         assert result.exit_code == 0, result.output
@@ -107,16 +113,19 @@ class TestLifecycleDeclarerResolution:
 
     def test_explicit_service_disambiguates_when_multiple_declarers(self, tmp_path):
         """Two services declare 'shell' → explicit service arg picks one."""
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {"shell": {"command": ["python"]}},
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {"shell": {"command": ["python"]}},
+                },
+                "rails": {
+                    "image": "busybox",
+                    "lifecycle": {"shell": {"command": ["bin/rails", "console"]}},
+                },
             },
-            "rails": {
-                "image": "busybox",
-                "lifecycle": {"shell": {"command": ["bin/rails", "console"]}},
-            },
-        })
+        )
 
         recorded = []
 
@@ -126,7 +135,8 @@ class TestLifecycleDeclarerResolution:
 
         with mock.patch(
             "remote_compose.provider.fake.FakeProvider.exec",
-            side_effect=fake_exec, autospec=False,
+            side_effect=fake_exec,
+            autospec=False,
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -139,32 +149,42 @@ class TestLifecycleDeclarerResolution:
 
     def test_ambiguous_hook_without_service_errors(self, tmp_path):
         """Multiple declarers + no explicit service → exits non-zero with hint."""
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {"shell": {"command": ["python"]}},
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {"shell": {"command": ["python"]}},
+                },
+                "rails": {
+                    "image": "busybox",
+                    "lifecycle": {"shell": {"command": ["bin/rails", "console"]}},
+                },
             },
-            "rails": {
-                "image": "busybox",
-                "lifecycle": {"shell": {"command": ["bin/rails", "console"]}},
-            },
-        })
+        )
 
         runner = CliRunner()
         result = runner.invoke(
-            rc_cli, ["--config", str(rc_path), "lifecycle", "shell"],
+            rc_cli,
+            ["--config", str(rc_path), "lifecycle", "shell"],
         )
         assert result.exit_code != 0
-        assert "multiple services declare" in result.output.lower() or \
-               "multiple services declare" in (result.stderr_bytes or b"").decode()
+        assert (
+            "multiple services declare" in result.output.lower()
+            or "multiple services declare" in (result.stderr_bytes or b"").decode()
+        )
 
     def test_unknown_hook_errors(self, tmp_path):
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {"image": "busybox"},
-        })
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {"image": "busybox"},
+            },
+        )
         runner = CliRunner()
         result = runner.invoke(
-            rc_cli, ["--config", str(rc_path), "lifecycle", "doesnotexist"],
+            rc_cli,
+            ["--config", str(rc_path), "lifecycle", "doesnotexist"],
         )
         assert result.exit_code != 0
 
@@ -173,21 +193,34 @@ class TestLifecycleDeclarerResolution:
 # 2. run_once + probe short-circuit
 # ---------------------------------------------------------------------
 
+
 class TestRunOnceProbe:
     def test_probe_exit_0_skips_command(self, tmp_path):
         """probe returns 0 (already-applied) → command must NOT run."""
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "createsuperuser": {
-                        "command": ["python", "manage.py", "createsuperuser", "--noinput"],
-                        "run_once": True,
-                        "probe": ["python", "-c", "from x import User; exit(0 if User.objects.exists() else 1)"],
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "createsuperuser": {
+                            "command": [
+                                "python",
+                                "manage.py",
+                                "createsuperuser",
+                                "--noinput",
+                            ],
+                            "run_once": True,
+                            "probe": [
+                                "python",
+                                "-c",
+                                "from x import User; exit(0 if User.objects.exists() else 1)",
+                            ],
+                        },
                     },
                 },
             },
-        })
+        )
 
         # Probe call returns 0 (truthy), command call should never happen.
         calls: list[tuple[str, list[str]]] = []
@@ -199,7 +232,8 @@ class TestRunOnceProbe:
 
         with mock.patch(
             "remote_compose.provider.fake.FakeProvider.exec",
-            side_effect=fake_exec, autospec=False,
+            side_effect=fake_exec,
+            autospec=False,
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -211,26 +245,38 @@ class TestRunOnceProbe:
         # Exactly one exec call — the probe — and NO command call.
         assert len(calls) == 1
         _, probe_cmd = calls[0]
-        assert "manage.py" not in " ".join(probe_cmd) or "createsuperuser" not in " ".join(probe_cmd), (
-            f"command appears to have run despite probe exit 0: {probe_cmd}"
+        assert "manage.py" not in " ".join(
+            probe_cmd
+        ) or "createsuperuser" not in " ".join(
+            probe_cmd
+        ), f"command appears to have run despite probe exit 0: {probe_cmd}"
+        assert (
+            "skipping" in result.output.lower()
+            or "already done" in result.output.lower()
         )
-        assert "skipping" in result.output.lower() or \
-               "already done" in result.output.lower()
 
     def test_probe_nonzero_runs_command(self, tmp_path):
         """probe returns nonzero → command must run after."""
-        rc_path = _write_v2_project(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "createsuperuser": {
-                        "command": ["python", "manage.py", "createsuperuser", "--noinput"],
-                        "run_once": True,
-                        "probe": ["python", "-c", "exit(1)"],
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "createsuperuser": {
+                            "command": [
+                                "python",
+                                "manage.py",
+                                "createsuperuser",
+                                "--noinput",
+                            ],
+                            "run_once": True,
+                            "probe": ["python", "-c", "exit(1)"],
+                        },
                     },
                 },
             },
-        })
+        )
 
         calls: list[list[str]] = []
 
@@ -243,7 +289,8 @@ class TestRunOnceProbe:
 
         with mock.patch(
             "remote_compose.provider.fake.FakeProvider.exec",
-            side_effect=fake_exec, autospec=False,
+            side_effect=fake_exec,
+            autospec=False,
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -261,6 +308,7 @@ class TestRunOnceProbe:
 # 3. _run_auto_on_deploy_hooks behavior
 # ---------------------------------------------------------------------
 
+
 class TestAutoOnDeployHooks:
     def _ctx_and_v2(self, tmp_path, services_yml):
         rc_path = _write_v2_project(tmp_path, services_yml)
@@ -269,21 +317,24 @@ class TestAutoOnDeployHooks:
         return ctx, v2
 
     def test_only_runs_hooks_with_auto_on_deploy_true(self, tmp_path):
-        ctx, v2 = self._ctx_and_v2(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "migrate": {
-                        "command": ["python", "manage.py", "migrate"],
-                        "auto_on_deploy": True,
-                    },
-                    "shell": {
-                        "command": ["python"],
-                        # auto_on_deploy: false (default)
+        ctx, v2 = self._ctx_and_v2(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "migrate": {
+                            "command": ["python", "manage.py", "migrate"],
+                            "auto_on_deploy": True,
+                        },
+                        "shell": {
+                            "command": ["python"],
+                            # auto_on_deploy: false (default)
+                        },
                     },
                 },
             },
-        })
+        )
 
         provider = mock.MagicMock()
         provider.exec.return_value = ExecResult(exit_code=0, stdout="", stderr="")
@@ -299,10 +350,13 @@ class TestAutoOnDeployHooks:
         assert args[2] == ["python", "manage.py", "migrate"]
 
     def test_no_hooks_means_no_exec_calls(self, tmp_path):
-        ctx, v2 = self._ctx_and_v2(tmp_path, {
-            "django": {"image": "busybox"},
-            "worker": {"image": "busybox"},
-        })
+        ctx, v2 = self._ctx_and_v2(
+            tmp_path,
+            {
+                "django": {"image": "busybox"},
+                "worker": {"image": "busybox"},
+            },
+        )
 
         provider = mock.MagicMock()
         _run_auto_on_deploy_hooks(provider, ctx, v2)
@@ -310,21 +364,26 @@ class TestAutoOnDeployHooks:
 
     def test_hook_failure_does_not_raise(self, tmp_path):
         """A failing auto_on_deploy hook is surfaced as a warning, not raised."""
-        ctx, v2 = self._ctx_and_v2(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "migrate": {
-                        "command": ["python", "manage.py", "migrate"],
-                        "auto_on_deploy": True,
+        ctx, v2 = self._ctx_and_v2(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "migrate": {
+                            "command": ["python", "manage.py", "migrate"],
+                            "auto_on_deploy": True,
+                        },
                     },
                 },
             },
-        })
+        )
 
         provider = mock.MagicMock()
         provider.exec.return_value = ExecResult(
-            exit_code=1, stdout="", stderr="boom",
+            exit_code=1,
+            stdout="",
+            stderr="boom",
         )
 
         # Must not raise.
@@ -332,19 +391,22 @@ class TestAutoOnDeployHooks:
         assert provider.exec.call_count == 1
 
     def test_run_once_probe_satisfied_skips_command(self, tmp_path):
-        ctx, v2 = self._ctx_and_v2(tmp_path, {
-            "django": {
-                "image": "busybox",
-                "lifecycle": {
-                    "createsuperuser": {
-                        "command": ["python", "manage.py", "createsuperuser"],
-                        "auto_on_deploy": True,
-                        "run_once": True,
-                        "probe": ["python", "-c", "import sys; sys.exit(0)"],
+        ctx, v2 = self._ctx_and_v2(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "createsuperuser": {
+                            "command": ["python", "manage.py", "createsuperuser"],
+                            "auto_on_deploy": True,
+                            "run_once": True,
+                            "probe": ["python", "-c", "import sys; sys.exit(0)"],
+                        },
                     },
                 },
             },
-        })
+        )
 
         provider = mock.MagicMock()
         provider.exec.return_value = ExecResult(exit_code=0, stdout="", stderr="")
@@ -354,6 +416,8 @@ class TestAutoOnDeployHooks:
         # Exactly one exec — the probe — and NOT the command.
         assert provider.exec.call_count == 1
         args = provider.exec.call_args.args
-        assert args[2] == ["python", "-c", "import sys; sys.exit(0)"], (
-            f"only the probe should have run; got {args[2]}"
-        )
+        assert args[2] == [
+            "python",
+            "-c",
+            "import sys; sys.exit(0)",
+        ], f"only the probe should have run; got {args[2]}"

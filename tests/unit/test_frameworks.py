@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from remote_compose.frameworks import (
     DJANGO,
@@ -16,7 +15,6 @@ from remote_compose.frameworks import (
     framework_by_name,
     register_framework,
 )
-
 
 # ---------------------------------------------------------------------------
 # Registry

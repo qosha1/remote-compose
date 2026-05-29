@@ -26,7 +26,6 @@ import yaml
 
 from .defaults import VPC_CIDR_DEFAULT
 
-
 # Service-name heuristics for type inference. Names compared lowercased.
 _DB_HINTS = {
     "postgres": ("/var/lib/postgresql/data", "infrastructure"),
@@ -92,12 +91,14 @@ def scaffold_rc_yml(
         "project": project,
         "compose_file": compose_path.name,
         "provider": "ecs",
-        "provider_config": {"ecs": {
-            "region": "us-west-2",
-            "cluster": f"{project}-cluster",
-            "vpc_cidr": VPC_CIDR_DEFAULT,
-            "default_launch_type": "FARGATE",
-        }},
+        "provider_config": {
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": f"{project}-cluster",
+                "vpc_cidr": VPC_CIDR_DEFAULT,
+                "default_launch_type": "FARGATE",
+            }
+        },
         "terraform": {
             "output_dir": "./terraform/${provider}",
             "backend": {"type": "local"},
@@ -136,7 +137,7 @@ def scaffold_rc_yml(
                 seen.add(p)
                 stub_name = _derive_secret_name(p)
                 out.write(f"#   - name: {stub_name}\n")
-                out.write(f"#     source: file\n")
+                out.write("#     source: file\n")
                 out.write(f"#     path: {p}\n")
                 out.write(f"#     # used by service {svc_name}\n")
     return out.getvalue()
@@ -153,14 +154,16 @@ def _infer_service_overrides(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     if db_hint:
         mount, type_ = db_hint
         out["type"] = type_
-        out["volumes"] = [{
-            "name": f"{lowered}-data",
-            "mount": mount,
-            # Common postgres uid hints. User adjusts per image flavor.
-            "uid": 999,
-            "gid": 999,
-            "mode": "0700",
-        }]
+        out["volumes"] = [
+            {
+                "name": f"{lowered}-data",
+                "mount": mount,
+                # Common postgres uid hints. User adjusts per image flavor.
+                "uid": 999,
+                "gid": 999,
+                "mode": "0700",
+            }
+        ]
     elif lowered in _INFRA_HINTS or any(h in lowered for h in _INFRA_HINTS):
         out["type"] = "infrastructure"
     elif any(h in lowered for h in _WORKER_HINTS):

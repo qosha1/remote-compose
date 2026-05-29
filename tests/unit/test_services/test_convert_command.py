@@ -22,7 +22,9 @@ def converter():
 class TestConvertCommandStringForm:
     def test_simple_string_splits_on_whitespace(self, converter):
         assert converter._convert_command("python manage.py runserver") == [
-            "python", "manage.py", "runserver",
+            "python",
+            "manage.py",
+            "runserver",
         ]
 
     def test_quoted_arg_round_trips(self, converter):
@@ -31,23 +33,32 @@ class TestConvertCommandStringForm:
         # is a single string the shell can interpret. str.split() would
         # split it into 4 tokens with stray quotes.
         assert converter._convert_command('sh -c "echo hello"') == [
-            "sh", "-c", "echo hello",
+            "sh",
+            "-c",
+            "echo hello",
         ]
 
     def test_single_quotes_also_round_trip(self, converter):
         assert converter._convert_command("sh -c 'echo hi there'") == [
-            "sh", "-c", "echo hi there",
+            "sh",
+            "-c",
+            "echo hi there",
         ]
 
     def test_celery_command_with_long_flag_value(self, converter):
         # Real-world celery command with a multi-word --schedule arg.
         cmd = (
-            'celery -A config beat --loglevel=info '
+            "celery -A config beat --loglevel=info "
             '--scheduler "celery.beat.PersistentScheduler"'
         )
         assert converter._convert_command(cmd) == [
-            "celery", "-A", "config", "beat", "--loglevel=info",
-            "--scheduler", "celery.beat.PersistentScheduler",
+            "celery",
+            "-A",
+            "config",
+            "beat",
+            "--loglevel=info",
+            "--scheduler",
+            "celery.beat.PersistentScheduler",
         ]
 
     def test_empty_string_returns_empty_list(self, converter):
@@ -57,7 +68,9 @@ class TestConvertCommandStringForm:
 class TestConvertCommandListForm:
     def test_list_passes_through_unchanged(self, converter):
         assert converter._convert_command(["python", "manage.py", "migrate"]) == [
-            "python", "manage.py", "migrate",
+            "python",
+            "manage.py",
+            "migrate",
         ]
 
     def test_list_coerces_non_str_entries(self, converter):

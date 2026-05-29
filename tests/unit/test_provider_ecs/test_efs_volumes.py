@@ -16,11 +16,13 @@ def _ctx(tmp_path: Path, services: dict) -> DeployContext:
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "test",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "test",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -30,17 +32,23 @@ def _ctx(tmp_path: Path, services: dict) -> DeployContext:
 
 class TestNoVolumes:
     def test_efs_tf_empty_when_no_volumes(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="application"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "web": ServiceSpec(name="web", cpu=256, memory=512, type="application"),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         assert (out / "efs.tf").read_text().strip() == ""
 
     def test_task_def_has_no_volume_block_when_no_mounts(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="application"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "web": ServiceSpec(name="web", cpu=256, memory=512, type="application"),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -50,12 +58,18 @@ class TestNoVolumes:
 
 class TestSingleVolume:
     def test_efs_file_system_rendered(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -66,12 +80,18 @@ class TestSingleVolume:
     def test_mount_targets_match_task_subnets(self, tmp_path):
         """Mount targets must live in the same subnets as tasks.
         Tasks currently run in public subnets (rc-e5u.25)."""
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -82,24 +102,36 @@ class TestSingleVolume:
         assert "count           = local.public_subnet_count" in efs_tf
 
     def test_access_point_per_service_volume_pair(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
         assert 'aws_efs_access_point" "postgres__pgdata"' in efs_tf
 
     def test_efs_security_group_allows_nfs_from_tasks(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -110,12 +142,18 @@ class TestSingleVolume:
 
 class TestTaskDefIntegration:
     def test_task_def_includes_volume_block(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -124,12 +162,18 @@ class TestTaskDefIntegration:
         assert "aws_efs_access_point.postgres__pgdata.id" in services
 
     def test_task_def_mountpoint_matches_volume(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -138,12 +182,18 @@ class TestTaskDefIntegration:
         assert 'sourceVolume  = "pgdata"' in services
 
     def test_transit_encryption_enabled(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/data"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -152,16 +202,25 @@ class TestTaskDefIntegration:
 
 class TestSharedVolume:
     def test_two_services_mount_same_volume_share_file_system(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "writer": ServiceSpec(
-                name="writer", cpu=256, memory=512, type="worker",
-                volumes=[{"name": "shared", "mount": "/data"}],
-            ),
-            "reader": ServiceSpec(
-                name="reader", cpu=256, memory=512, type="worker",
-                volumes=[{"name": "shared", "mount": "/data-ro"}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "writer": ServiceSpec(
+                    name="writer",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
+                    volumes=[{"name": "shared", "mount": "/data"}],
+                ),
+                "reader": ServiceSpec(
+                    name="reader",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
+                    volumes=[{"name": "shared", "mount": "/data-ro"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -173,15 +232,21 @@ class TestSharedVolume:
 
 class TestMultipleVolumesPerService:
     def test_service_can_mount_multiple_distinct_volumes(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "app": ServiceSpec(
-                name="app", cpu=512, memory=1024, type="application",
-                volumes=[
-                    {"name": "data", "mount": "/var/data"},
-                    {"name": "cache", "mount": "/var/cache"},
-                ],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "app": ServiceSpec(
+                    name="app",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    volumes=[
+                        {"name": "data", "mount": "/var/data"},
+                        {"name": "cache", "mount": "/var/cache"},
+                    ],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -195,18 +260,34 @@ class TestMultipleVolumesPerService:
 
 class TestValidation:
     def test_volume_missing_name_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
-                             volumes=[{"mount": "/data"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "x": ServiceSpec(
+                    name="x",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"mount": "/data"}],
+                ),
+            },
+        )
         with pytest.raises(ProviderConfigError, match="name"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
     def test_volume_missing_mount_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
-                             volumes=[{"name": "data"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "x": ServiceSpec(
+                    name="x",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"name": "data"}],
+                ),
+            },
+        )
         with pytest.raises(ProviderConfigError, match="mount"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
@@ -218,10 +299,18 @@ class TestPosixUserOverride:
     the mount. See rc-e5u.27."""
 
     def test_default_is_1000(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "app": ServiceSpec(name="app", cpu=256, memory=512, type="application",
-                               volumes=[{"name": "data", "mount": "/data"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "app": ServiceSpec(
+                    name="app",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"name": "data", "mount": "/data"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs = (out / "efs.tf").read_text()
@@ -230,13 +319,25 @@ class TestPosixUserOverride:
         assert 'permissions = "0755"' in efs
 
     def test_uid_gid_override(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=256, memory=512, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
-                          "uid": 70, "gid": 70}],
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=256,
+                    memory=512,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/var/lib/postgresql/data",
+                            "uid": 70,
+                            "gid": 70,
+                        }
+                    ],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs = (out / "efs.tf").read_text()
@@ -244,28 +345,51 @@ class TestPosixUserOverride:
         assert "gid = 70" in efs
 
     def test_mode_override(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "app": ServiceSpec(name="app", cpu=256, memory=512, type="application",
-                               volumes=[{"name": "data", "mount": "/data",
-                                          "mode": "0700"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "app": ServiceSpec(
+                    name="app",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"name": "data", "mount": "/data", "mode": "0700"}],
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         assert 'permissions = "0700"' in (out / "efs.tf").read_text()
 
     def test_non_integer_uid_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
-                             volumes=[{"name": "d", "mount": "/d", "uid": "seventy"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "x": ServiceSpec(
+                    name="x",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"name": "d", "mount": "/d", "uid": "seventy"}],
+                ),
+            },
+        )
         with pytest.raises(ProviderConfigError, match="uid/gid must be integers"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
     def test_invalid_mode_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "x": ServiceSpec(name="x", cpu=256, memory=512, type="application",
-                             volumes=[{"name": "d", "mount": "/d", "mode": "755"}]),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "x": ServiceSpec(
+                    name="x",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    volumes=[{"name": "d", "mount": "/d", "mode": "755"}],
+                ),
+            },
+        )
         with pytest.raises(ProviderConfigError, match="POSIX octal"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
@@ -275,15 +399,28 @@ class TestStatefulDeploymentStrategy:
     concurrently mounting the same data dir during forceNewDeployment."""
 
     def test_stateful_service_has_min_0_max_100(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=256, memory=512, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
-                          "uid": 70, "gid": 70}],
-            ),
-            "stateless": ServiceSpec(name="stateless", cpu=256, memory=512,
-                                     type="application"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=256,
+                    memory=512,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/var/lib/postgresql/data",
+                            "uid": 70,
+                            "gid": 70,
+                        }
+                    ],
+                ),
+                "stateless": ServiceSpec(
+                    name="stateless", cpu=256, memory=512, type="application"
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -294,8 +431,11 @@ class TestStatefulDeploymentStrategy:
         assert "deployment_maximum_percent         = 100" in postgres_block
 
         stateless_block = services.split('resource "aws_ecs_service" "stateless"')[1]
-        stateless_block = stateless_block.split("resource ")[0] \
-            if "resource " in stateless_block else stateless_block
+        stateless_block = (
+            stateless_block.split("resource ")[0]
+            if "resource " in stateless_block
+            else stateless_block
+        )
         assert "deployment_minimum_healthy_percent" not in stateless_block
 
     def test_stateful_service_disables_availability_zone_rebalancing(self, tmp_path):
@@ -305,15 +445,28 @@ class TestStatefulDeploymentStrategy:
         OPPOSITE of what a stateful EFS-mounting workload wants — so
         emit availability_zone_rebalancing=DISABLED on stateful services
         and leave it at the AWS default (ENABLED) on stateless ones."""
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=256, memory=512, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data",
-                          "uid": 70, "gid": 70}],
-            ),
-            "stateless": ServiceSpec(name="stateless", cpu=256, memory=512,
-                                     type="application"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=256,
+                    memory=512,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/var/lib/postgresql/data",
+                            "uid": 70,
+                            "gid": 70,
+                        }
+                    ],
+                ),
+                "stateless": ServiceSpec(
+                    name="stateless", cpu=256, memory=512, type="application"
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -323,8 +476,11 @@ class TestStatefulDeploymentStrategy:
         assert 'availability_zone_rebalancing = "DISABLED"' in postgres_block
 
         stateless_block = services.split('resource "aws_ecs_service" "stateless"')[1]
-        stateless_block = stateless_block.split("resource ")[0] \
-            if "resource " in stateless_block else stateless_block
+        stateless_block = (
+            stateless_block.split("resource ")[0]
+            if "resource " in stateless_block
+            else stateless_block
+        )
         # Stateless services keep the AWS default (ENABLED) — we don't
         # emit the field at all so terraform doesn't fight the default.
         assert "availability_zone_rebalancing" not in stateless_block

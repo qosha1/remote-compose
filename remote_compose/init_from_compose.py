@@ -20,9 +20,7 @@ from typing import Optional
 
 import yaml
 
-from remote_compose.compose_warnings import _looks_like_django_service
 from remote_compose.frameworks import Framework, detect_framework
-
 
 # ---------------------------------------------------------------------------
 # Heuristics
@@ -60,7 +58,8 @@ def _alpha_first_framework_worker(
     matches ``framework``. Deterministic fallback for the migrate hook
     when the project has no application service of this framework."""
     candidates = sorted(
-        n for n, sc in services.items()
+        n
+        for n, sc in services.items()
         if (fw := detect_framework(sc, compose_path)) is not None
         and fw.name == framework.name
         and infer_service_type(n, sc) == "worker"
@@ -71,11 +70,15 @@ def _alpha_first_framework_worker(
 # Back-compat shims for tests and external callers that imported these.
 def _any_django_application_in(services: dict[str, dict], compose_path: Path) -> bool:
     from remote_compose.frameworks import DJANGO
+
     return _any_framework_application_in(DJANGO, services, compose_path)
 
 
-def _alpha_first_django_worker(services: dict[str, dict], compose_path: Path) -> Optional[str]:
+def _alpha_first_django_worker(
+    services: dict[str, dict], compose_path: Path
+) -> Optional[str]:
     from remote_compose.frameworks import DJANGO
+
     return _alpha_first_framework_worker(DJANGO, services, compose_path)
 
 
@@ -114,7 +117,9 @@ def _service_has_marker_env(svc_compose: dict, marker_keys: tuple[str, ...]) -> 
 # Back-compat shim.
 def _service_already_has_allowed_hosts(svc_compose: dict) -> bool:
     from remote_compose.frameworks import DJANGO
+
     return _service_has_marker_env(svc_compose, DJANGO.testing_defaults_marker_keys)
+
 
 INFRA_IMAGE_PREFIXES = (
     "postgres",
@@ -272,12 +277,15 @@ def pick_public_service(
 
     # By image
     for name, svc in candidates.items():
-        if any(_image_base(svc.get("image")).startswith(p) for p in PROXY_IMAGE_PREFIXES):
+        if any(
+            _image_base(svc.get("image")).startswith(p) for p in PROXY_IMAGE_PREFIXES
+        ):
             return name
 
     # Lone port-80 publisher
     port_80_services = [
-        n for n, s in candidates.items()
+        n
+        for n, s in candidates.items()
         if any(_container_port(p) == 80 for p in (s.get("ports") or []))
     ]
     if len(port_80_services) == 1:
@@ -334,9 +342,11 @@ def secret_name_from_path(path: str) -> str:
 # Generator
 # ---------------------------------------------------------------------------
 
+
 def _relpath(target: Path, base: Path) -> Path:
     """Path of ``target`` relative to ``base``. POSIX-style for rc.yml portability."""
     import os
+
     return Path(os.path.relpath(target, base))
 
 
@@ -372,8 +382,9 @@ def generate_v2_rc_yml(
     if not services:
         raise ValueError(f"no services found in {compose_path}")
 
-    rc_yml_dir = (Path(output_path).resolve().parent
-                  if output_path else compose_path.parent)
+    rc_yml_dir = (
+        Path(output_path).resolve().parent if output_path else compose_path.parent
+    )
     compose_file_field = _relpath(compose_path, rc_yml_dir).as_posix()
 
     project = derive_project_name(compose_path)
@@ -434,8 +445,11 @@ def generate_v2_rc_yml(
                 svc_type == "application"
                 or (
                     svc_type == "worker"
-                    and not _any_framework_application_in(framework, services, compose_path)
-                    and name == _alpha_first_framework_worker(framework, services, compose_path)
+                    and not _any_framework_application_in(
+                        framework, services, compose_path
+                    )
+                    and name
+                    == _alpha_first_framework_worker(framework, services, compose_path)
                 )
             )
         ):
@@ -468,10 +482,12 @@ def generate_v2_rc_yml(
     env_files = collect_env_files(services)
     secrets_block: list[dict] = []
     if env_files:
-        secrets_block.append({
-            "name": "env",
-            "source": "env_file_auto",
-        })
+        secrets_block.append(
+            {
+                "name": "env",
+                "source": "env_file_auto",
+            }
+        )
 
     config: dict = {
         "version": 2,
@@ -502,13 +518,13 @@ def generate_v2_rc_yml(
     testing_note = ""
     if testing_defaults:
         testing_note = (
-            f"# Testing defaults: ON (project starts with 'rc-test-' or "
-            f"--testing-defaults). Detected framework services get "
-            f"host-validation overrides injected (Django: "
-            f"DJANGO_ALLOWED_HOSTS=*, Rails: RAILS_HOSTS=*, Phoenix: "
-            f"PHX_HOST=*) so plain `curl http://<ALB>/` works without\n"
-            f"# nginx Host: rewrites. UNSAFE for production — rerun with "
-            f"--no-testing-defaults to suppress.\n"
+            "# Testing defaults: ON (project starts with 'rc-test-' or "
+            "--testing-defaults). Detected framework services get "
+            "host-validation overrides injected (Django: "
+            "DJANGO_ALLOWED_HOSTS=*, Rails: RAILS_HOSTS=*, Phoenix: "
+            "PHX_HOST=*) so plain `curl http://<ALB>/` works without\n"
+            "# nginx Host: rewrites. UNSAFE for production — rerun with "
+            "--no-testing-defaults to suppress.\n"
         )
     header = (
         f"# rc.yml — generated by `rc init --from-compose {compose_path.name}`\n"
@@ -605,11 +621,17 @@ def detect_nginx_auto_fix_target(
     proxy_first = sorted(
         services.keys(),
         key=lambda n: (
-            0 if n.lower() in PROXY_NAMES else (
-                1 if any(
-                    _image_base(services[n].get("image") or "").startswith(p)
-                    for p in PROXY_IMAGE_PREFIXES
-                ) else 2
+            (
+                0
+                if n.lower() in PROXY_NAMES
+                else (
+                    1
+                    if any(
+                        _image_base(services[n].get("image") or "").startswith(p)
+                        for p in PROXY_IMAGE_PREFIXES
+                    )
+                    else 2
+                )
             ),
             n,
         ),
@@ -678,10 +700,11 @@ def detect_nginx_auto_fix_target(
         # IP + Cloud Map FQDN match the actual stack.
         rc_raw = rc_v2_raw or {}
         project = str(rc_raw.get("project") or "")
-        ecs_cfg = ((rc_raw.get("provider_config") or {}).get("ecs") or {})
+        ecs_cfg = (rc_raw.get("provider_config") or {}).get("ecs") or {}
         vpc_cidr = ecs_cfg.get("vpc_cidr")
 
         from remote_compose.fix_nginx_conf import Upstream
+
         # Stable order for deterministic output: declaration order from
         # the upstream-scan, with the Django one(s) marked.
         upstreams = [

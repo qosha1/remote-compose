@@ -43,10 +43,10 @@ class ProvisionVPCStep(PipelineStep):
             # Update cluster with VPC/subnet info
             context.cluster.vpc_id = vpc_infra.vpc_id
             context.cluster.subnet_ids = vpc_infra.private_subnet_ids
-            context.cluster.save(update_fields=['vpc_id', 'subnet_ids', 'updated_at'])
+            context.cluster.save(update_fields=["vpc_id", "subnet_ids", "updated_at"])
 
             context.track_resource(
-                resource_type='vpc',
+                resource_type="vpc",
                 resource_id=vpc_infra.vpc_id,
             )
 
@@ -91,16 +91,12 @@ class CreateSecurityGroupsStep(PipelineStep):
 
             # Update cluster security groups
             context.cluster.security_group_ids = list(sg_map.values())
-            context.cluster.save(update_fields=['security_group_ids', 'updated_at'])
+            context.cluster.save(update_fields=["security_group_ids", "updated_at"])
 
-            return StepResult.ok(
-                f"Security groups created: {', '.join(sg_map.keys())}"
-            )
+            return StepResult.ok(f"Security groups created: {', '.join(sg_map.keys())}")
 
         except Exception as e:
-            return StepResult.fail(
-                f"Security group creation failed: {e}", error=e
-            )
+            return StepResult.fail(f"Security group creation failed: {e}", error=e)
 
 
 class ProvisionALBStep(PipelineStep):
@@ -118,7 +114,7 @@ class ProvisionALBStep(PipelineStep):
 
     def execute(self, context: PipelineContext) -> StepResult:
         if context.dry_run:
-            services = ', '.join(context.public_services.keys())
+            services = ", ".join(context.public_services.keys())
             return StepResult.ok(
                 f"[DRY RUN] Would provision ALB for services: {services}"
             )
@@ -126,7 +122,7 @@ class ProvisionALBStep(PipelineStep):
         if not context.vpc_infrastructure:
             return StepResult.fail("No VPC infrastructure for ALB")
 
-        alb_sg = context.security_groups.get('alb')
+        alb_sg = context.security_groups.get("alb")
         if not alb_sg:
             return StepResult.fail("No ALB security group available")
 
@@ -145,13 +141,11 @@ class ProvisionALBStep(PipelineStep):
             context.load_balancer = lb_config
 
             context.track_resource(
-                resource_type='alb',
+                resource_type="alb",
                 resource_id=lb_config.alb_arn,
             )
 
-            return StepResult.ok(
-                f"ALB provisioned: {lb_config.alb_dns_name}"
-            )
+            return StepResult.ok(f"ALB provisioned: {lb_config.alb_dns_name}")
 
         except Exception as e:
             return StepResult.fail(f"ALB provisioning failed: {e}", error=e)
@@ -184,7 +178,7 @@ class SetupServiceConnectStep(PipelineStep):
             context.service_connect_namespace = namespace
 
             context.track_resource(
-                resource_type='cloud_map_namespace',
+                resource_type="cloud_map_namespace",
                 resource_id=namespace.namespace_id,
             )
 
@@ -193,9 +187,7 @@ class SetupServiceConnectStep(PipelineStep):
             )
 
         except Exception as e:
-            return StepResult.fail(
-                f"Service Connect setup failed: {e}", error=e
-            )
+            return StepResult.fail(f"Service Connect setup failed: {e}", error=e)
 
 
 class ProvisionSecretsStep(PipelineStep):
@@ -238,9 +230,7 @@ class ProvisionSecretsStep(PipelineStep):
             )
 
         except Exception as e:
-            return StepResult.fail(
-                f"Secret provisioning failed: {e}", error=e
-            )
+            return StepResult.fail(f"Secret provisioning failed: {e}", error=e)
 
 
 class SetupIAMRolesStep(PipelineStep):
@@ -271,7 +261,8 @@ class SetupIAMRolesStep(PipelineStep):
         from ...aws_client_factory import get_aws_client_factory
 
         factory = get_aws_client_factory()
-        iam = factory.get_client('iam',
+        iam = factory.get_client(
+            "iam",
             region=context.cluster.aws_region,
             credential=context.cluster.aws_credential,
         )
@@ -279,7 +270,7 @@ class SetupIAMRolesStep(PipelineStep):
         try:
             # Extract role name from ARN
             role_arn = context.cluster.task_execution_role_arn
-            role_name = role_arn.split('/')[-1]
+            role_name = role_arn.split("/")[-1]
 
             # Create inline policy for secrets access
             policy_name = f"{context.cluster.name}-secrets-access"
@@ -295,7 +286,7 @@ class SetupIAMRolesStep(PipelineStep):
                         ],
                         "Resource": secret_arns,
                     }
-                ]
+                ],
             }
 
             iam.put_role_policy(

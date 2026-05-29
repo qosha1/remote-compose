@@ -9,9 +9,8 @@ by service type — infrastructure → application → worker → proxy.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
-import pytest
 
 from remote_compose.provider.base import DeployContext, ServiceSpec
 from remote_compose.provider.ecs.provider import ECSProvider
@@ -85,14 +84,16 @@ def test_full_start_simpli_order():
     celery-worker, alpha-sorted) → proxy (nginx).
     """
     provider = ECSProvider()
-    ctx = _ctx({
-        "celery-beat": "worker",
-        "celery-worker": "worker",
-        "django": "application",
-        "nginx": "proxy",
-        "postgres": "infrastructure",
-        "redis": "infrastructure",
-    })
+    ctx = _ctx(
+        {
+            "celery-beat": "worker",
+            "celery-worker": "worker",
+            "django": "application",
+            "nginx": "proxy",
+            "postgres": "infrastructure",
+            "redis": "infrastructure",
+        }
+    )
     ecs = MagicMock()
     session = MagicMock()
     session.client.return_value = ecs
@@ -107,10 +108,12 @@ def test_full_start_simpli_order():
 
     calls = [c.kwargs["service"] for c in ecs.update_service.call_args_list]
     assert calls == [
-        "postgres", "redis",          # infrastructure
-        "django",                     # application
-        "celery-beat", "celery-worker",  # worker
-        "nginx",                      # proxy
+        "postgres",
+        "redis",  # infrastructure
+        "django",  # application
+        "celery-beat",
+        "celery-worker",  # worker
+        "nginx",  # proxy
     ]
 
 
@@ -118,11 +121,13 @@ def test_unknown_type_treated_as_application():
     """A service with an exotic type label still gets a sensible position
     (between infra and worker) — won't break the deploy."""
     provider = ECSProvider()
-    ctx = _ctx({
-        "weird": "experimental",
-        "postgres": "infrastructure",
-        "celery": "worker",
-    })
+    ctx = _ctx(
+        {
+            "weird": "experimental",
+            "postgres": "infrastructure",
+            "celery": "worker",
+        }
+    )
     ecs = MagicMock()
     session = MagicMock()
     session.client.return_value = ecs
@@ -139,18 +144,21 @@ def test_alpha_sort_within_tier_is_stable():
     """Within a single type tier, alpha order — stable for golden-file
     diffs + reproducible logs."""
     provider = ECSProvider()
-    ctx = _ctx({
-        "z-worker": "worker",
-        "a-worker": "worker",
-        "m-worker": "worker",
-    })
+    ctx = _ctx(
+        {
+            "z-worker": "worker",
+            "a-worker": "worker",
+            "m-worker": "worker",
+        }
+    )
     ecs = MagicMock()
     session = MagicMock()
     session.client.return_value = ecs
     provider.session_factory = lambda c: session
 
     provider._force_new_deployments(
-        ctx, ["z-worker", "m-worker", "a-worker"],
+        ctx,
+        ["z-worker", "m-worker", "a-worker"],
     )
 
     calls = [c.kwargs["service"] for c in ecs.update_service.call_args_list]

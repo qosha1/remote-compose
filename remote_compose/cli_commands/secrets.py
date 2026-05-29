@@ -16,19 +16,22 @@ from ._dispatchers import _secrets_push_v2
 from ._legacy import _bootstrap_django, _load_config
 
 
-@click.group(name='secrets')
+@click.group(name="secrets")
 def secrets_group():
     """Manage secrets for the deployment."""
     pass
 
 
-@secrets_group.command(name='push')
-@click.option('--rollout/--no-rollout', default=True,
-              help='Force new ECS deployments so running tasks pick up the new secrets.')
+@secrets_group.command(name="push")
+@click.option(
+    "--rollout/--no-rollout",
+    default=True,
+    help="Force new ECS deployments so running tasks pick up the new secrets.",
+)
 @click.pass_context
 def secrets_push(ctx, rollout):
     """Push secrets from env files defined in rc.yml."""
-    config_path = ctx.obj.get('config_path')
+    config_path = ctx.obj.get("config_path")
 
     # v2 path: read rc.yml directly; push one SM secret per file block,
     # uploaded as JSON so ECS JSON-key selectors resolve per-key env vars.
@@ -39,7 +42,7 @@ def secrets_push(ctx, rollout):
     config = _load_config(config_path)
     _bootstrap_django(config)
 
-    secrets_files = config.get('secrets', [])
+    secrets_files = config.get("secrets", [])
     if not secrets_files:
         click.echo("No secrets files configured in rc.yml.")
         return
@@ -48,7 +51,7 @@ def secrets_push(ctx, rollout):
     from remote_compose.services import SecretsService
 
     try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
+        cluster = ECSCluster.objects.get(name=config["cluster"])
     except ECSCluster.DoesNotExist:
         click.echo(
             f"Error: Cluster '{config['cluster']}' not found. "

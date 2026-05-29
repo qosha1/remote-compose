@@ -31,7 +31,6 @@ import pytest
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 
-
 REGION = os.environ.get("RC_E2E_REGION", "us-east-1")
 REAP_SCRIPT = Path(__file__).parent.parent.parent / "scripts" / "reap_test_region.py"
 
@@ -52,7 +51,9 @@ def _terraform_usable() -> bool:
     try:
         result = subprocess.run(
             ["terraform", "-version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -62,6 +63,7 @@ def _terraform_usable() -> bool:
 def _aws_creds_ok() -> bool:
     try:
         import boto3
+
         sts = boto3.client("sts", region_name=REGION)
         sts.get_caller_identity()
         return True
@@ -73,9 +75,12 @@ def _test_region_is_empty() -> tuple[bool, str]:
     """Pre-flight: make sure us-east-1 has no rc-test-* resources already."""
     try:
         import boto3
+
         ecs = boto3.client("ecs", region_name=REGION)
         for arn in ecs.list_clusters().get("clusterArns", []):
-            details = ecs.describe_clusters(clusters=[arn], include=["TAGS"])["clusters"]
+            details = ecs.describe_clusters(clusters=[arn], include=["TAGS"])[
+                "clusters"
+            ]
             if details and any(
                 t.get("Key") == "Project"
                 and (t.get("Value") or "").startswith("rc-test-")
@@ -97,7 +102,9 @@ def e2e_preconditions():
         pytest.skip(f"AWS creds not usable for region {REGION}")
     ok, reason = _test_region_is_empty()
     if not ok:
-        pytest.skip(f"test region not clean: {reason} — run scripts/reap_test_region.py")
+        pytest.skip(
+            f"test region not clean: {reason} — run scripts/reap_test_region.py"
+        )
 
 
 @pytest.fixture
@@ -111,17 +118,24 @@ def e2e_ctx(e2e_preconditions, test_project_name, tmp_path) -> DeployContext:
         project=test_project_name,
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={"version": 2, "project": test_project_name},
-        provider_config={"ecs": {
-            "region": REGION,
-            "cluster": f"{test_project_name}-cluster",
-            "vpc_cidr": "10.99.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": REGION,
+                "cluster": f"{test_project_name}-cluster",
+                "vpc_cidr": "10.99.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512, replicas=1,
-                type="proxy", public=True, port=80,
+                name="web",
+                cpu=256,
+                memory=512,
+                replicas=1,
+                type="proxy",
+                public=True,
+                port=80,
                 health_check_path="/",
             ),
         },
@@ -145,14 +159,18 @@ def e2e_lifecycle(e2e_ctx: DeployContext, provider: ECSProvider):
     except Exception as exc:
         print(f"provider.destroy failed: {exc}", file=sys.stderr)
         if keep:
-            print("RC_E2E_KEEP_ON_FAIL=1 — leaving resources for inspection",
-                  file=sys.stderr)
+            print(
+                "RC_E2E_KEEP_ON_FAIL=1 — leaving resources for inspection",
+                file=sys.stderr,
+            )
             return
 
     # Belt-and-suspenders: run the reap script regardless.
     result = subprocess.run(
         [sys.executable, str(REAP_SCRIPT), "--region", REGION],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
     if result.returncode != 0:
         print(f"reap script exited {result.returncode}", file=sys.stderr)

@@ -15,7 +15,6 @@ These tests fail until ysh is fixed.
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from unittest import mock
@@ -31,16 +30,20 @@ def _write_held_lock(tf_dir: Path, holder_pid: int = 99999) -> Path:
     """Simulate an in-flight terraform apply by dropping a lock file."""
     tf_dir.mkdir(parents=True, exist_ok=True)
     lock_path = tf_dir / ".terraform.tfstate.lock.info"
-    lock_path.write_text(json.dumps({
-        "ID": "abc-1234",
-        "Operation": "OperationTypeApply",
-        "Info": "",
-        "Who": f"user@host",
-        "Version": "1.5.0",
-        "Created": "2026-04-29T12:00:00.000Z",
-        "Path": str(tf_dir / "terraform.tfstate"),
-        "PID": holder_pid,
-    }))
+    lock_path.write_text(
+        json.dumps(
+            {
+                "ID": "abc-1234",
+                "Operation": "OperationTypeApply",
+                "Info": "",
+                "Who": "user@host",
+                "Version": "1.5.0",
+                "Created": "2026-04-29T12:00:00.000Z",
+                "Path": str(tf_dir / "terraform.tfstate"),
+                "PID": holder_pid,
+            }
+        )
+    )
     return lock_path
 
 
@@ -49,16 +52,21 @@ def _ctx(tmp_path: Path) -> DeployContext:
         project="lock-test",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1",
-            "cluster": "lock-test",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "lock-test",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "api": ServiceSpec(
-                name="api", cpu=256, memory=512, type="application",
+                name="api",
+                cpu=256,
+                memory=512,
+                type="application",
                 image="nginx:alpine",
             ),
         },
@@ -100,12 +108,11 @@ class TestLockDetectedFast:
             f"of failing fast, rc let terraform's retry loop run"
         )
         msg = str(exc_info.value).lower()
-        assert "lock" in msg, (
-            f"error message must mention 'lock'; got: {exc_info.value!r}"
-        )
+        assert (
+            "lock" in msg
+        ), f"error message must mention 'lock'; got: {exc_info.value!r}"
         assert "42424" in str(exc_info.value), (
-            f"error message should identify the holder PID; "
-            f"got: {exc_info.value!r}"
+            f"error message should identify the holder PID; " f"got: {exc_info.value!r}"
         )
 
     def test_no_lock_file_does_not_block_deploy(self, tmp_path):

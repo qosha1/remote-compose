@@ -10,17 +10,16 @@ secret. If any blob is `{}` or missing keys, auto-run `rc secrets push`.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from remote_compose.cli import _detect_empty_file_secrets
 
-
 # ---------------------------------------------------------------------------
 # _detect_empty_file_secrets — pure SM-querying logic
 # ---------------------------------------------------------------------------
+
 
 class _Secret:
     def __init__(self, name, source="file", path=None):
@@ -39,6 +38,7 @@ def _stub_session(secret_values: dict, errors: dict = None):
     keyed by SecretId. errors maps SecretId -> ClientError to raise.
     """
     from botocore.exceptions import ClientError
+
     errors = errors or {}
 
     def get_secret_value(*, SecretId):  # noqa: N803 — boto3 kwarg
@@ -46,8 +46,12 @@ def _stub_session(secret_values: dict, errors: dict = None):
             raise errors[SecretId]
         if SecretId not in secret_values:
             raise ClientError(
-                {"Error": {"Code": "ResourceNotFoundException",
-                           "Message": "not found"}},
+                {
+                    "Error": {
+                        "Code": "ResourceNotFoundException",
+                        "Message": "not found",
+                    }
+                },
                 "GetSecretValue",
             )
         return {"SecretString": secret_values[SecretId]}
@@ -62,10 +66,12 @@ def _stub_session(secret_values: dict, errors: dict = None):
 def test_no_empty_secrets_returns_empty_list():
     v2 = _V2()
     file_secrets = [_Secret("django"), _Secret("postgres")]
-    session = _stub_session({
-        "myproj/django": json.dumps({"AWS_KEY": "xx", "DB_URL": "yy"}),
-        "myproj/postgres": json.dumps({"POSTGRES_HOST": "zz"}),
-    })
+    session = _stub_session(
+        {
+            "myproj/django": json.dumps({"AWS_KEY": "xx", "DB_URL": "yy"}),
+            "myproj/postgres": json.dumps({"POSTGRES_HOST": "zz"}),
+        }
+    )
     with patch("boto3.Session", return_value=session):
         empty = _detect_empty_file_secrets(v2, "us-west-1", None, file_secrets)
     assert empty == []
@@ -74,10 +80,12 @@ def test_no_empty_secrets_returns_empty_list():
 def test_empty_blob_is_detected():
     v2 = _V2()
     file_secrets = [_Secret("django"), _Secret("postgres")]
-    session = _stub_session({
-        "myproj/django": json.dumps({"AWS_KEY": "xx"}),
-        "myproj/postgres": "{}",  # placeholder created by terraform
-    })
+    session = _stub_session(
+        {
+            "myproj/django": json.dumps({"AWS_KEY": "xx"}),
+            "myproj/postgres": "{}",  # placeholder created by terraform
+        }
+    )
     with patch("boto3.Session", return_value=session):
         empty = _detect_empty_file_secrets(v2, "us-west-1", None, file_secrets)
     assert empty == ["postgres"]
@@ -101,6 +109,7 @@ def test_not_found_secret_is_NOT_treated_as_empty():
     """Terraform hasn't applied yet. Caller's deploy will create it.
     Treating as empty would trigger an auto-push that itself would fail."""
     from botocore.exceptions import ClientError
+
     v2 = _V2()
     file_secrets = [_Secret("django")]
     err = ClientError(
@@ -115,11 +124,16 @@ def test_not_found_secret_is_NOT_treated_as_empty():
 
 def test_pending_deletion_is_NOT_treated_as_empty():
     from botocore.exceptions import ClientError
+
     v2 = _V2()
     file_secrets = [_Secret("django")]
     err = ClientError(
-        {"Error": {"Code": "InvalidRequestException",
-                   "Message": "scheduled for deletion"}},
+        {
+            "Error": {
+                "Code": "InvalidRequestException",
+                "Message": "scheduled for deletion",
+            }
+        },
         "GetSecretValue",
     )
     session = _stub_session({}, errors={"myproj/django": err})
@@ -132,6 +146,7 @@ def test_other_aws_errors_propagate():
     """AccessDenied / throttling MUST propagate so we don't silently mask
     a perms problem (we'd rather fail loud than silently auto-push half)."""
     from botocore.exceptions import ClientError
+
     v2 = _V2()
     file_secrets = [_Secret("django")]
     err = ClientError(
@@ -158,11 +173,13 @@ def test_non_json_blob_is_not_treated_as_empty():
 def test_multiple_empties_all_returned():
     v2 = _V2()
     file_secrets = [_Secret("a"), _Secret("b"), _Secret("c")]
-    session = _stub_session({
-        "myproj/a": "{}",
-        "myproj/b": json.dumps({"K": "v"}),
-        "myproj/c": "{}",
-    })
+    session = _stub_session(
+        {
+            "myproj/a": "{}",
+            "myproj/b": json.dumps({"K": "v"}),
+            "myproj/c": "{}",
+        }
+    )
     with patch("boto3.Session", return_value=session):
         empty = _detect_empty_file_secrets(v2, "us-west-1", None, file_secrets)
     assert sorted(empty) == ["a", "c"]
@@ -172,6 +189,7 @@ def test_multiple_empties_all_returned():
 # _auto_push_empty_secrets_if_any — integration with the deploy dispatcher
 # ---------------------------------------------------------------------------
 
+
 class TestAutoPushIntegration:
     def _setup(self, tmp_path, env_body="POSTGRES_HOST=db\nDB_PORT=5432\n"):
         env_path = tmp_path / ".envs" / ".django"
@@ -180,7 +198,8 @@ class TestAutoPushIntegration:
         compose_path = tmp_path / "docker-compose.yml"
         compose_path.write_text(
             "services:\n  django:\n    image: x\n    env_file:\n      - "
-            + str(env_path) + "\n"
+            + str(env_path)
+            + "\n"
         )
         rc_path = tmp_path / "rc.yml"
         rc_path.write_text(
@@ -193,14 +212,19 @@ class TestAutoPushIntegration:
 
     def test_auto_push_fires_when_secret_is_empty(self, tmp_path):
         from remote_compose.cli_v2 import (
-            _auto_push_empty_secrets_if_any, load_rc_yml,
+            _auto_push_empty_secrets_if_any,
+            load_rc_yml,
         )
+
         rc_path = self._setup(tmp_path)
         _, raw, v2 = load_rc_yml(rc_path)
 
-        with patch("remote_compose.cli._detect_empty_file_secrets",
-                   return_value=["django"]) as detect, \
-             patch("remote_compose.cli._secrets_push_v2") as push:
+        with (
+            patch(
+                "remote_compose.cli._detect_empty_file_secrets", return_value=["django"]
+            ) as detect,
+            patch("remote_compose.cli._secrets_push_v2") as push,
+        ):
             _auto_push_empty_secrets_if_any(rc_path, v2, raw)
 
         assert detect.called
@@ -208,14 +232,19 @@ class TestAutoPushIntegration:
 
     def test_auto_push_skipped_when_no_empty_secrets(self, tmp_path):
         from remote_compose.cli_v2 import (
-            _auto_push_empty_secrets_if_any, load_rc_yml,
+            _auto_push_empty_secrets_if_any,
+            load_rc_yml,
         )
+
         rc_path = self._setup(tmp_path)
         _, raw, v2 = load_rc_yml(rc_path)
 
-        with patch("remote_compose.cli._detect_empty_file_secrets",
-                   return_value=[]) as detect, \
-             patch("remote_compose.cli._secrets_push_v2") as push:
+        with (
+            patch(
+                "remote_compose.cli._detect_empty_file_secrets", return_value=[]
+            ) as detect,
+            patch("remote_compose.cli._secrets_push_v2") as push,
+        ):
             _auto_push_empty_secrets_if_any(rc_path, v2, raw)
 
         assert detect.called
@@ -224,8 +253,10 @@ class TestAutoPushIntegration:
     def test_auto_push_no_op_when_no_secrets_in_rcyml(self, tmp_path):
         """No file-sourced secrets at all → don't even query SM."""
         from remote_compose.cli_v2 import (
-            _auto_push_empty_secrets_if_any, load_rc_yml,
+            _auto_push_empty_secrets_if_any,
+            load_rc_yml,
         )
+
         rc_path = tmp_path / "rc.yml"
         rc_path.write_text(
             "version: 2\nproject: testp\ncompose_file: docker-compose.yml\n"
@@ -235,8 +266,10 @@ class TestAutoPushIntegration:
         (tmp_path / "docker-compose.yml").write_text("services: {x: {image: y}}")
         _, raw, v2 = load_rc_yml(rc_path)
 
-        with patch("remote_compose.cli._detect_empty_file_secrets") as detect, \
-             patch("remote_compose.cli._secrets_push_v2") as push:
+        with (
+            patch("remote_compose.cli._detect_empty_file_secrets") as detect,
+            patch("remote_compose.cli._secrets_push_v2") as push,
+        ):
             _auto_push_empty_secrets_if_any(rc_path, v2, raw)
 
         detect.assert_not_called()
@@ -246,14 +279,20 @@ class TestAutoPushIntegration:
         """A flaky SM API call shouldn't abort an otherwise-successful
         deploy — surface a warning so the user can manually push if needed."""
         from remote_compose.cli_v2 import (
-            _auto_push_empty_secrets_if_any, load_rc_yml,
+            _auto_push_empty_secrets_if_any,
+            load_rc_yml,
         )
+
         rc_path = self._setup(tmp_path)
         _, raw, v2 = load_rc_yml(rc_path)
 
-        with patch("remote_compose.cli._detect_empty_file_secrets",
-                   side_effect=RuntimeError("transient SM error")), \
-             patch("remote_compose.cli._secrets_push_v2") as push:
+        with (
+            patch(
+                "remote_compose.cli._detect_empty_file_secrets",
+                side_effect=RuntimeError("transient SM error"),
+            ),
+            patch("remote_compose.cli._secrets_push_v2") as push,
+        ):
             _auto_push_empty_secrets_if_any(rc_path, v2, raw)
 
         # Did NOT call push (detection failed before we knew what to push)

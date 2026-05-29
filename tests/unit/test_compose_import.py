@@ -27,6 +27,7 @@ def _write_compose(tmp_path: Path, body: str) -> Path:
 # Top-level rc.yml shape
 # ---------------------------------------------------------------------
 
+
 class TestTopLevelShape:
     def test_minimal_compose_emits_valid_v2(self, tmp_path):
         _write_compose(tmp_path, "  api:\n    image: busybox\n")
@@ -56,6 +57,7 @@ class TestTopLevelShape:
 # ---------------------------------------------------------------------
 # Service inference — public-vs-private, db hints, framework hints
 # ---------------------------------------------------------------------
+
 
 class TestServiceInference:
     def test_service_with_ports_marked_public(self, tmp_path):
@@ -104,6 +106,7 @@ class TestServiceInference:
 # rc.yml secrets entries — user has to opt in).
 # ---------------------------------------------------------------------
 
+
 class TestEnvFileSurfacing:
     def test_env_file_listed_in_summary(self, tmp_path):
         _write_compose(
@@ -118,6 +121,7 @@ class TestEnvFileSurfacing:
 # ---------------------------------------------------------------------
 # Defaults: project from cwd, compose path resolution
 # ---------------------------------------------------------------------
+
 
 class TestDefaults:
     def test_project_defaults_to_compose_parent_dir_name(self, tmp_path):
@@ -189,7 +193,9 @@ class TestExcludeFlag:
     def test_empty_exclude_list_is_no_op(self, tmp_path):
         _write_compose(tmp_path, "  api:\n    image: busybox\n")
         out = scaffold_rc_yml(
-            tmp_path / "docker-compose.yml", project="m", exclude=[],
+            tmp_path / "docker-compose.yml",
+            project="m",
+            exclude=[],
         )
         cfg = yaml.safe_load(out)
         assert "compose" not in cfg
@@ -198,6 +204,7 @@ class TestExcludeFlag:
 # ---------------------------------------------------------------------
 # Round-trip: emitted rc.yml parses through the v2 schema
 # ---------------------------------------------------------------------
+
 
 class TestRoundTrip:
     def test_emitted_rc_yml_parses_through_v2_schema(self, tmp_path):
@@ -209,9 +216,12 @@ class TestRoundTrip:
             "  celeryworker:\n    image: busybox\n",
         )
         out_path = tmp_path / "rc.yml"
-        out_path.write_text(scaffold_rc_yml(tmp_path / "docker-compose.yml", project="m"))
+        out_path.write_text(
+            scaffold_rc_yml(tmp_path / "docker-compose.yml", project="m")
+        )
 
         from remote_compose.config.v2_schema import load
+
         cfg = load(out_path)
         assert cfg.project == "m"
         assert "postgres" in cfg.services

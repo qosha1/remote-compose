@@ -31,7 +31,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-
 # Heuristic budget for Dockerfile scans (mirrors compose_warnings._MAX_FILE_BYTES).
 _MAX_FILE_BYTES = 256 * 1024
 
@@ -88,7 +87,9 @@ class Framework:
     domain_env_template: dict[str, str] = field(default_factory=dict)
 
     def domain_env(
-        self, domain: str, aliases: tuple[str, ...] = (),
+        self,
+        domain: str,
+        aliases: tuple[str, ...] = (),
     ) -> dict[str, str]:
         """rc-32x: render domain_env_template with the deploy's domain + aliases.
 
@@ -117,6 +118,7 @@ class Framework:
                 https_aliases_csv=https_aliases_csv,
             )
         return out
+
     # rc-e5u.35.7: per-framework lifecycle hooks injected when a service
     # declares ``framework: <name>`` (or detect_framework matches via
     # Dockerfile markers). Each entry is ``hook_name -> argv``; cli_v2
@@ -165,12 +167,18 @@ DJANGO = Framework(
         # --noinput honors DJANGO_SUPERUSER_EMAIL / _USERNAME / _PASSWORD
         # env vars (USERNAME_FIELD-aware: works on either pk model).
         "createsuperuser": (
-            "python", "manage.py", "createsuperuser", "--noinput",
+            "python",
+            "manage.py",
+            "createsuperuser",
+            "--noinput",
         ),
         # Static-file collection — typically already in /start, but
         # exposed as a hook for re-running after manual asset changes.
         "collectstatic": (
-            "python", "manage.py", "collectstatic", "--noinput",
+            "python",
+            "manage.py",
+            "collectstatic",
+            "--noinput",
         ),
         # Interactive shell. CLI uses interactive=True via the lifecycle
         # subcommand, attaching stdin/tty.
@@ -182,7 +190,9 @@ DJANGO = Framework(
         # `rc lifecycle loaddata <svc> -- python manage.py loaddata <path>`
         # form when a different fixture file is needed.
         "loaddata": (
-            "python", "manage.py", "loaddata",
+            "python",
+            "manage.py",
+            "loaddata",
             "fixtures/sample.json",
         ),
     },

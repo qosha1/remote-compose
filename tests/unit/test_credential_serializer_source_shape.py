@@ -19,10 +19,8 @@ from pathlib import Path
 
 import pytest
 
-
 SERIALIZERS_PATH = (
-    Path(__file__).parent.parent.parent
-    / "remote_compose" / "api" / "serializers.py"
+    Path(__file__).parent.parent.parent / "remote_compose" / "api" / "serializers.py"
 )
 
 
@@ -39,7 +37,7 @@ class TestValidateMethodPresent:
         assert idx >= 0
         # Find the next class boundary (start of next "class " at column 0).
         end = source.find("\nclass ", idx + 1)
-        body = source[idx:end if end > 0 else len(source)]
+        body = source[idx : end if end > 0 else len(source)]
         assert "def validate(self" in body, (
             "SecureCredentialCreateSerializer must define validate() "
             "to reject malformed credential_value at API boundary "
@@ -51,7 +49,7 @@ class TestValidateMethodPresent:
     def test_required_keys_map_declared(self, source):
         idx = source.find("class SecureCredentialCreateSerializer")
         end = source.find("\nclass ", idx + 1)
-        body = source[idx:end if end > 0 else len(source)]
+        body = source[idx : end if end > 0 else len(source)]
         # Per-type required keys map. The fix uses
         # _REQUIRED_KEYS_BY_TYPE; if it's renamed, update both call
         # sites or add a keep-alive comment.
@@ -63,7 +61,7 @@ class TestValidateMethodPresent:
         # subscript access (or after a validate() guard).
         idx = source.find("class SecureCredentialCreateSerializer")
         end = source.find("\nclass ", idx + 1)
-        body = source[idx:end if end > 0 else len(source)]
+        body = source[idx : end if end > 0 else len(source)]
         # Allow .get() for optional fields (description, username) but
         # not for the required ones.
         assert (

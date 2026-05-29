@@ -19,17 +19,22 @@ from remote_compose.init_from_compose import (
     should_exclude,
 )
 
-
 # ---------------------------------------------------------------------------
 # infer_service_type
 # ---------------------------------------------------------------------------
 
+
 class TestInferServiceType:
     def test_postgres_is_infrastructure(self):
-        assert infer_service_type("db", {"image": "postgres:16-alpine"}) == "infrastructure"
+        assert (
+            infer_service_type("db", {"image": "postgres:16-alpine"})
+            == "infrastructure"
+        )
 
     def test_redis_is_infrastructure(self):
-        assert infer_service_type("cache", {"image": "redis:7-alpine"}) == "infrastructure"
+        assert (
+            infer_service_type("cache", {"image": "redis:7-alpine"}) == "infrastructure"
+        )
 
     def test_mysql_is_infrastructure(self):
         assert infer_service_type("db", {"image": "mysql:8.0"}) == "infrastructure"
@@ -64,6 +69,7 @@ class TestInferServiceType:
 # infer_cpu_memory
 # ---------------------------------------------------------------------------
 
+
 def test_infer_cpu_memory_application_largest():
     cpu, mem = infer_cpu_memory("application")
     assert cpu == 1024 and mem == 2048
@@ -82,27 +88,34 @@ def test_infer_cpu_memory_unknown_falls_back():
 # should_exclude
 # ---------------------------------------------------------------------------
 
+
 class TestShouldExclude:
-    @pytest.mark.parametrize("name", [
-        "celery-worker-linkedin",
-        "linkedin-worker",
-        "chrome-headed",
-        "novnc-bridge",
-        "playwright-headed-runner",
-        "api-dev",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "celery-worker-linkedin",
+            "linkedin-worker",
+            "chrome-headed",
+            "novnc-bridge",
+            "playwright-headed-runner",
+            "api-dev",
+        ],
+    )
     def test_excluded(self, name):
         assert should_exclude(name) is True
 
-    @pytest.mark.parametrize("name", [
-        "django",
-        "celery-worker",
-        "celery-beat",
-        "postgres",
-        "redis",
-        "nginx",
-        "developer",  # contains 'dev' but does not END in '-dev'
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "django",
+            "celery-worker",
+            "celery-beat",
+            "postgres",
+            "redis",
+            "nginx",
+            "developer",  # contains 'dev' but does not END in '-dev'
+        ],
+    )
     def test_not_excluded(self, name):
         assert should_exclude(name) is False
 
@@ -110,6 +123,7 @@ class TestShouldExclude:
 # ---------------------------------------------------------------------------
 # pick_public_service
 # ---------------------------------------------------------------------------
+
 
 class TestPickPublicService:
     def test_picks_by_proxy_name(self):
@@ -172,6 +186,7 @@ class TestPickPublicService:
 # derive_project_name + secret_name_from_path
 # ---------------------------------------------------------------------------
 
+
 class TestDeriveProjectName:
     def test_basic(self, tmp_path):
         p = tmp_path / "my-app" / "docker-compose.yml"
@@ -187,12 +202,15 @@ class TestDeriveProjectName:
 
 
 class TestSecretNameFromPath:
-    @pytest.mark.parametrize("path,expected", [
-        (".envs/.local/.django", "local-django"),
-        (".envs/.production/.postgres", "production-postgres"),
-        ("secrets/api.env", "secrets-api-env"),
-        (".env.production", "env-production"),
-    ])
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            (".envs/.local/.django", "local-django"),
+            (".envs/.production/.postgres", "production-postgres"),
+            ("secrets/api.env", "secrets-api-env"),
+            (".env.production", "env-production"),
+        ],
+    )
     def test_naming(self, path, expected):
         assert secret_name_from_path(path) == expected
 
@@ -200,6 +218,7 @@ class TestSecretNameFromPath:
 # ---------------------------------------------------------------------------
 # collect_env_files
 # ---------------------------------------------------------------------------
+
 
 def test_collect_env_files_dedupes_in_order():
     services = {
@@ -261,7 +280,9 @@ class TestGenerate:
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose)
         # Drop comments before parsing
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert cfg["version"] == 2
         assert cfg["provider"] == "ecs"
@@ -273,7 +294,9 @@ class TestGenerate:
     def test_excludes_linkedin_worker(self, tmp_path):
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert "celery-worker-linkedin" not in cfg["services"]
         assert "celery-worker-linkedin" in cfg["compose"]["exclude"]
@@ -281,7 +304,9 @@ class TestGenerate:
     def test_picks_nginx_as_public(self, tmp_path):
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert cfg["services"]["nginx"]["public"] is True
         assert cfg["services"]["nginx"]["port"] == 80
@@ -292,7 +317,9 @@ class TestGenerate:
     def test_service_types(self, tmp_path):
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         types = {n: s["type"] for n, s in cfg["services"].items()}
         assert types["postgres"] == "infrastructure"
@@ -306,7 +333,9 @@ class TestGenerate:
         # all services. Expansion happens at deploy time in cli_v2.
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         secrets = cfg.get("secrets") or []
         assert len(secrets) == 1, secrets
@@ -325,21 +354,27 @@ class TestGenerate:
             "    ports: ['80:80']\n"
         )
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert "secrets" not in cfg
 
     def test_aws_profile_included_when_set(self, tmp_path):
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose, aws_profile="default")
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert cfg["provider_config"]["ecs"]["aws_profile"] == "default"
 
     def test_region_override(self, tmp_path):
         compose = self._setup(tmp_path)
         text = generate_v2_rc_yml(compose, region="us-west-1")
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = yaml.safe_load(body)
         assert cfg["provider_config"]["ecs"]["region"] == "us-west-1"
 
@@ -365,6 +400,7 @@ class TestGenerate:
 # ---------------------------------------------------------------------------
 # rc-e5u.46.3 — auto-emit lifecycle.migrate on Django services
 # ---------------------------------------------------------------------------
+
 
 class TestLifecycleMigrate:
     """Verify Django-shaped services get a lifecycle.migrate hook auto-emitted.
@@ -392,8 +428,9 @@ class TestLifecycleMigrate:
         CMD ["flask", "run"]
     """).strip()
 
-    def _make_project(self, tmp_path, compose_yaml: str,
-                      dockerfiles: dict[str, str]) -> Path:
+    def _make_project(
+        self, tmp_path, compose_yaml: str, dockerfiles: dict[str, str]
+    ) -> Path:
         """Lay out a project at tmp_path/proj with compose + Dockerfiles.
 
         ``dockerfiles`` keys are subpath relative to the project root
@@ -410,7 +447,9 @@ class TestLifecycleMigrate:
         return proj / "docker-compose.yml"
 
     def _parse(self, text: str) -> dict:
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         return yaml.safe_load(body)
 
     def test_django_service_gets_lifecycle_migrate(self, tmp_path):
@@ -431,7 +470,10 @@ class TestLifecycleMigrate:
         assert "lifecycle" in django, django
         migrate = django["lifecycle"]["migrate"]
         assert migrate["command"] == [
-            "python", "manage.py", "migrate", "--noinput",
+            "python",
+            "manage.py",
+            "migrate",
+            "--noinput",
         ]
         assert migrate["auto_on_deploy"] is True
 
@@ -526,6 +568,7 @@ class TestLifecycleMigrate:
             LifecycleHookV2,
             _parse_lifecycle,
         )
+
         compose = self._make_project(
             tmp_path,
             textwrap.dedent("""
@@ -610,8 +653,13 @@ class TestTestingDefaults:
         COPY app.py /app/app.py
     """).strip()
 
-    def _make(self, tmp_path, project_name: str, compose_yaml: str,
-              dockerfiles: dict[str, str]) -> Path:
+    def _make(
+        self,
+        tmp_path,
+        project_name: str,
+        compose_yaml: str,
+        dockerfiles: dict[str, str],
+    ) -> Path:
         proj = tmp_path / project_name
         proj.mkdir()
         (proj / "docker-compose.yml").write_text(compose_yaml)
@@ -622,7 +670,9 @@ class TestTestingDefaults:
         return proj / "docker-compose.yml"
 
     def _parse(self, text: str) -> dict:
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         return yaml.safe_load(body)
 
     DJANGO_COMPOSE = textwrap.dedent("""
@@ -638,7 +688,9 @@ class TestTestingDefaults:
         # Project name 'rc-test-foo' → testing_defaults defaults to True →
         # Django service gets an env: block with star-host knobs.
         compose = self._make(
-            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            tmp_path,
+            "rc-test-foo",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose))
@@ -650,7 +702,9 @@ class TestTestingDefaults:
     def test_auto_off_for_non_rc_test_project(self, tmp_path):
         # Plain 'myapp' project → testing_defaults stays False → no env: block.
         compose = self._make(
-            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            tmp_path,
+            "myapp",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose))
@@ -659,7 +713,9 @@ class TestTestingDefaults:
     def test_explicit_true_overrides_auto_off(self, tmp_path):
         # Non-rc-test project but user passed --testing-defaults: opt in.
         compose = self._make(
-            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            tmp_path,
+            "myapp",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=True))
@@ -669,7 +725,9 @@ class TestTestingDefaults:
     def test_explicit_false_overrides_auto_on(self, tmp_path):
         # rc-test project but user passed --no-testing-defaults: opt out.
         compose = self._make(
-            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            tmp_path,
+            "rc-test-foo",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=False))
@@ -689,7 +747,9 @@ class TestTestingDefaults:
                   DJANGO_ALLOWED_HOSTS: mydomain.com
         """)
         compose = self._make(
-            tmp_path, "rc-test-foo", compose_yaml,
+            tmp_path,
+            "rc-test-foo",
+            compose_yaml,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose))
@@ -708,7 +768,9 @@ class TestTestingDefaults:
                   - DJANGO_ALLOWED_HOSTS=app.example.com
         """)
         compose = self._make(
-            tmp_path, "rc-test-foo", compose_yaml,
+            tmp_path,
+            "rc-test-foo",
+            compose_yaml,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose))
@@ -727,7 +789,9 @@ class TestTestingDefaults:
                   - "5000:5000"
         """)
         compose = self._make(
-            tmp_path, "rc-test-foo", compose_yaml,
+            tmp_path,
+            "rc-test-foo",
+            compose_yaml,
             {"api/Dockerfile": self.NON_DJANGO_DOCKERFILE},
         )
         cfg = self._parse(generate_v2_rc_yml(compose, testing_defaults=True))
@@ -736,7 +800,9 @@ class TestTestingDefaults:
 
     def test_header_mentions_testing_defaults_when_active(self, tmp_path):
         compose = self._make(
-            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            tmp_path,
+            "rc-test-foo",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         text = generate_v2_rc_yml(compose)
@@ -748,7 +814,9 @@ class TestTestingDefaults:
 
     def test_header_silent_when_inactive(self, tmp_path):
         compose = self._make(
-            tmp_path, "myapp", self.DJANGO_COMPOSE,
+            tmp_path,
+            "myapp",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         text = generate_v2_rc_yml(compose)
@@ -758,12 +826,17 @@ class TestTestingDefaults:
         # The emitted services.<svc>.env must parse back into ServiceV2.env
         # without ConfigError — schema field has to actually exist.
         from remote_compose.config.v2_schema import parse as parse_v2
+
         compose = self._make(
-            tmp_path, "rc-test-foo", self.DJANGO_COMPOSE,
+            tmp_path,
+            "rc-test-foo",
+            self.DJANGO_COMPOSE,
             {"django/Dockerfile": self.DJANGO_DOCKERFILE},
         )
         text = generate_v2_rc_yml(compose)
-        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        body = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
         cfg = parse_v2(yaml.safe_load(body))
         django_env = cfg.services["django"].env
         assert django_env["DJANGO_ALLOWED_HOSTS"] == "*"

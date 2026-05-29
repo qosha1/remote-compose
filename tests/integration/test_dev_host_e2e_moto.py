@@ -12,12 +12,10 @@ Phase 4.1 (rc-z7p) makes these green.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import boto3
 import pytest
-
 
 pytestmark = pytest.mark.integration
 
@@ -201,7 +199,10 @@ class TestSourceRoundTrip:
             url="https://github.com/owner/repo.git", ref="alice/feat-x"
         )
         svc.create_host(
-            name="alice", source=original, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=original,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         # fresh service instance reads from disk

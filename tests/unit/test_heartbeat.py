@@ -5,9 +5,7 @@ during long blocking calls. Daemon thread; never blocks shutdown.
 from __future__ import annotations
 
 import time
-from unittest import mock
 
-import pytest
 
 from remote_compose.heartbeat import heartbeat
 
@@ -60,5 +58,6 @@ class TestHeartbeatEmitsTicks:
             # 0.05s should give 1 tick at t=0+ which raises and is swallowed.
             # Block 1.5s; expect at least 1 tick.
             import time as _t
+
             _t.sleep(1.2)
         assert call_count["n"] >= 1

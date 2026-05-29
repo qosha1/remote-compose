@@ -32,6 +32,7 @@ class AdoptResult(NamedTuple):
     failed:     list of (terraform_address, aws_resource_id, error_message)
     duration_s: wall-clock seconds
     """
+
     imported: int
     skipped: int
     failed: list[tuple[str, str, str]]
@@ -72,7 +73,9 @@ def adopt_v1_to_v2(
 
     for address, resource_id in imports:
         status, message = _run_terraform_import(
-            working_dir, address, resource_id,
+            working_dir,
+            address,
+            resource_id,
         )
         if status == "imported":
             imported += 1
@@ -90,7 +93,9 @@ def adopt_v1_to_v2(
 
 
 def _discover_imports(
-    rc_yml_path: Path, *, session: Optional[Any] = None,
+    rc_yml_path: Path,
+    *,
+    session: Optional[Any] = None,
 ) -> list[tuple[str, str]]:
     """Walk live AWS via v1_migrate's discovery + translation, return
     (terraform_address, aws_resource_id) tuples ready to feed into
@@ -123,7 +128,9 @@ def _discover_imports(
 
 
 def _run_terraform_import(
-    working_dir: Path, address: str, resource_id: str,
+    working_dir: Path,
+    address: str,
+    resource_id: str,
 ) -> tuple[str, str]:
     """Run `terraform import <address> <id>` in working_dir; classify result.
 

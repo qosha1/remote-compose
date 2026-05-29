@@ -18,6 +18,7 @@ class DiscoveryError(Exception):
 # V1 rc.yml shape
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class V1Service:
     name: str
@@ -94,6 +95,7 @@ class V1Stack:
 # ---------------------------------------------------------------------
 # Resource inventory dataclasses
 # ---------------------------------------------------------------------
+
 
 @dataclass
 class EfsAccessPoint:
@@ -261,61 +263,77 @@ class ResourceInventory:
             )
             for ap in efs_d.get("access_points", [])
         ]
-        efs = EfsFileSystem(
-            file_system_id=efs_d.get("file_system_id", ""),
-            name=efs_d.get("name", ""),
-            size_bytes=efs_d.get("size_bytes", 0),
-            lifecycle_state=efs_d.get("lifecycle_state", ""),
-            access_points=aps,
-        ) if efs_d else None
+        efs = (
+            EfsFileSystem(
+                file_system_id=efs_d.get("file_system_id", ""),
+                name=efs_d.get("name", ""),
+                size_bytes=efs_d.get("size_bytes", 0),
+                lifecycle_state=efs_d.get("lifecycle_state", ""),
+                access_points=aps,
+            )
+            if efs_d
+            else None
+        )
 
         alb_d = d.get("alb") or {}
-        alb = Alb(
-            name=alb_d.get("name", ""),
-            arn=alb_d.get("arn", ""),
-            dns_name=alb_d.get("dns_name", ""),
-            scheme=alb_d.get("scheme", ""),
-            listeners=[
-                AlbListener(
-                    arn=l.get("arn", ""),
-                    port=l.get("port", 0),
-                    protocol=l.get("protocol", ""),
-                    default_action_type=l.get("default_action_type", ""),
-                    certificate_arn=l.get("certificate_arn"),
-                )
-                for l in alb_d.get("listeners", [])
-            ],
-            target_groups=[
-                AlbTargetGroup(
-                    name=tg.get("name", ""),
-                    arn=tg.get("arn", ""),
-                    port=tg.get("port", 0),
-                    health_check_path=tg.get("health_check_path", ""),
-                )
-                for tg in alb_d.get("target_groups", [])
-            ],
-        ) if alb_d else None
+        alb = (
+            Alb(
+                name=alb_d.get("name", ""),
+                arn=alb_d.get("arn", ""),
+                dns_name=alb_d.get("dns_name", ""),
+                scheme=alb_d.get("scheme", ""),
+                listeners=[
+                    AlbListener(
+                        arn=lst.get("arn", ""),
+                        port=lst.get("port", 0),
+                        protocol=lst.get("protocol", ""),
+                        default_action_type=lst.get("default_action_type", ""),
+                        certificate_arn=lst.get("certificate_arn"),
+                    )
+                    for lst in alb_d.get("listeners", [])
+                ],
+                target_groups=[
+                    AlbTargetGroup(
+                        name=tg.get("name", ""),
+                        arn=tg.get("arn", ""),
+                        port=tg.get("port", 0),
+                        health_check_path=tg.get("health_check_path", ""),
+                    )
+                    for tg in alb_d.get("target_groups", [])
+                ],
+            )
+            if alb_d
+            else None
+        )
 
         acm_d = d.get("acm_cert") or {}
-        acm = AcmCert(
-            arn=acm_d.get("arn", ""),
-            domain_name=acm_d.get("domain_name", ""),
-            status=acm_d.get("status", ""),
-        ) if acm_d else None
+        acm = (
+            AcmCert(
+                arn=acm_d.get("arn", ""),
+                domain_name=acm_d.get("domain_name", ""),
+                status=acm_d.get("status", ""),
+            )
+            if acm_d
+            else None
+        )
 
         zone_d = d.get("route53_zone") or {}
-        zone = Route53Zone(
-            id=zone_d.get("id", ""),
-            name=zone_d.get("name", ""),
-            records=[
-                Route53Record(
-                    name=r.get("name", ""),
-                    type=r.get("type", ""),
-                    ttl=r.get("ttl", 0),
-                )
-                for r in zone_d.get("records", [])
-            ],
-        ) if zone_d else None
+        zone = (
+            Route53Zone(
+                id=zone_d.get("id", ""),
+                name=zone_d.get("name", ""),
+                records=[
+                    Route53Record(
+                        name=r.get("name", ""),
+                        type=r.get("type", ""),
+                        ttl=r.get("ttl", 0),
+                    )
+                    for r in zone_d.get("records", [])
+                ],
+            )
+            if zone_d
+            else None
+        )
 
         secrets_raw = d.get("sm_secrets") or []
         secrets: list[SmSecret] = []
@@ -327,20 +345,28 @@ class ResourceInventory:
             secrets.append(SmSecret(name=s.get("name", ""), arn=s.get("arn", "")))
 
         vpc_d = d.get("vpc") or {}
-        vpc = Vpc(
-            id=vpc_d.get("id", ""),
-            cidr_block=vpc_d.get("cidr_block", ""),
-            tags=vpc_d.get("tags", {}),
-            subnets=list(vpc_d.get("subnets", [])),
-            security_groups=list(vpc_d.get("security_groups", [])),
-        ) if vpc_d else None
+        vpc = (
+            Vpc(
+                id=vpc_d.get("id", ""),
+                cidr_block=vpc_d.get("cidr_block", ""),
+                tags=vpc_d.get("tags", {}),
+                subnets=list(vpc_d.get("subnets", [])),
+                security_groups=list(vpc_d.get("security_groups", [])),
+            )
+            if vpc_d
+            else None
+        )
 
         iam_d = d.get("iam") or {}
-        iam = IamConfig(
-            task_execution_role_arn=iam_d.get("task_execution_role_arn", ""),
-            task_role_arn=iam_d.get("task_role_arn", ""),
-            external=True,
-        ) if iam_d else None
+        iam = (
+            IamConfig(
+                task_execution_role_arn=iam_d.get("task_execution_role_arn", ""),
+                task_role_arn=iam_d.get("task_role_arn", ""),
+                external=True,
+            )
+            if iam_d
+            else None
+        )
 
         ecr = [
             EcrRepo(name=r.get("name", ""), uri=r.get("uri", ""))
@@ -370,78 +396,104 @@ class ResourceInventory:
             "ecs_cluster": {
                 "name": self.ecs_cluster.name if self.ecs_cluster else "",
                 "arn": self.ecs_cluster.arn if self.ecs_cluster else "",
-                "active_services_count": self.ecs_cluster.active_services_count if self.ecs_cluster else 0,
-                "running_tasks_count": self.ecs_cluster.running_tasks_count if self.ecs_cluster else 0,
+                "active_services_count": (
+                    self.ecs_cluster.active_services_count if self.ecs_cluster else 0
+                ),
+                "running_tasks_count": (
+                    self.ecs_cluster.running_tasks_count if self.ecs_cluster else 0
+                ),
             },
-            "efs": {
-                "file_system_id": self.efs.file_system_id,
-                "name": self.efs.name,
-                "size_bytes": self.efs.size_bytes,
-                "lifecycle_state": self.efs.lifecycle_state,
-                "access_points": [
-                    {
-                        "ap_id": ap.ap_id,
-                        "name": ap.name,
-                        "path": ap.path,
-                        "uid": ap.uid,
-                        "gid": ap.gid,
-                        "live_postgres_mount": ap.live_postgres_mount,
-                    }
-                    for ap in self.efs.access_points
-                ],
-            } if self.efs else {},
-            "alb": {
-                "name": self.alb.name,
-                "arn": self.alb.arn,
-                "dns_name": self.alb.dns_name,
-                "scheme": self.alb.scheme,
-                "listeners": [
-                    {
-                        "arn": l.arn,
-                        "port": l.port,
-                        "protocol": l.protocol,
-                        "default_action_type": l.default_action_type,
-                        "certificate_arn": l.certificate_arn,
-                    }
-                    for l in self.alb.listeners
-                ],
-                "target_groups": [
-                    {
-                        "name": tg.name,
-                        "arn": tg.arn,
-                        "port": tg.port,
-                        "health_check_path": tg.health_check_path,
-                    }
-                    for tg in self.alb.target_groups
-                ],
-            } if self.alb else {},
-            "acm_cert": {
-                "arn": self.acm_cert.arn,
-                "domain_name": self.acm_cert.domain_name,
-                "status": self.acm_cert.status,
-            } if self.acm_cert else {},
-            "route53_zone": {
-                "id": self.route53_zone.id,
-                "name": self.route53_zone.name,
-                "records": [
-                    {"name": r.name, "type": r.type, "ttl": r.ttl}
-                    for r in self.route53_zone.records
-                ],
-            } if self.route53_zone else {},
-            "sm_secrets": [
-                {"name": s.name, "arn": s.arn} for s in self.secrets
-            ],
-            "vpc": {
-                "id": self.vpc.id,
-                "cidr_block": self.vpc.cidr_block,
-                "tags": self.vpc.tags,
-                "subnets": self.vpc.subnets,
-                "security_groups": self.vpc.security_groups,
-            } if self.vpc else {},
-            "iam": {
-                "task_execution_role_arn": self.iam.task_execution_role_arn,
-                "task_role_arn": self.iam.task_role_arn,
-            } if self.iam else {},
+            "efs": (
+                {
+                    "file_system_id": self.efs.file_system_id,
+                    "name": self.efs.name,
+                    "size_bytes": self.efs.size_bytes,
+                    "lifecycle_state": self.efs.lifecycle_state,
+                    "access_points": [
+                        {
+                            "ap_id": ap.ap_id,
+                            "name": ap.name,
+                            "path": ap.path,
+                            "uid": ap.uid,
+                            "gid": ap.gid,
+                            "live_postgres_mount": ap.live_postgres_mount,
+                        }
+                        for ap in self.efs.access_points
+                    ],
+                }
+                if self.efs
+                else {}
+            ),
+            "alb": (
+                {
+                    "name": self.alb.name,
+                    "arn": self.alb.arn,
+                    "dns_name": self.alb.dns_name,
+                    "scheme": self.alb.scheme,
+                    "listeners": [
+                        {
+                            "arn": lst.arn,
+                            "port": lst.port,
+                            "protocol": lst.protocol,
+                            "default_action_type": lst.default_action_type,
+                            "certificate_arn": lst.certificate_arn,
+                        }
+                        for lst in self.alb.listeners
+                    ],
+                    "target_groups": [
+                        {
+                            "name": tg.name,
+                            "arn": tg.arn,
+                            "port": tg.port,
+                            "health_check_path": tg.health_check_path,
+                        }
+                        for tg in self.alb.target_groups
+                    ],
+                }
+                if self.alb
+                else {}
+            ),
+            "acm_cert": (
+                {
+                    "arn": self.acm_cert.arn,
+                    "domain_name": self.acm_cert.domain_name,
+                    "status": self.acm_cert.status,
+                }
+                if self.acm_cert
+                else {}
+            ),
+            "route53_zone": (
+                {
+                    "id": self.route53_zone.id,
+                    "name": self.route53_zone.name,
+                    "records": [
+                        {"name": r.name, "type": r.type, "ttl": r.ttl}
+                        for r in self.route53_zone.records
+                    ],
+                }
+                if self.route53_zone
+                else {}
+            ),
+            "sm_secrets": [{"name": s.name, "arn": s.arn} for s in self.secrets],
+            "vpc": (
+                {
+                    "id": self.vpc.id,
+                    "cidr_block": self.vpc.cidr_block,
+                    "tags": self.vpc.tags,
+                    "subnets": self.vpc.subnets,
+                    "security_groups": self.vpc.security_groups,
+                }
+                if self.vpc
+                else {}
+            ),
+            "iam": (
+                {
+                    "task_execution_role_arn": self.iam.task_execution_role_arn,
+                    "task_role_arn": self.iam.task_role_arn,
+                }
+                if self.iam
+                else {}
+            ),
             "ecr_repositories": [
                 {"name": r.name, "uri": r.uri} for r in self.ecr_repositories
             ],
@@ -488,32 +540,43 @@ class ResourceInventory:
         # VPC by tag
         ec2 = session.client("ec2")
         vpc = None
-        vpcs = ec2.describe_vpcs(Filters=[
-            {"Name": "tag:remote-compose:cluster", "Values": [cluster]},
-        ]).get("Vpcs", [])
+        vpcs = ec2.describe_vpcs(
+            Filters=[
+                {"Name": "tag:remote-compose:cluster", "Values": [cluster]},
+            ]
+        ).get("Vpcs", [])
         if not vpcs:
             # fall back to any tagged remote-compose:managed=true with no cluster filter
-            vpcs = ec2.describe_vpcs(Filters=[
-                {"Name": "tag:remote-compose:managed", "Values": ["true"]},
-            ]).get("Vpcs", [])
+            vpcs = ec2.describe_vpcs(
+                Filters=[
+                    {"Name": "tag:remote-compose:managed", "Values": ["true"]},
+                ]
+            ).get("Vpcs", [])
         if vpcs:
             v = vpcs[0]
             tags = {t["Key"]: t["Value"] for t in v.get("Tags", [])}
             subnets = [
                 s["SubnetId"]
-                for s in ec2.describe_subnets(Filters=[
-                    {"Name": "vpc-id", "Values": [v["VpcId"]]},
-                ]).get("Subnets", [])
+                for s in ec2.describe_subnets(
+                    Filters=[
+                        {"Name": "vpc-id", "Values": [v["VpcId"]]},
+                    ]
+                ).get("Subnets", [])
             ]
             sgs = [
                 g["GroupId"]
-                for g in ec2.describe_security_groups(Filters=[
-                    {"Name": "vpc-id", "Values": [v["VpcId"]]},
-                ]).get("SecurityGroups", [])
+                for g in ec2.describe_security_groups(
+                    Filters=[
+                        {"Name": "vpc-id", "Values": [v["VpcId"]]},
+                    ]
+                ).get("SecurityGroups", [])
             ]
             vpc = Vpc(
-                id=v["VpcId"], cidr_block=v.get("CidrBlock", ""),
-                tags=tags, subnets=subnets, security_groups=sgs,
+                id=v["VpcId"],
+                cidr_block=v.get("CidrBlock", ""),
+                tags=tags,
+                subnets=subnets,
+                security_groups=sgs,
             )
 
         # EFS — first file system in the region (sandbox shape)
@@ -532,9 +595,8 @@ class ResourceInventory:
                     path=(ap.get("RootDirectory") or {}).get("Path", ""),
                     uid=(ap.get("PosixUser") or {}).get("Uid", 0),
                     gid=(ap.get("PosixUser") or {}).get("Gid", 0),
-                    live_postgres_mount="postgres" in (
-                        (ap.get("RootDirectory") or {}).get("Path", "").lower()
-                    ),
+                    live_postgres_mount="postgres"
+                    in ((ap.get("RootDirectory") or {}).get("Path", "").lower()),
                 )
                 for ap in ap_list
             ]
@@ -556,18 +618,21 @@ class ResourceInventory:
                 LoadBalancerArn=lb["LoadBalancerArn"],
             ).get("Listeners", [])
             listeners = []
-            for l in listeners_raw:
+            for lst in listeners_raw:
                 cert_arn = None
-                certs = l.get("Certificates") or []
+                certs = lst.get("Certificates") or []
                 if certs:
                     cert_arn = certs[0].get("CertificateArn")
-                actions = l.get("DefaultActions") or [{}]
-                listeners.append(AlbListener(
-                    arn=l["ListenerArn"], port=l.get("Port", 0),
-                    protocol=l.get("Protocol", ""),
-                    default_action_type=actions[0].get("Type", ""),
-                    certificate_arn=cert_arn,
-                ))
+                actions = lst.get("DefaultActions") or [{}]
+                listeners.append(
+                    AlbListener(
+                        arn=lst["ListenerArn"],
+                        port=lst.get("Port", 0),
+                        protocol=lst.get("Protocol", ""),
+                        default_action_type=actions[0].get("Type", ""),
+                        certificate_arn=cert_arn,
+                    )
+                )
             try:
                 tgs_raw = elbv2.describe_target_groups(
                     LoadBalancerArn=lb["LoadBalancerArn"],
@@ -576,7 +641,8 @@ class ResourceInventory:
                 tgs_raw = []
             tgs = [
                 AlbTargetGroup(
-                    name=tg["TargetGroupName"], arn=tg["TargetGroupArn"],
+                    name=tg["TargetGroupName"],
+                    arn=tg["TargetGroupArn"],
                     port=tg.get("Port", 0),
                     health_check_path=tg.get("HealthCheckPath", ""),
                 )
@@ -587,7 +653,8 @@ class ResourceInventory:
                 arn=lb["LoadBalancerArn"],
                 dns_name=lb.get("DNSName", ""),
                 scheme=lb.get("Scheme", ""),
-                listeners=listeners, target_groups=tgs,
+                listeners=listeners,
+                target_groups=tgs,
             )
 
         # ACM — first ISSUED cert
@@ -597,10 +664,14 @@ class ResourceInventory:
         if certs:
             arn = certs[0]["CertificateArn"]
             try:
-                detail = acm_client.describe_certificate(CertificateArn=arn).get("Certificate", {})
+                detail = acm_client.describe_certificate(CertificateArn=arn).get(
+                    "Certificate", {}
+                )
                 acm_cert = AcmCert(
                     arn=arn,
-                    domain_name=detail.get("DomainName", certs[0].get("DomainName", "")),
+                    domain_name=detail.get(
+                        "DomainName", certs[0].get("DomainName", "")
+                    ),
                     status=detail.get("Status", "ISSUED"),
                 )
             except Exception:
@@ -633,9 +704,12 @@ class ResourceInventory:
         ecr_repos = []
         try:
             for r in ecr_client.describe_repositories().get("repositories", []):
-                ecr_repos.append(EcrRepo(
-                    name=r["repositoryName"], uri=r["repositoryUri"],
-                ))
+                ecr_repos.append(
+                    EcrRepo(
+                        name=r["repositoryName"],
+                        uri=r["repositoryUri"],
+                    )
+                )
         except Exception:
             pass
 
@@ -658,6 +732,7 @@ class ResourceInventory:
 # ---------------------------------------------------------------------
 # discover() composite
 # ---------------------------------------------------------------------
+
 
 def discover(
     rc_v1_yml_path: Path,

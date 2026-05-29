@@ -23,7 +23,6 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import sys
 import tarfile
 import time
 from pathlib import Path
@@ -62,8 +61,7 @@ def resolve_targets(
     version, _, v2 = load_rc_yml(rc_yml_path)
     if version != 2 or v2 is None:
         raise DevPushError(
-            f"{rc_yml_path} is not an rc.yml v2 config; `rc dev` only "
-            f"supports v2."
+            f"{rc_yml_path} is not an rc.yml v2 config; `rc dev` only " f"supports v2."
         )
     project_dir = rc_yml_path.parent.resolve()
 
@@ -75,20 +73,21 @@ def resolve_targets(
             src = Path(dv["source"])
             if not src.is_absolute():
                 src = (project_dir / src).resolve()
-            targets.append({
-                "service": svc_name,
-                "name": dv["name"],
-                "source": src,
-                "mount": dv["mount"],
-                "project": v2.project,
-                "cluster": (v2.provider_config or {}).get("ecs", {}).get(
-                    "cluster"
-                ) or f"{v2.project}-cluster",
-                "region": (v2.provider_config or {}).get("ecs", {}).get("region"),
-                "aws_profile": (v2.provider_config or {}).get("ecs", {}).get(
-                    "aws_profile"
-                ),
-            })
+            targets.append(
+                {
+                    "service": svc_name,
+                    "name": dv["name"],
+                    "source": src,
+                    "mount": dv["mount"],
+                    "project": v2.project,
+                    "cluster": (v2.provider_config or {}).get("ecs", {}).get("cluster")
+                    or f"{v2.project}-cluster",
+                    "region": (v2.provider_config or {}).get("ecs", {}).get("region"),
+                    "aws_profile": (v2.provider_config or {})
+                    .get("ecs", {})
+                    .get("aws_profile"),
+                }
+            )
     if not targets:
         if service_filter:
             raise DevPushError(
@@ -110,9 +109,18 @@ def resolve_targets(
 # Common dev cruft we never want to ship over the wire. Mirrors the
 # defaults `rsync --exclude` would use for a Django/Node project.
 _DEFAULT_EXCLUDE = {
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    ".mypy_cache", ".pytest_cache", ".tox", ".ruff_cache",
-    ".DS_Store", ".idea", ".vscode",
+    "__pycache__",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".ruff_cache",
+    ".DS_Store",
+    ".idea",
+    ".vscode",
 }
 
 
@@ -140,7 +148,9 @@ def find_running_task(
     session = session_factory()
     ecs = session.client("ecs")
     resp = ecs.list_tasks(
-        cluster=cluster, serviceName=service, desiredStatus="RUNNING",
+        cluster=cluster,
+        serviceName=service,
+        desiredStatus="RUNNING",
     )
     arns = resp.get("taskArns") or []
     return arns[0] if arns else None
@@ -150,7 +160,9 @@ def push_one(
     target: dict,
     *,
     session_factory: Callable[[], object],
-    runner: Optional[Callable[[list[str], bytes, dict], "subprocess.CompletedProcess"]] = None,
+    runner: Optional[
+        Callable[[list[str], bytes, dict], "subprocess.CompletedProcess"]
+    ] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> float:
     """Tar-pipe ``target['source']`` into ``target['mount']`` on the live
@@ -182,7 +194,9 @@ def push_one(
         )
 
     task_arn = find_running_task(
-        session_factory, target["cluster"], target["service"],
+        session_factory,
+        target["cluster"],
+        target["service"],
     )
     if task_arn is None:
         raise DevPushError(
@@ -197,6 +211,7 @@ def push_one(
     # tempfile or a pipe-based subprocess pair, but not before there's
     # evidence anyone needs it.
     import io
+
     buf = io.BytesIO()
     file_count = 0
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -207,8 +222,7 @@ def push_one(
     payload = buf.getvalue()
     if progress:
         progress(
-            f"  packed {file_count} files ({len(payload) / 1024:.1f}KB) "
-            f"from {src}"
+            f"  packed {file_count} files ({len(payload) / 1024:.1f}KB) " f"from {src}"
         )
 
     # `tar -xzf -` reads the gzipped tar from stdin; we tell it to land
@@ -216,12 +230,18 @@ def push_one(
     mount = target["mount"]
     inner_cmd = f"tar -xzf - -C {shlex.quote(mount)}"
     aws_cmd = [
-        "aws", "ecs", "execute-command",
-        "--cluster", target["cluster"],
-        "--task", task_arn,
-        "--container", target["service"],
+        "aws",
+        "ecs",
+        "execute-command",
+        "--cluster",
+        target["cluster"],
+        "--task",
+        task_arn,
+        "--container",
+        target["service"],
         "--interactive",
-        "--command", inner_cmd,
+        "--command",
+        inner_cmd,
     ]
     if target.get("region"):
         aws_cmd.extend(["--region", target["region"]])
@@ -239,7 +259,10 @@ def push_one(
     start = time.monotonic()
     if runner is None:
         proc = subprocess.run(
-            aws_cmd, input=payload, capture_output=True, env=env,
+            aws_cmd,
+            input=payload,
+            capture_output=True,
+            env=env,
         )
     else:
         proc = runner(aws_cmd, payload, env)
@@ -276,8 +299,10 @@ def push_all(
     failing one and re-run).
     """
     if session_factory is None:
+
         def _default_session_factory() -> object:
             import boto3
+
             # Region/profile come from the per-target dicts via env+args
             # on the aws cli, NOT here, so the boto3 session is just for
             # the ECS list_tasks call.
@@ -290,6 +315,7 @@ def push_all(
                 region_name=tt.get("region"),
                 profile_name=tt.get("aws_profile"),
             )
+
         session_factory = _default_session_factory
 
     targets = resolve_targets(rc_yml_path, service_filter)
@@ -298,7 +324,9 @@ def push_all(
         if progress:
             progress(f"\n  {t['service']} :: {t['name']} → {t['mount']}")
         elapsed = push_one(
-            t, session_factory=session_factory, progress=progress,
+            t,
+            session_factory=session_factory,
+            progress=progress,
         )
         if progress:
             progress(f"  done in {elapsed:.1f}s")
@@ -319,6 +347,7 @@ def _detect_watcher() -> Optional[str]:
     the CLI surfaces an install hint then.
     """
     import shutil
+
     for binary in ("fswatch", "inotifywait"):
         if shutil.which(binary):
             return binary
@@ -329,16 +358,20 @@ def _build_watch_cmd(binary: str, sources: list[Path]) -> list[str]:
     if binary == "fswatch":
         # -0 null-separates events; -r recursive (default but explicit
         # for clarity); --latency 0.1 so we batch fast bursts together.
-        return ["fswatch", "-0", "-r", "--latency", "0.1",
-                *(str(s) for s in sources)]
+        return ["fswatch", "-0", "-r", "--latency", "0.1", *(str(s) for s in sources)]
     if binary == "inotifywait":
         # -m monitor mode, -r recursive, -q quiet (no startup banner),
         # -e modify,create,delete,move covers what dev edits do, --format
         # %w/%f gives us a path per event.
-        return ["inotifywait", "-mrq",
-                "-e", "modify,create,delete,move",
-                "--format", "%w%f",
-                *(str(s) for s in sources)]
+        return [
+            "inotifywait",
+            "-mrq",
+            "-e",
+            "modify,create,delete,move",
+            "--format",
+            "%w%f",
+            *(str(s) for s in sources),
+        ]
     raise DevPushError(f"unknown watcher binary {binary!r}")
 
 
@@ -376,9 +409,13 @@ def watch_and_push(
         progress(f"  watching ({binary}): {', '.join(str(s) for s in sources)}")
         progress(f"  debounce: {debounce_ms}ms — Ctrl-C to stop")
 
-    push_fn = _push or (lambda: push_all(
-        rc_yml_path, service_filter, progress=progress,
-    ))
+    push_fn = _push or (
+        lambda: push_all(
+            rc_yml_path,
+            service_filter,
+            progress=progress,
+        )
+    )
 
     # Initial seed so the running task starts with current source.
     push_fn()
@@ -386,7 +423,9 @@ def watch_and_push(
     cmd = _build_watch_cmd(binary, sources)
     popen = _popen or subprocess.Popen
     proc = popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         bufsize=0,
     )
     assert proc.stdout is not None
@@ -401,6 +440,7 @@ def watch_and_push(
         # timer firing. fswatch -0 emits null bytes, inotifywait emits
         # newlines; either way we just need to know "an event happened".
         import select
+
         while True:
             timeout = None
             if pending:

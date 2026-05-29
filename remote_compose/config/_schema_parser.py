@@ -104,8 +104,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             ephemeral_storage=raw.get("ephemeral_storage"),
             default_target=bool(raw.get("default_target", False)),
             volumes=list(raw.get("volumes", [])),
-            lifecycle=_parse_lifecycle(name, raw["lifecycle"])
-                       if raw.get("lifecycle") else {},
+            lifecycle=(
+                _parse_lifecycle(name, raw["lifecycle"]) if raw.get("lifecycle") else {}
+            ),
             domain=raw.get("domain"),
             # Preserve raw shape so validate() can flag non-list values.
             aliases=raw["aliases"] if "aliases" in raw else [],
@@ -118,8 +119,10 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             # booleans (DJANGO_DEBUG: False) and ints become valid env
             # values. Non-scalar values are caught by ServiceV2.validate.
             env=(
-                {str(k): (str(v) if not isinstance(v, (dict, list)) else v)
-                 for k, v in raw["env"].items()}
+                {
+                    str(k): (str(v) if not isinstance(v, (dict, list)) else v)
+                    for k, v in raw["env"].items()
+                }
                 if isinstance(raw.get("env"), dict)
                 else (raw["env"] if "env" in raw else {})
             ),
@@ -180,7 +183,8 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
             service=raw["backup"].get("service"),
             bucket_managed=bool(raw["backup"].get("bucket_managed", True)),
             retention_days=(
-                None if raw["backup"].get("retention_days") in (None, "never", 0)
+                None
+                if raw["backup"].get("retention_days") in (None, "never", 0)
                 else int(raw["backup"]["retention_days"])
             ),
         )
@@ -196,9 +200,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
     if raw.get("compose"):
         cb = raw["compose"]
         if not isinstance(cb, dict):
-            raise ConfigError(
-                f"compose must be a mapping, got {type(cb).__name__}"
-            )
+            raise ConfigError(f"compose must be a mapping, got {type(cb).__name__}")
         unknown = set(cb.keys()) - {"include", "exclude"}
         if unknown:
             raise ConfigError(

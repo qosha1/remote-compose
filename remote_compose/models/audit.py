@@ -14,76 +14,76 @@ class AuditLog(models.Model):
     """
 
     class Meta:
-        db_table = 'remote_compose_audit_log'
-        ordering = ['-timestamp']
+        db_table = "remote_compose_audit_log"
+        ordering = ["-timestamp"]
         indexes = [
-            models.Index(fields=['action']),
-            models.Index(fields=['actor']),
-            models.Index(fields=['resource_type', 'resource_id']),
-            models.Index(fields=['timestamp']),
-            models.Index(fields=['success']),
+            models.Index(fields=["action"]),
+            models.Index(fields=["actor"]),
+            models.Index(fields=["resource_type", "resource_id"]),
+            models.Index(fields=["timestamp"]),
+            models.Index(fields=["success"]),
         ]
-        verbose_name = 'Audit Log'
-        verbose_name_plural = 'Audit Logs'
+        verbose_name = "Audit Log"
+        verbose_name_plural = "Audit Logs"
 
     action = models.CharField(
         max_length=100,
         db_index=True,
-        help_text='Type of action performed',
+        help_text="Type of action performed",
     )
     actor = models.CharField(
         max_length=255,
         db_index=True,
-        help_text='User or system that performed the action',
+        help_text="User or system that performed the action",
     )
     timestamp = models.DateTimeField(
         default=timezone.now,
         db_index=True,
-        help_text='When the action occurred',
+        help_text="When the action occurred",
     )
 
     resource_type = models.CharField(
         max_length=100,
         null=True,
         blank=True,
-        help_text='Type of resource affected (e.g., deployment, target)',
+        help_text="Type of resource affected (e.g., deployment, target)",
     )
     resource_id = models.IntegerField(
         null=True,
         blank=True,
-        help_text='ID of the resource affected',
+        help_text="ID of the resource affected",
     )
     resource_name = models.CharField(
         max_length=255,
         null=True,
         blank=True,
-        help_text='Name of the resource affected',
+        help_text="Name of the resource affected",
     )
 
     ip_address = models.GenericIPAddressField(
         null=True,
         blank=True,
-        help_text='IP address of the actor',
+        help_text="IP address of the actor",
     )
     user_agent = models.TextField(
         null=True,
         blank=True,
-        help_text='User agent string if applicable',
+        help_text="User agent string if applicable",
     )
 
     details = models.JSONField(
         default=dict,
         blank=True,
-        help_text='Additional details about the action',
+        help_text="Additional details about the action",
     )
     success = models.BooleanField(
         default=True,
-        help_text='Whether the action succeeded',
+        help_text="Whether the action succeeded",
     )
     error_message = models.TextField(
         null=True,
         blank=True,
-        help_text='Error message if action failed',
+        help_text="Error message if action failed",
     )
 
     def __str__(self):
@@ -102,7 +102,7 @@ class AuditLog(models.Model):
         details: dict = None,
         success: bool = True,
         error_message: str = None,
-    ) -> 'AuditLog':
+    ) -> "AuditLog":
         """
         Create an audit log entry.
 

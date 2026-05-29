@@ -11,7 +11,6 @@ from remote_compose.config import v1_schema
 from remote_compose.config.migrate import migrate
 from remote_compose.config.v2_schema import parse as parse_v2
 
-
 FIXTURES_DIR = Path(__file__).parent.parent.parent / "fixtures" / "rc_v1_samples"
 
 
@@ -47,8 +46,13 @@ class TestMigrate:
         result = migrate(start_simpli_v1)
         svc = result.v2["services"]
         assert set(svc.keys()) == {
-            "postgres", "redis", "django", "celery-worker",
-            "celery-worker-linkedin", "celery-beat", "nginx",
+            "postgres",
+            "redis",
+            "django",
+            "celery-worker",
+            "celery-worker-linkedin",
+            "celery-beat",
+            "nginx",
         }
         assert svc["django"]["cpu"] == 1024
         assert svc["django"]["memory"] == 4096
@@ -123,8 +127,12 @@ class TestMigrateEdgeCases:
             "project_name": "x",
             "compose_file": "docker-compose.yml",
             "services": {
-                "web": {"cpu": 256, "memory": 512, "type": "proxy",
-                        "mystery_field": True},
+                "web": {
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "proxy",
+                    "mystery_field": True,
+                },
             },
         }
         result = migrate(raw)
@@ -158,9 +166,11 @@ class TestMigrateEdgeCases:
 class TestInfrastructureVolumeWarning:
     def test_infrastructure_service_without_volumes_warns(self):
         raw = {
-            "project_name": "x", "compose_file": "docker-compose.yml",
-            "services": {"postgres": {"cpu": 512, "memory": 1024,
-                                       "type": "infrastructure"}},
+            "project_name": "x",
+            "compose_file": "docker-compose.yml",
+            "services": {
+                "postgres": {"cpu": 512, "memory": 1024, "type": "infrastructure"}
+            },
         }
         result = migrate(raw)
         msgs = "\n".join(result.warnings)
@@ -170,34 +180,39 @@ class TestInfrastructureVolumeWarning:
 
     def test_known_stateful_name_gets_mount_hint(self):
         raw = {
-            "project_name": "x", "compose_file": "docker-compose.yml",
-            "services": {"postgres": {"cpu": 512, "memory": 1024,
-                                       "type": "infrastructure"}},
+            "project_name": "x",
+            "compose_file": "docker-compose.yml",
+            "services": {
+                "postgres": {"cpu": 512, "memory": 1024, "type": "infrastructure"}
+            },
         }
         result = migrate(raw)
         msgs = "\n".join(result.warnings)
         assert "/var/lib/postgresql/data" in msgs
 
-    @pytest.mark.parametrize("name,path", [
-        ("redis", "/data"),
-        ("mysql", "/var/lib/mysql"),
-        ("mariadb", "/var/lib/mysql"),
-        ("mongo", "/data/db"),
-    ])
+    @pytest.mark.parametrize(
+        "name,path",
+        [
+            ("redis", "/data"),
+            ("mysql", "/var/lib/mysql"),
+            ("mariadb", "/var/lib/mysql"),
+            ("mongo", "/data/db"),
+        ],
+    )
     def test_multiple_stateful_hints(self, name, path):
         raw = {
-            "project_name": "x", "compose_file": "docker-compose.yml",
-            "services": {name: {"cpu": 256, "memory": 512,
-                                 "type": "infrastructure"}},
+            "project_name": "x",
+            "compose_file": "docker-compose.yml",
+            "services": {name: {"cpu": 256, "memory": 512, "type": "infrastructure"}},
         }
         result = migrate(raw)
         assert path in "\n".join(result.warnings)
 
     def test_non_infrastructure_service_no_warning(self):
         raw = {
-            "project_name": "x", "compose_file": "docker-compose.yml",
-            "services": {"api": {"cpu": 512, "memory": 1024,
-                                  "type": "application"}},
+            "project_name": "x",
+            "compose_file": "docker-compose.yml",
+            "services": {"api": {"cpu": 512, "memory": 1024, "type": "application"}},
         }
         result = migrate(raw)
         assert not any("data will not persist" in w for w in result.warnings)

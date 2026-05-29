@@ -8,10 +8,13 @@ from remote_compose.provider.ecs.provider import _looks_like_singleton_scheduler
 
 
 class TestNameSuffix:
-    @pytest.mark.parametrize("name", [
-        "celery-beat",
-        "scheduler",  # bare 'scheduler' doesn't match (needs -scheduler suffix)
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "celery-beat",
+            "scheduler",  # bare 'scheduler' doesn't match (needs -scheduler suffix)
+        ],
+    )
     def test_explicit_singleton_suffix(self, name):
         # NB: 'scheduler' alone won't trigger; only '-scheduler' suffix
         assert _looks_like_singleton_scheduler("foo-scheduler", []) is True
@@ -72,6 +75,7 @@ class TestPriorityOfSignals:
 # Integration: provider sets stateful=True when singleton detected
 # ---------------------------------------------------------------------------
 
+
 class TestProviderIntegration:
     def test_singleton_makes_emitted_terraform_stateful(self, tmp_path):
         from pathlib import Path
@@ -88,7 +92,10 @@ class TestProviderIntegration:
             working_dir=tmp_path,
             services={
                 "celery-beat": ServiceSpec(
-                    name="celery-beat", cpu=256, memory=512, type="worker",
+                    name="celery-beat",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
                     command=["celery", "-A", "config", "beat"],
                 ),
             },
@@ -117,7 +124,10 @@ class TestProviderIntegration:
             working_dir=tmp_path,
             services={
                 "celery-worker": ServiceSpec(
-                    name="celery-worker", cpu=256, memory=512, type="worker",
+                    name="celery-worker",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
                     command=["celery", "-A", "config", "worker"],
                 ),
             },

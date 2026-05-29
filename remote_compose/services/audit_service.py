@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, asdict
 from datetime import timedelta
 from enum import Enum
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 from django.db.models import QuerySet
 from django.utils import timezone
@@ -21,48 +21,50 @@ logger = logging.getLogger(__name__)
 
 class AuditAction(str, Enum):
     """Types of auditable actions."""
+
     # Target actions
-    TARGET_CREATED = 'target.created'
-    TARGET_UPDATED = 'target.updated'
-    TARGET_DELETED = 'target.deleted'
-    TARGET_CONNECTION_TEST = 'target.connection_test'
+    TARGET_CREATED = "target.created"
+    TARGET_UPDATED = "target.updated"
+    TARGET_DELETED = "target.deleted"
+    TARGET_CONNECTION_TEST = "target.connection_test"
 
     # Context actions
-    CONTEXT_CREATED = 'context.created'
-    CONTEXT_UPDATED = 'context.updated'
-    CONTEXT_DELETED = 'context.deleted'
+    CONTEXT_CREATED = "context.created"
+    CONTEXT_UPDATED = "context.updated"
+    CONTEXT_DELETED = "context.deleted"
 
     # Deployment actions
-    DEPLOYMENT_STARTED = 'deployment.started'
-    DEPLOYMENT_COMPLETED = 'deployment.completed'
-    DEPLOYMENT_FAILED = 'deployment.failed'
-    DEPLOYMENT_CANCELLED = 'deployment.cancelled'
-    DEPLOYMENT_STOPPED = 'deployment.stopped'
+    DEPLOYMENT_STARTED = "deployment.started"
+    DEPLOYMENT_COMPLETED = "deployment.completed"
+    DEPLOYMENT_FAILED = "deployment.failed"
+    DEPLOYMENT_CANCELLED = "deployment.cancelled"
+    DEPLOYMENT_STOPPED = "deployment.stopped"
 
     # Rollback actions
-    ROLLBACK_STARTED = 'rollback.started'
-    ROLLBACK_COMPLETED = 'rollback.completed'
-    ROLLBACK_FAILED = 'rollback.failed'
+    ROLLBACK_STARTED = "rollback.started"
+    ROLLBACK_COMPLETED = "rollback.completed"
+    ROLLBACK_FAILED = "rollback.failed"
 
     # Credential actions
-    CREDENTIAL_CREATED = 'credential.created'
-    CREDENTIAL_ACCESSED = 'credential.accessed'
-    CREDENTIAL_ROTATED = 'credential.rotated'
-    CREDENTIAL_DELETED = 'credential.deleted'
+    CREDENTIAL_CREATED = "credential.created"
+    CREDENTIAL_ACCESSED = "credential.accessed"
+    CREDENTIAL_ROTATED = "credential.rotated"
+    CREDENTIAL_DELETED = "credential.deleted"
 
     # Health check actions
-    HEALTH_CHECK_RUN = 'health_check.run'
-    HEALTH_CHECK_FAILED = 'health_check.failed'
+    HEALTH_CHECK_RUN = "health_check.run"
+    HEALTH_CHECK_FAILED = "health_check.failed"
 
     # Security actions
-    RATE_LIMIT_EXCEEDED = 'security.rate_limit_exceeded'
-    AUTHENTICATION_FAILED = 'security.authentication_failed'
-    VALIDATION_FAILED = 'security.validation_failed'
+    RATE_LIMIT_EXCEEDED = "security.rate_limit_exceeded"
+    AUTHENTICATION_FAILED = "security.authentication_failed"
+    VALIDATION_FAILED = "security.validation_failed"
 
 
 @dataclass
 class AuditEntry:
     """Audit log entry."""
+
     action: str
     actor: str
     timestamp: str
@@ -92,18 +94,19 @@ class AuditService(BaseService):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._logger = logging.getLogger('remote_compose.audit')
+        self._logger = logging.getLogger("remote_compose.audit")
         self._setup_logger()
 
     def _setup_logger(self):
         """Setup dedicated audit logger."""
-        audit_log_file = get_setting('AUDIT_LOG_FILE')
+        audit_log_file = get_setting("AUDIT_LOG_FILE")
         if audit_log_file:
             handler = logging.FileHandler(audit_log_file)
-            handler.setFormatter(logging.Formatter(
-                '%(asctime)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            ))
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+                )
+            )
             self._logger.addHandler(handler)
             self._logger.setLevel(logging.INFO)
 
@@ -159,11 +162,11 @@ class AuditService(BaseService):
         self._logger.info(entry.to_json())
 
         # Log to database if enabled
-        if get_setting('AUDIT_LOG_TO_DATABASE', True):
+        if get_setting("AUDIT_LOG_TO_DATABASE", True):
             self._save_to_database(entry)
 
         # Notify observers
-        self.notify_observers('audit_logged', entry=entry)
+        self.notify_observers("audit_logged", entry=entry)
 
         return entry
 
@@ -188,6 +191,7 @@ class AuditService(BaseService):
     def _sanitize_details(self, details: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize sensitive data from details."""
         from .log_sanitizer import LogSanitizer
+
         sanitizer = LogSanitizer()
         return sanitizer.sanitize_dict(details)
 
@@ -203,15 +207,15 @@ class AuditService(BaseService):
         return self.log(
             action=AuditAction.DEPLOYMENT_STARTED,
             actor=actor,
-            resource_type='deployment',
+            resource_type="deployment",
             resource_id=deployment.id,
             resource_name=deployment.project_name,
             ip_address=ip_address,
             details={
-                'target_id': deployment.target_id,
-                'target_name': deployment.target.name,
-                'version': deployment.version,
-                'deployment_type': deployment.deployment_type,
+                "target_id": deployment.target_id,
+                "target_name": deployment.target.name,
+                "version": deployment.version,
+                "deployment_type": deployment.deployment_type,
             },
         )
 
@@ -225,16 +229,16 @@ class AuditService(BaseService):
         return self.log(
             action=AuditAction.DEPLOYMENT_COMPLETED,
             actor=actor,
-            resource_type='deployment',
+            resource_type="deployment",
             resource_id=deployment.id,
             resource_name=deployment.project_name,
             ip_address=ip_address,
             details={
-                'target_id': deployment.target_id,
-                'target_name': deployment.target.name,
-                'version': deployment.version,
-                'duration_seconds': deployment.duration,
-                'container_ids': deployment.container_ids,
+                "target_id": deployment.target_id,
+                "target_name": deployment.target.name,
+                "version": deployment.version,
+                "duration_seconds": deployment.duration,
+                "container_ids": deployment.container_ids,
             },
         )
 
@@ -249,16 +253,16 @@ class AuditService(BaseService):
         return self.log(
             action=AuditAction.DEPLOYMENT_FAILED,
             actor=actor,
-            resource_type='deployment',
+            resource_type="deployment",
             resource_id=deployment.id,
             resource_name=deployment.project_name,
             ip_address=ip_address,
             success=False,
             error_message=error,
             details={
-                'target_id': deployment.target_id,
-                'target_name': deployment.target.name,
-                'version': deployment.version,
+                "target_id": deployment.target_id,
+                "target_name": deployment.target.name,
+                "version": deployment.version,
             },
         )
 
@@ -272,12 +276,12 @@ class AuditService(BaseService):
         return self.log(
             action=AuditAction.CREDENTIAL_ACCESSED,
             actor=actor,
-            resource_type='credential',
+            resource_type="credential",
             resource_id=credential.id,
             resource_name=credential.name,
             ip_address=ip_address,
             details={
-                'credential_type': credential.credential_type,
+                "credential_type": credential.credential_type,
             },
         )
 
@@ -370,16 +374,16 @@ class AuditService(BaseService):
         failure_count = logs.filter(success=False).count()
 
         # Get unique actors
-        unique_actors = logs.values('actor').distinct().count()
+        unique_actors = logs.values("actor").distinct().count()
 
         return {
-            'period_hours': hours,
-            'total_events': logs.count(),
-            'success_count': success_count,
-            'failure_count': failure_count,
-            'unique_actors': unique_actors,
-            'action_counts': action_counts,
-            'generated_at': timezone.now().isoformat(),
+            "period_hours": hours,
+            "total_events": logs.count(),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "unique_actors": unique_actors,
+            "action_counts": action_counts,
+            "generated_at": timezone.now().isoformat(),
         }
 
     def cleanup_old_logs(self, retention_days: int = 90) -> int:
@@ -397,11 +401,11 @@ class AuditService(BaseService):
 
         self.log(
             action=AuditAction.TARGET_DELETED,  # Using as generic cleanup action
-            actor='system',
+            actor="system",
             details={
-                'cleanup_type': 'audit_logs',
-                'deleted_count': deleted_count,
-                'retention_days': retention_days,
+                "cleanup_type": "audit_logs",
+                "deleted_count": deleted_count,
+                "retention_days": retention_days,
             },
         )
 

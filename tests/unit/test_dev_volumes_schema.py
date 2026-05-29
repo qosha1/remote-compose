@@ -12,11 +12,7 @@ import textwrap
 import pytest
 import yaml
 
-from remote_compose.config.v2_schema import (
-    ConfigError,
-    ServiceV2,
-    parse as parse_v2,
-)
+from remote_compose.config.v2_schema import ConfigError, parse as parse_v2
 
 
 def _v2(svc_overrides: str) -> dict:
@@ -41,6 +37,7 @@ def _v2(svc_overrides: str) -> dict:
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
+
 
 class TestParse:
     def test_no_dev_volumes_field_defaults_to_empty(self):
@@ -84,6 +81,7 @@ class TestParse:
 # Validation — required fields
 # ---------------------------------------------------------------------------
 
+
 class TestRequiredFields:
     @pytest.mark.parametrize("missing", ["name", "source", "mount"])
     def test_missing_field_raises(self, missing):
@@ -112,6 +110,7 @@ class TestRequiredFields:
 # ---------------------------------------------------------------------------
 # Validation — path semantics
 # ---------------------------------------------------------------------------
+
 
 class TestPathSemantics:
     def test_absolute_source_rejected(self):
@@ -161,6 +160,7 @@ class TestPathSemantics:
 # Validation — uniqueness
 # ---------------------------------------------------------------------------
 
+
 class TestUniqueness:
     def test_duplicate_name_rejected(self):
         with pytest.raises(ConfigError, match="declared twice"):
@@ -188,6 +188,7 @@ class TestUniqueness:
 # ---------------------------------------------------------------------------
 # Distinct from `volumes:` (persistent state)
 # ---------------------------------------------------------------------------
+
 
 def test_dev_volumes_separate_from_volumes():
     """Having both fields populated is OK — they cover different mounts.

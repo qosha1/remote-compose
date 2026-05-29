@@ -42,10 +42,12 @@ class TestInstanceTypeChoice:
 
     def test_largest_task_wins_instance_choice(self):
         """One tiny task shouldn't pull instance size down; the biggest must fit."""
-        sz = auto_size([
-            EC2TaskDemand("web",   cpu_units=256,  memory_mib=512),
-            EC2TaskDemand("worker", cpu_units=4096, memory_mib=8192),
-        ])
+        sz = auto_size(
+            [
+                EC2TaskDemand("web", cpu_units=256, memory_mib=512),
+                EC2TaskDemand("worker", cpu_units=4096, memory_mib=8192),
+            ]
+        )
         assert sz.instance_type == "t3.xlarge"  # fits the 4 vCPU / 8 GiB worker
 
 
@@ -53,7 +55,9 @@ class TestAsgSizing:
     def test_summed_demand_sizes_asg(self):
         """summed 6144 CPU + 12 GiB mem with safety headroom should require multiple instances."""
         tasks = [
-            EC2TaskDemand("a", cpu_units=2048, memory_mib=4096, replicas=3),  # 6144 cpu, 12 GB total
+            EC2TaskDemand(
+                "a", cpu_units=2048, memory_mib=4096, replicas=3
+            ),  # 6144 cpu, 12 GB total
         ]
         sz = auto_size(tasks)
         # largest task = 2048/4096 → t3.medium (2 vCPU / 4 GiB)
@@ -80,7 +84,9 @@ class TestCustomLadder:
             InstanceShape("m5.large", vcpu=2, memory_gib=8),
             InstanceShape("m5.xlarge", vcpu=4, memory_gib=16),
         ]
-        sz = auto_size([EC2TaskDemand("x", cpu_units=2048, memory_mib=6144)], ladder=custom)
+        sz = auto_size(
+            [EC2TaskDemand("x", cpu_units=2048, memory_mib=6144)], ladder=custom
+        )
         assert sz.instance_type == "m5.large"
 
 

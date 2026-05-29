@@ -59,7 +59,9 @@ class ServiceConnectService(BaseService):
         Raises:
             NamespaceError: If namespace creation or lookup fails.
         """
-        sd = self.aws_factory.get_client('servicediscovery', region=region, credential=credential)
+        sd = self.aws_factory.get_client(
+            "servicediscovery", region=region, credential=credential
+        )
         ns_name = namespace_name or cluster.name
 
         # Check for existing namespace in database
@@ -84,10 +86,10 @@ class ServiceConnectService(BaseService):
             ns_model, _ = ServiceConnectNamespace.objects.update_or_create(
                 cluster=cluster,
                 defaults={
-                    'namespace_id': existing_ns['id'],
-                    'namespace_name': ns_name,
-                    'namespace_arn': existing_ns.get('arn', ''),
-                    'namespace_type': 'HTTP',
+                    "namespace_id": existing_ns["id"],
+                    "namespace_name": ns_name,
+                    "namespace_arn": existing_ns.get("arn", ""),
+                    "namespace_type": "HTTP",
                 },
             )
             self.log_info(f"Linked existing Cloud Map namespace: {ns_name}")
@@ -102,13 +104,13 @@ class ServiceConnectService(BaseService):
                 CreatorRequestId=creator_request_id,
                 Description=f"Service Connect namespace for {cluster.name}",
                 Tags=[
-                    {'Key': 'remote-compose:cluster', 'Value': cluster.name},
-                    {'Key': 'remote-compose:managed', 'Value': 'true'},
-                    {'Key': 'Name', 'Value': ns_name},
+                    {"Key": "remote-compose:cluster", "Value": cluster.name},
+                    {"Key": "remote-compose:managed", "Value": "true"},
+                    {"Key": "Name", "Value": ns_name},
                 ],
             )
 
-            operation_id = response.get('OperationId')
+            operation_id = response.get("OperationId")
             self.log_info(f"Creating namespace {ns_name} (operation {operation_id})")
 
             # Wait for the operation to complete
@@ -116,21 +118,21 @@ class ServiceConnectService(BaseService):
 
             # Fetch namespace details
             ns_details = sd.get_namespace(Id=namespace_id)
-            ns_data = ns_details.get('Namespace', {})
-            namespace_arn = ns_data.get('Arn', '')
+            ns_data = ns_details.get("Namespace", {})
+            namespace_arn = ns_data.get("Arn", "")
 
             ns_model, _ = ServiceConnectNamespace.objects.update_or_create(
                 cluster=cluster,
                 defaults={
-                    'namespace_id': namespace_id,
-                    'namespace_name': ns_name,
-                    'namespace_arn': namespace_arn,
-                    'namespace_type': 'HTTP',
+                    "namespace_id": namespace_id,
+                    "namespace_name": ns_name,
+                    "namespace_arn": namespace_arn,
+                    "namespace_type": "HTTP",
                 },
             )
 
             self.notify_observers(
-                'namespace_created',
+                "namespace_created",
                 cluster_name=cluster.name,
                 namespace_name=ns_name,
                 namespace_id=namespace_id,
@@ -172,16 +174,16 @@ class ServiceConnectService(BaseService):
         port_name = port_name or service_name
 
         return {
-            'enabled': True,
-            'namespace': namespace_name,
-            'services': [
+            "enabled": True,
+            "namespace": namespace_name,
+            "services": [
                 {
-                    'portName': port_name,
-                    'discoveryName': service_name,
-                    'clientAliases': [
+                    "portName": port_name,
+                    "discoveryName": service_name,
+                    "clientAliases": [
                         {
-                            'port': port,
-                            'dnsName': service_name,
+                            "port": port,
+                            "dnsName": service_name,
                         },
                     ],
                 },
@@ -203,23 +205,23 @@ class ServiceConnectService(BaseService):
     def _find_namespace_by_name(self, sd, name: str) -> Optional[Dict]:
         """Search for an HTTP namespace by name."""
         try:
-            paginator = sd.get_paginator('list_namespaces')
+            paginator = sd.get_paginator("list_namespaces")
 
             for page in paginator.paginate(
                 Filters=[
                     {
-                        'Name': 'TYPE',
-                        'Values': ['HTTP'],
-                        'Condition': 'EQ',
+                        "Name": "TYPE",
+                        "Values": ["HTTP"],
+                        "Condition": "EQ",
                     },
                 ],
             ):
-                for ns in page.get('Namespaces', []):
-                    if ns.get('Name') == name:
+                for ns in page.get("Namespaces", []):
+                    if ns.get("Name") == name:
                         return {
-                            'id': ns['Id'],
-                            'arn': ns.get('Arn', ''),
-                            'name': ns['Name'],
+                            "id": ns["Id"],
+                            "arn": ns.get("Arn", ""),
+                            "name": ns["Name"],
                         }
 
             return None
@@ -255,20 +257,20 @@ class ServiceConnectService(BaseService):
         while time.time() - start_time < timeout:
             try:
                 response = sd.get_operation(OperationId=operation_id)
-                operation = response.get('Operation', {})
-                status = operation.get('Status')
+                operation = response.get("Operation", {})
+                status = operation.get("Status")
 
-                if status == 'SUCCESS':
-                    targets = operation.get('Targets', {})
-                    namespace_id = targets.get('NAMESPACE')
+                if status == "SUCCESS":
+                    targets = operation.get("Targets", {})
+                    namespace_id = targets.get("NAMESPACE")
                     if namespace_id:
                         return namespace_id
                     raise NamespaceError(
                         f"Operation succeeded but no namespace ID in targets: {targets}"
                     )
 
-                elif status == 'FAIL':
-                    error_message = operation.get('ErrorMessage', 'Unknown error')
+                elif status == "FAIL":
+                    error_message = operation.get("ErrorMessage", "Unknown error")
                     raise NamespaceError(
                         f"Namespace creation operation failed: {error_message}"
                     )

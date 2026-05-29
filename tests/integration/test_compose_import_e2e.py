@@ -26,7 +26,6 @@ from remote_compose.compose_import import scaffold_rc_yml
 from remote_compose.provider.ecs import ECSProvider
 from remote_compose.terraform.runner import TerraformRunner
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -36,7 +35,9 @@ def _terraform_usable() -> bool:
     try:
         result = subprocess.run(
             ["terraform", "-version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -81,9 +82,9 @@ class TestScaffoldedRcYmlValidatesAsTerraform:
 
         # 3. Build the deploy context — the same path `rc plan` walks.
         ctx = build_deploy_context(v2, raw, rc_yml_path)
-        assert ctx.services, (
-            f"build_deploy_context produced no services for {fixture_name}"
-        )
+        assert (
+            ctx.services
+        ), f"build_deploy_context produced no services for {fixture_name}"
 
         # 4. Emit terraform.
         out_dir = tmp_path / "tf"
@@ -99,9 +100,7 @@ class TestScaffoldedRcYmlValidatesAsTerraform:
         calling scaffold_rc_yml directly. Catches CLI-layer regressions
         the unit tests miss."""
         compose_path = tmp_path / "docker-compose.yml"
-        compose_path.write_text(
-            (_FIXTURES_DIR / "minimal_3_service.yml").read_text()
-        )
+        compose_path.write_text((_FIXTURES_DIR / "minimal_3_service.yml").read_text())
 
         # Run `python3 -m remote_compose.cli compose import` as a subprocess.
         rc_yml_path = tmp_path / "rc.yml"
@@ -111,12 +110,21 @@ class TestScaffoldedRcYmlValidatesAsTerraform:
                 # interpreter pytest is running under (which has the
                 # project deps installed). 'python3' fails on systems
                 # where the system python3 lacks click/yaml.
-                sys.executable, "-m", "remote_compose.cli", "compose", "import",
-                "--from", str(compose_path),
-                "--out", str(rc_yml_path),
-                "--project", "itest",
+                sys.executable,
+                "-m",
+                "remote_compose.cli",
+                "compose",
+                "import",
+                "--from",
+                str(compose_path),
+                "--out",
+                str(rc_yml_path),
+                "--project",
+                "itest",
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         assert result.returncode == 0, (
             f"rc compose import failed:\nstdout:{result.stdout}\n"

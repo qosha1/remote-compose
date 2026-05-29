@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import time
 
 from .context import PipelineContext
-from .step import PipelineStep, StepResult
+from .step import PipelineStep
 
 
 @dataclass
@@ -70,10 +70,7 @@ class DeploymentPipeline:
     """
 
     def __init__(
-        self,
-        name: str,
-        steps: List[PipelineStep],
-        enable_rollback: bool = True
+        self, name: str, steps: List[PipelineStep], enable_rollback: bool = True
     ):
         """
         Initialize the pipeline.
@@ -125,7 +122,7 @@ class DeploymentPipeline:
         start_time = time.time()
         completed_steps: List[str] = []
 
-        self.emit_event('pipeline_started', context=context, step_count=len(self.steps))
+        self.emit_event("pipeline_started", context=context, step_count=len(self.steps))
 
         try:
             for step in self.steps:
@@ -138,26 +135,26 @@ class DeploymentPipeline:
                         # Successful but requested early stop
                         duration = time.time() - start_time
                         self.emit_event(
-                            'pipeline_stopped',
+                            "pipeline_stopped",
                             context=context,
                             reason=result.message,
-                            completed_steps=completed_steps
+                            completed_steps=completed_steps,
                         )
                         return PipelineResult(
                             success=True,
                             context=context,
                             completed_steps=completed_steps,
-                            duration_seconds=duration
+                            duration_seconds=duration,
                         )
                 else:
                     # Step failed
                     duration = time.time() - start_time
                     self.emit_event(
-                        'pipeline_failed',
+                        "pipeline_failed",
                         failed_step=step.name,
                         error=result.error,
                         context=context,
-                        completed_steps=completed_steps
+                        completed_steps=completed_steps,
                     )
 
                     # Rollback if enabled
@@ -170,29 +167,29 @@ class DeploymentPipeline:
                         completed_steps=completed_steps,
                         failed_step=step.name,
                         error=result.error,
-                        duration_seconds=duration
+                        duration_seconds=duration,
                     )
 
             # All steps completed successfully
             duration = time.time() - start_time
             self.emit_event(
-                'pipeline_completed',
+                "pipeline_completed",
                 context=context,
                 completed_steps=completed_steps,
-                duration=duration
+                duration=duration,
             )
 
             return PipelineResult(
                 success=True,
                 context=context,
                 completed_steps=completed_steps,
-                duration_seconds=duration
+                duration_seconds=duration,
             )
 
         except Exception as e:
             # Unexpected error during pipeline execution
             duration = time.time() - start_time
-            self.emit_event('pipeline_error', error=e, context=context)
+            self.emit_event("pipeline_error", error=e, context=context)
 
             if self.enable_rollback and completed_steps:
                 self._rollback(completed_steps, context)
@@ -202,7 +199,7 @@ class DeploymentPipeline:
                 context=context,
                 completed_steps=completed_steps,
                 error=e,
-                duration_seconds=duration
+                duration_seconds=duration,
             )
 
     def _rollback(self, completed_steps: List[str], context: PipelineContext) -> None:
@@ -213,24 +210,23 @@ class DeploymentPipeline:
             completed_steps: Names of steps that completed successfully
             context: Pipeline context
         """
-        self.emit_event('rollback_started', completed_steps=completed_steps)
+        self.emit_event("rollback_started", completed_steps=completed_steps)
 
         # Find steps to rollback (in reverse order)
         steps_to_rollback = [
-            step for step in reversed(self.steps)
-            if step.name in completed_steps
+            step for step in reversed(self.steps) if step.name in completed_steps
         ]
 
         for step in steps_to_rollback:
             try:
-                self.emit_event('step_cleanup_started', step=step.name)
+                self.emit_event("step_cleanup_started", step=step.name)
                 step.cleanup(context)
-                self.emit_event('step_cleanup_completed', step=step.name)
+                self.emit_event("step_cleanup_completed", step=step.name)
             except Exception as e:
-                self.emit_event('step_cleanup_failed', step=step.name, error=e)
+                self.emit_event("step_cleanup_failed", step=step.name, error=e)
                 # Continue with other cleanups even if one fails
 
-        self.emit_event('rollback_completed', steps_cleaned=len(steps_to_rollback))
+        self.emit_event("rollback_completed", steps_cleaned=len(steps_to_rollback))
 
     def dry_run(self, context: PipelineContext) -> List[str]:
         """
@@ -282,8 +278,8 @@ class PipelineBuilder:
     def add_step(
         self,
         step: PipelineStep,
-        condition: Optional[Callable[[PipelineContext], bool]] = None
-    ) -> 'PipelineBuilder':
+        condition: Optional[Callable[[PipelineContext], bool]] = None,
+    ) -> "PipelineBuilder":
         """
         Add a step to the pipeline.
 
@@ -296,16 +292,17 @@ class PipelineBuilder:
         """
         if condition:
             from .step import ConditionalStep
+
             step = ConditionalStep(step, condition)
         self.steps.append(step)
         return self
 
-    def with_rollback(self, enabled: bool) -> 'PipelineBuilder':
+    def with_rollback(self, enabled: bool) -> "PipelineBuilder":
         """Enable or disable rollback on failure."""
         self.enable_rollback = enabled
         return self
 
-    def with_event_handler(self, handler: Callable) -> 'PipelineBuilder':
+    def with_event_handler(self, handler: Callable) -> "PipelineBuilder":
         """Add an event handler."""
         self._event_handlers.append(handler)
         return self
@@ -313,9 +310,7 @@ class PipelineBuilder:
     def build(self) -> DeploymentPipeline:
         """Build and return the configured pipeline."""
         pipeline = DeploymentPipeline(
-            name=self.name,
-            steps=self.steps,
-            enable_rollback=self.enable_rollback
+            name=self.name, steps=self.steps, enable_rollback=self.enable_rollback
         )
         for handler in self._event_handlers:
             pipeline.attach_event_handler(handler)

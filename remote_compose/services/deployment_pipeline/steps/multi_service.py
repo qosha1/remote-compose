@@ -30,6 +30,7 @@ class LoadServiceConfigStep(PipelineStep):
     def execute(self, context: PipelineContext) -> StepResult:
         try:
             from pathlib import Path
+
             config_path = Path(context.service_config_path)
 
             if not config_path.exists():
@@ -38,36 +39,34 @@ class LoadServiceConfigStep(PipelineStep):
                 )
 
             config = yaml.safe_load(config_path.read_text())
-            services_config = config.get('services', {})
+            services_config = config.get("services", {})
 
             for svc_name, svc_conf in services_config.items():
                 # Resource overrides
                 context.service_resources[svc_name] = {
-                    'cpu': svc_conf.get('cpu'),
-                    'memory': svc_conf.get('memory'),
-                    'type': svc_conf.get('type', 'application'),
+                    "cpu": svc_conf.get("cpu"),
+                    "memory": svc_conf.get("memory"),
+                    "type": svc_conf.get("type", "application"),
                 }
 
                 # Desired count
-                if 'desired_count' in svc_conf:
-                    context.service_counts[svc_name] = svc_conf['desired_count']
+                if "desired_count" in svc_conf:
+                    context.service_counts[svc_name] = svc_conf["desired_count"]
 
                 # Public services
-                if svc_conf.get('public'):
+                if svc_conf.get("public"):
                     context.public_services[svc_name] = {
-                        'port': svc_conf.get('port', 80),
-                        'health_check_path': svc_conf.get('health_check_path', '/health'),
-                        'default_target': svc_conf.get('default_target', False),
+                        "port": svc_conf.get("port", 80),
+                        "health_check_path": svc_conf.get(
+                            "health_check_path", "/health"
+                        ),
+                        "default_target": svc_conf.get("default_target", False),
                     }
 
-            return StepResult.ok(
-                f"Loaded config for {len(services_config)} services"
-            )
+            return StepResult.ok(f"Loaded config for {len(services_config)} services")
 
         except Exception as e:
-            return StepResult.fail(
-                f"Failed to load service config: {e}", error=e
-            )
+            return StepResult.fail(f"Failed to load service config: {e}", error=e)
 
 
 class DetermineServiceOrderStep(PipelineStep):
@@ -90,9 +89,7 @@ class DetermineServiceOrderStep(PipelineStep):
             order = preprocessor.get_deployment_order(context.preprocessed)
             context.service_order = order
 
-            return StepResult.ok(
-                f"Deployment order: {' -> '.join(order)}"
-            )
+            return StepResult.ok(f"Deployment order: {' -> '.join(order)}")
 
         except Exception as e:
             return StepResult.fail(
@@ -137,7 +134,7 @@ class DetectSharedImagesStep(PipelineStep):
         for build_key, services in build_groups.items():
             if len(services) > 1:
                 # Mark this as a shared build - first service is the "primary"
-                context.shared_images[build_key] = ''  # URI set during build
+                context.shared_images[build_key] = ""  # URI set during build
                 shared_count += 1
 
         if shared_count > 0:
@@ -184,6 +181,7 @@ class ConvertToTaskDefinitionsStep(PipelineStep):
                 # Use update_or_create to handle re-deploys after partial failures
                 # where stale task defs with same (cluster, name, revision) exist.
                 from ....models import ECSTaskDefinition
+
                 existing = ECSTaskDefinition.objects.filter(
                     cluster=td.cluster, name=td.name, revision=td.revision
                 ).first()
@@ -191,9 +189,7 @@ class ConvertToTaskDefinitionsStep(PipelineStep):
                     td.pk = existing.pk
                 td.save()
         except Exception as e:
-            return StepResult.fail(
-                f"Task definition conversion failed: {e}", error=e
-            )
+            return StepResult.fail(f"Task definition conversion failed: {e}", error=e)
 
         for warning in converter.warnings:
             context.add_warning(warning)
@@ -205,8 +201,7 @@ class ConvertToTaskDefinitionsStep(PipelineStep):
             details.append(f"{name}(CPU:{td.cpu},Mem:{td.memory})")
 
         return StepResult.ok(
-            f"Created {len(task_defs)} task definitions: "
-            f"{', '.join(details)}"
+            f"Created {len(task_defs)} task definitions: " f"{', '.join(details)}"
         )
 
 
@@ -234,7 +229,7 @@ class RegisterTaskDefinitionsStep(PipelineStep):
                 context.task_definitions[svc_name] = registered_td
 
                 context.track_resource(
-                    resource_type='ecs_task_definition',
+                    resource_type="ecs_task_definition",
                     resource_id=registered_td.aws_task_definition_arn,
                     family=registered_td.name,
                     revision=registered_td.revision,
@@ -242,21 +237,18 @@ class RegisterTaskDefinitionsStep(PipelineStep):
                 registered += 1
 
                 self.emit_event(
-                    'task_definition_registered',
+                    "task_definition_registered",
                     service=svc_name,
                     arn=registered_td.aws_task_definition_arn,
                 )
 
             except Exception as e:
                 return StepResult.fail(
-                    f"Task definition registration failed for "
-                    f"'{svc_name}': {e}",
+                    f"Task definition registration failed for " f"'{svc_name}': {e}",
                     error=e,
                 )
 
-        return StepResult.ok(
-            f"Registered {registered} task definitions"
-        )
+        return StepResult.ok(f"Registered {registered} task definitions")
 
 
 class CreateTargetGroupsStep(PipelineStep):
@@ -289,8 +281,8 @@ class CreateTargetGroupsStep(PipelineStep):
                     cluster=context.cluster,
                     vpc_id=context.vpc_infrastructure.vpc_id,
                     service_name=svc_name,
-                    port=svc_config['port'],
-                    health_check_path=svc_config.get('health_check_path', '/health'),
+                    port=svc_config["port"],
+                    health_check_path=svc_config.get("health_check_path", "/health"),
                     region=context.cluster.aws_region,
                     credential=context.cluster.aws_credential,
                 )
@@ -298,7 +290,7 @@ class CreateTargetGroupsStep(PipelineStep):
                 context.target_groups[svc_name] = tg
 
                 # If this is the default target, create/update listener rule
-                if svc_config.get('default_target'):
+                if svc_config.get("default_target"):
                     listener_arn = (
                         context.load_balancer.https_listener_arn
                         or context.load_balancer.http_listener_arn
@@ -348,7 +340,9 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
             context.task_definitions.keys()
         )
         if context.selected_services:
-            deployment_order = [s for s in deployment_order if s in context.selected_services]
+            deployment_order = [
+                s for s in deployment_order if s in context.selected_services
+            ]
 
         created = 0
         updated = 0
@@ -369,7 +363,7 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
 
                 # Determine service type
                 svc_resources = context.service_resources.get(svc_name, {})
-                service_type = svc_resources.get('type', 'application')
+                service_type = svc_resources.get("type", "application")
 
                 # Check for existing service
                 service_model = ECSServiceModel.objects.filter(
@@ -428,15 +422,17 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
                 context.ecs_services[svc_name] = service_model
 
                 context.track_resource(
-                    resource_type='ecs_service',
+                    resource_type="ecs_service",
                     resource_id=service_model.aws_service_arn or svc_name,
                     name=service_model.name,
                 )
 
                 self.emit_event(
-                    'service_deployed',
+                    "service_deployed",
                     service=svc_name,
-                    action='created' if svc_name in self._created_services else 'updated',
+                    action=(
+                        "created" if svc_name in self._created_services else "updated"
+                    ),
                 )
 
             except Exception as e:
@@ -445,9 +441,7 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
                     error=e,
                 )
 
-        return StepResult.ok(
-            f"Services deployed: {created} created, {updated} updated"
-        )
+        return StepResult.ok(f"Services deployed: {created} created, {updated} updated")
 
     def _configure_service_connect(self, service_model, context, svc_name, task_def):
         """Configure Service Connect on a service model."""
@@ -462,11 +456,11 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
         # Set port name from container port mappings
         if task_def.container_definitions:
             container = task_def.container_definitions[0]
-            port_mappings = container.get('portMappings', [])
+            port_mappings = container.get("portMappings", [])
             if port_mappings:
-                port = port_mappings[0].get('containerPort')
+                port = port_mappings[0].get("containerPort")
                 service_model.service_connect_port_name = svc_name
-                service_model.container_name_for_lb = container['name']
+                service_model.container_name_for_lb = container["name"]
                 service_model.container_port_for_lb = port
 
     def _configure_load_balancer(self, service_model, context, svc_name, task_def):
@@ -482,11 +476,11 @@ class CreateOrUpdateMultiServiceStep(PipelineStep):
 
         if task_def.container_definitions:
             container = task_def.container_definitions[0]
-            service_model.container_name_for_lb = container['name']
-            port_mappings = container.get('portMappings', [])
+            service_model.container_name_for_lb = container["name"]
+            port_mappings = container.get("portMappings", [])
             if port_mappings:
                 service_model.container_port_for_lb = port_mappings[0].get(
-                    'containerPort'
+                    "containerPort"
                 )
 
     def cleanup(self, context: PipelineContext) -> None:
@@ -531,11 +525,11 @@ class WaitForAllServicesStableStep(PipelineStep):
 
     def execute(self, context: PipelineContext) -> StepResult:
         ecs_logic = context.services.ecs
-        deployment_order = context.service_order or list(
-            context.ecs_services.keys()
-        )
+        deployment_order = context.service_order or list(context.ecs_services.keys())
         if context.selected_services:
-            deployment_order = [s for s in deployment_order if s in context.selected_services]
+            deployment_order = [
+                s for s in deployment_order if s in context.selected_services
+            ]
 
         timeout = context.timeout
         start = time.time()
@@ -549,7 +543,7 @@ class WaitForAllServicesStableStep(PipelineStep):
             remaining = max(30, timeout - int(elapsed))
 
             self.emit_event(
-                'waiting_for_service',
+                "waiting_for_service",
                 service=svc_name,
                 remaining_timeout=remaining,
             )
@@ -562,7 +556,7 @@ class WaitForAllServicesStableStep(PipelineStep):
                 context.ecs_services[svc_name] = updated_model
 
                 self.emit_event(
-                    'service_stable',
+                    "service_stable",
                     service=svc_name,
                     running=updated_model.running_count,
                     desired=updated_model.desired_count,
@@ -576,12 +570,14 @@ class WaitForAllServicesStableStep(PipelineStep):
 
         # Build summary
         total_running = sum(
-            s.running_count for s in context.ecs_services.values()
-            if hasattr(s, 'running_count')
+            s.running_count
+            for s in context.ecs_services.values()
+            if hasattr(s, "running_count")
         )
         total_desired = sum(
-            s.desired_count for s in context.ecs_services.values()
-            if hasattr(s, 'desired_count')
+            s.desired_count
+            for s in context.ecs_services.values()
+            if hasattr(s, "desired_count")
         )
 
         elapsed = time.time() - start
@@ -609,13 +605,15 @@ class FinalizeMultiServiceDeploymentStep(PipelineStep):
         # Update deployment record
         if context.deployment and context.deployment.id:
             try:
-                context.deployment.status = 'completed'
+                context.deployment.status = "completed"
                 context.deployment.completed_at = timezone.now()
-                context.deployment.metadata.update({
-                    'services_deployed': list(context.ecs_services.keys()),
-                    'service_count': len(context.ecs_services),
-                    'deployment_order': context.service_order,
-                })
+                context.deployment.metadata.update(
+                    {
+                        "services_deployed": list(context.ecs_services.keys()),
+                        "service_count": len(context.ecs_services),
+                        "deployment_order": context.service_order,
+                    }
+                )
                 context.deployment.save()
             except Exception as e:
                 context.add_warning(f"Failed to update deployment record: {e}")
@@ -645,9 +643,7 @@ class FinalizeMultiServiceDeploymentStep(PipelineStep):
             parts.append(f"order: {' -> '.join(context.service_order)}")
 
         if context.public_services:
-            parts.append(
-                f"public: {', '.join(context.public_services.keys())}"
-            )
+            parts.append(f"public: {', '.join(context.public_services.keys())}")
 
         if context.warnings:
             parts.append(f"{len(context.warnings)} warnings")

@@ -22,17 +22,29 @@ def _svc(raw: dict) -> CopilotService:
 
 class TestCpuMemory:
     def test_cpu_and_memory_carried_through(self):
-        out, _ = translate_resources(_svc({
-            "name": "api", "cpu": 1024, "memory": 2048,
-        }))
+        out, _ = translate_resources(
+            _svc(
+                {
+                    "name": "api",
+                    "cpu": 1024,
+                    "memory": 2048,
+                }
+            )
+        )
         assert out["cpu"] == 1024
         assert out["memory"] == 2048
 
     def test_string_values_coerced_to_int(self):
         # Copilot tolerates string ints in some contexts.
-        out, _ = translate_resources(_svc({
-            "name": "api", "cpu": "512", "memory": "1024",
-        }))
+        out, _ = translate_resources(
+            _svc(
+                {
+                    "name": "api",
+                    "cpu": "512",
+                    "memory": "1024",
+                }
+            )
+        )
         assert out["cpu"] == 512
         assert out["memory"] == 1024
 
@@ -57,10 +69,14 @@ class TestCount:
     def test_count_dict_advanced_scaling_warns(self):
         # Copilot count: { range: 1-10, cpu_percentage: 70 } is autoscaling.
         # Not yet supported by our provider; emit replicas=range_min + warn.
-        out, warnings = translate_resources(_svc({
-            "name": "api",
-            "count": {"range": "2-10", "cpu_percentage": 70},
-        }))
+        out, warnings = translate_resources(
+            _svc(
+                {
+                    "name": "api",
+                    "count": {"range": "2-10", "cpu_percentage": 70},
+                }
+            )
+        )
         assert out["replicas"] == 2
         assert any("autoscaling" in w.message.lower() for w in warnings)
 

@@ -28,7 +28,10 @@ def _ctx_with_django():
         working_dir=Path("/tmp"),
         services={
             "django": ServiceSpec(
-                name="django", cpu=1024, memory=2048, type="application",
+                name="django",
+                cpu=1024,
+                memory=2048,
+                type="application",
                 build_context=Path("/tmp/django"),
             ),
         },
@@ -55,23 +58,32 @@ def stub_image_modules():
     pushed_tags = []
 
     class StubBuilder:
-        def __init__(self, **_): pass
+        def __init__(self, **_):
+            pass
+
         def build(self, spec):
             built.append(spec)
             return spec.tags
 
     class StubPusher:
-        def __init__(self, **_): pass
+        def __init__(self, **_):
+            pass
+
         def push(self, tags):
             pushed_tags.extend(tags)
 
     class StubAuth:
-        def __init__(self, **_): pass
-        def __call__(self, *_, **__): pass
+        def __init__(self, **_):
+            pass
 
-    with patch.object(_image, "ImageBuilder", StubBuilder), \
-         patch.object(_image, "ImagePusher", StubPusher), \
-         patch.object(_auth, "ECRAuthenticator", StubAuth):
+        def __call__(self, *_, **__):
+            pass
+
+    with (
+        patch.object(_image, "ImageBuilder", StubBuilder),
+        patch.object(_image, "ImagePusher", StubPusher),
+        patch.object(_auth, "ECRAuthenticator", StubAuth),
+    ):
         yield built, pushed_tags
 
 
@@ -79,15 +91,18 @@ def stub_image_modules():
 # Tag exists -> skip build, re-tag in ECR
 # ---------------------------------------------------------------------------
 
+
 class TestTagExistsSkipsBuild:
     def test_existing_tag_skips_docker_and_retags(self, stub_image_modules):
         built, pushed = stub_image_modules
         provider = ECSProvider()
         ecr = MagicMock()
         ecr.batch_get_image.return_value = {
-            "images": [{
-                "imageManifest": '{"schemaVersion":2,"mediaType":"x"}',
-            }]
+            "images": [
+                {
+                    "imageManifest": '{"schemaVersion":2,"mediaType":"x"}',
+                }
+            ]
         }
         session = MagicMock()
         session.client.return_value = ecr
@@ -95,7 +110,9 @@ class TestTagExistsSkipsBuild:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             pushed_services = provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
                 requested_tag="v1.2",
             )
 
@@ -119,9 +136,7 @@ class TestTagExistsSkipsBuild:
         built, pushed = stub_image_modules
         provider = ECSProvider()
         ecr = MagicMock()
-        ecr.batch_get_image.return_value = {
-            "images": [{"imageManifest": '{"x":1}'}]
-        }
+        ecr.batch_get_image.return_value = {"images": [{"imageManifest": '{"x":1}'}]}
         ecr.put_image.side_effect = Exception(
             "An error occurred (ImageAlreadyExistsException) ..."
         )
@@ -131,7 +146,9 @@ class TestTagExistsSkipsBuild:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             pushed_services = provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
                 requested_tag="v1.2",
             )
 
@@ -142,6 +159,7 @@ class TestTagExistsSkipsBuild:
 # ---------------------------------------------------------------------------
 # Tag doesn't exist -> normal build with both tags
 # ---------------------------------------------------------------------------
+
 
 class TestTagMissingFallsThroughToBuild:
     def test_missing_tag_builds_with_both_tags(self, stub_image_modules):
@@ -155,7 +173,9 @@ class TestTagMissingFallsThroughToBuild:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             pushed_services = provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
                 requested_tag="v1.2",
             )
 
@@ -174,6 +194,7 @@ class TestTagMissingFallsThroughToBuild:
 # No --tag at all -> backward compat (build :latest, no ECR pre-check)
 # ---------------------------------------------------------------------------
 
+
 class TestNoTagBackwardCompat:
     def test_no_tag_skips_ecr_check_entirely(self, stub_image_modules):
         built, pushed = stub_image_modules
@@ -186,7 +207,9 @@ class TestNoTagBackwardCompat:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             pushed_services = provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
             )  # requested_tag not passed
 
         assert pushed_services == ["django"]
@@ -210,7 +233,9 @@ class TestNoTagBackwardCompat:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
                 requested_tag="latest",
             )
 
@@ -221,6 +246,7 @@ class TestNoTagBackwardCompat:
 # ---------------------------------------------------------------------------
 # ECR errors propagate (don't silently mask perms problems)
 # ---------------------------------------------------------------------------
+
 
 class TestEcrErrorPropagation:
     def test_image_not_found_falls_through_to_build(self, stub_image_modules):
@@ -235,7 +261,9 @@ class TestEcrErrorPropagation:
         with patch.object(provider, "session_factory", lambda c: session):
             warnings: list = []
             provider._build_and_push_images(
-                _ctx_with_django(), _OUTPUTS, warnings,
+                _ctx_with_django(),
+                _OUTPUTS,
+                warnings,
                 requested_tag="newtag",
             )
 

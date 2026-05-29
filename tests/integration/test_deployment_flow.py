@@ -3,7 +3,7 @@ Integration tests for the deployment flow.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import tempfile
 import os
 
@@ -13,14 +13,9 @@ from remote_compose.services import (
     DeploymentService,
     CredentialService,
 )
-
+from remote_compose.models import DeploymentTarget, Deployment
 
 pytestmark = pytest.mark.integration
-from remote_compose.models import (
-    DeploymentTarget,
-    DockerContext,
-    Deployment,
-)
 
 
 @pytest.mark.django_db
@@ -38,7 +33,7 @@ services:
     ports:
       - "8080:80"
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write(content)
             path = f.name
 
@@ -49,15 +44,15 @@ services:
     @pytest.fixture
     def mock_ssh(self, mocker):
         """Mock SSH client for all tests."""
-        mock = mocker.patch('remote_compose.services.target_service.SSHClient')
+        mock = mocker.patch("remote_compose.services.target_service.SSHClient")
         instance = mock.return_value
-        instance.test_connection.return_value = (True, 'Success')
+        instance.test_connection.return_value = (True, "Success")
         instance.__enter__ = lambda s: s
         instance.__exit__ = lambda s, *args: None
         instance.execute.return_value = MagicMock(
             success=True,
-            stdout='Container started\nabc123',
-            stderr='',
+            stdout="Container started\nabc123",
+            stderr="",
             exit_code=0,
         )
         instance.upload_content.return_value = True
@@ -76,9 +71,9 @@ services:
 
         # 2. Create a target
         target = target_service.create_target(
-            name='integration-test-target',
-            host='192.168.1.100',
-            username='ubuntu',
+            name="integration-test-target",
+            host="192.168.1.100",
+            username="ubuntu",
             validate_connection=True,
         )
 
@@ -87,7 +82,7 @@ services:
 
         # 3. Create a context
         context = context_service.create_context(
-            name='integration-test-context',
+            name="integration-test-context",
             target=target,
             sync_to_docker=False,  # Don't sync to Docker daemon in tests
         )
@@ -99,16 +94,16 @@ services:
         deployment = deployment_service.deploy(
             target=target,
             compose_file_path=compose_file,
-            project_name='integration-test',
-            version='v1.0.0',
-            deployed_by='test-user',
+            project_name="integration-test",
+            version="v1.0.0",
+            deployed_by="test-user",
             context=context,
         )
 
         assert deployment.id is not None
         assert deployment.status == Deployment.Status.SUCCESS
         assert deployment.duration is not None
-        assert deployment.deployed_by == 'test-user'
+        assert deployment.deployed_by == "test-user"
 
         # 5. Verify deployment logs were created
         assert deployment.logs.count() > 0
@@ -123,24 +118,24 @@ services:
         )
 
         target = target_service.create_target(
-            name='env-test-target',
-            host='192.168.1.100',
+            name="env-test-target",
+            host="192.168.1.100",
             validate_connection=True,
         )
 
         deployment = deployment_service.deploy(
             target=target,
             compose_file_path=compose_file,
-            project_name='env-test',
+            project_name="env-test",
             environment={
-                'DB_HOST': 'localhost',
-                'DEBUG': 'false',
+                "DB_HOST": "localhost",
+                "DEBUG": "false",
             },
         )
 
         assert deployment.status == Deployment.Status.SUCCESS
-        assert deployment.environment['DB_HOST'] == 'localhost'
-        assert deployment.environment['DEBUG'] == 'false'
+        assert deployment.environment["DB_HOST"] == "localhost"
+        assert deployment.environment["DEBUG"] == "false"
 
     def test_deployment_rollback(self, compose_file, mock_ssh):
         """Test deployment rollback."""
@@ -148,8 +143,8 @@ services:
         deployment_service = DeploymentService(target_service=target_service)
 
         target = target_service.create_target(
-            name='rollback-test-target',
-            host='192.168.1.100',
+            name="rollback-test-target",
+            host="192.168.1.100",
             validate_connection=True,
         )
 
@@ -157,8 +152,8 @@ services:
         v1_deployment = deployment_service.deploy(
             target=target,
             compose_file_path=compose_file,
-            project_name='rollback-test',
-            version='v1.0.0',
+            project_name="rollback-test",
+            version="v1.0.0",
         )
 
         assert v1_deployment.status == Deployment.Status.SUCCESS
@@ -167,8 +162,8 @@ services:
         v2_deployment = deployment_service.deploy(
             target=target,
             compose_file_path=compose_file,
-            project_name='rollback-test',
-            version='v2.0.0',
+            project_name="rollback-test",
+            version="v2.0.0",
         )
 
         assert v2_deployment.status == Deployment.Status.SUCCESS
@@ -190,8 +185,8 @@ services:
         deployment_service = DeploymentService(target_service=target_service)
 
         target = target_service.create_target(
-            name='list-test-target',
-            host='192.168.1.100',
+            name="list-test-target",
+            host="192.168.1.100",
             validate_connection=True,
         )
 
@@ -200,14 +195,14 @@ services:
             deployment_service.deploy(
                 target=target,
                 compose_file_path=compose_file,
-                project_name='list-test',
-                version=f'v{i}.0.0',
+                project_name="list-test",
+                version=f"v{i}.0.0",
             )
 
         # List all deployments for this target
         deployments = deployment_service.list_deployments(
             target=target,
-            project_name='list-test',
+            project_name="list-test",
         )
 
         assert len(deployments) == 3
@@ -227,9 +222,9 @@ class TestTargetContextIntegration:
     @pytest.fixture
     def mock_ssh(self, mocker):
         """Mock SSH client."""
-        mock = mocker.patch('remote_compose.services.target_service.SSHClient')
+        mock = mocker.patch("remote_compose.services.target_service.SSHClient")
         instance = mock.return_value
-        instance.test_connection.return_value = (True, 'Success')
+        instance.test_connection.return_value = (True, "Success")
         return mock
 
     def test_get_or_create_context(self, mock_ssh):
@@ -238,8 +233,8 @@ class TestTargetContextIntegration:
         context_service = ContextService(target_service=target_service)
 
         target = target_service.create_target(
-            name='auto-context-target',
-            host='192.168.1.100',
+            name="auto-context-target",
+            host="192.168.1.100",
             validate_connection=True,
         )
 
@@ -260,19 +255,19 @@ class TestTargetContextIntegration:
         context_service = ContextService(target_service=target_service)
 
         target = target_service.create_target(
-            name='multi-context-target',
-            host='192.168.1.100',
+            name="multi-context-target",
+            host="192.168.1.100",
             validate_connection=True,
         )
 
         context1 = context_service.create_context(
-            name='context-dev',
+            name="context-dev",
             target=target,
             sync_to_docker=False,
         )
 
         context2 = context_service.create_context(
-            name='context-staging',
+            name="context-staging",
             target=target,
             sync_to_docker=False,
         )

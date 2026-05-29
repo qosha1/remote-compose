@@ -18,9 +18,7 @@ import pytest
 from moto import mock_aws
 
 from remote_compose.v1_migrate.apply import ServicesCutoverPhase
-from remote_compose.v1_migrate.discover import V1Stack, ResourceInventory
 from remote_compose.v1_migrate.plan import build_plan
-
 
 pytestmark = pytest.mark.integration
 
@@ -37,18 +35,20 @@ def _v1_task_def_input(family: str, image: str) -> dict:
         "requiresCompatibilities": ["FARGATE"],
         "cpu": "1024",
         "memory": "2048",
-        "containerDefinitions": [{
-            "name": family.split("-")[-1],
-            "image": image,
-            "essential": True,
-            "environment": [
-                {"name": "DEBUG", "value": "False"},
-                # v1 envfile-injected (real secret leaked into env):
-                {"name": "POSTGRES_PASSWORD", "value": "leaked-real-secret"},
-                {"name": "SECRET_KEY", "value": "leaked-real-django-key"},
-            ],
-            "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
-        }],
+        "containerDefinitions": [
+            {
+                "name": family.split("-")[-1],
+                "image": image,
+                "essential": True,
+                "environment": [
+                    {"name": "DEBUG", "value": "False"},
+                    # v1 envfile-injected (real secret leaked into env):
+                    {"name": "POSTGRES_PASSWORD", "value": "leaked-real-secret"},
+                    {"name": "SECRET_KEY", "value": "leaked-real-django-key"},
+                ],
+                "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
+            }
+        ],
     }
 
 
@@ -59,17 +59,23 @@ def sandbox_ecs():
         sess = boto3.Session(region_name="us-west-2")
         ec2 = sess.client("ec2")
         vpc = ec2.create_vpc(CidrBlock="10.42.0.0/16")["Vpc"]
-        ec2.create_tags(Resources=[vpc["VpcId"]], Tags=[
-            {"Key": "remote-compose:cluster", "Value": "migrate-test-cluster"},
-            {"Key": "remote-compose:managed", "Value": "true"},
-        ])
+        ec2.create_tags(
+            Resources=[vpc["VpcId"]],
+            Tags=[
+                {"Key": "remote-compose:cluster", "Value": "migrate-test-cluster"},
+                {"Key": "remote-compose:managed", "Value": "true"},
+            ],
+        )
         subnet = ec2.create_subnet(
-            VpcId=vpc["VpcId"], CidrBlock="10.42.1.0/24",
+            VpcId=vpc["VpcId"],
+            CidrBlock="10.42.1.0/24",
             AvailabilityZone="us-west-2a",
         )["Subnet"]
 
         sg_pre = ec2.create_security_group(
-            GroupName="task-sg", Description="x", VpcId=vpc["VpcId"],
+            GroupName="task-sg",
+            Description="x",
+            VpcId=vpc["VpcId"],
         )
         ecs = sess.client("ecs")
         ecs.create_cluster(clusterName="migrate-test-cluster")
@@ -110,10 +116,13 @@ def sandbox_ecs():
         # Stand up the rest of the resources discover() expects.
         elbv2 = sess.client("elbv2")
         sg = ec2.create_security_group(
-            GroupName="x", Description="x", VpcId=vpc["VpcId"],
+            GroupName="x",
+            Description="x",
+            VpcId=vpc["VpcId"],
         )
         subnet_b = ec2.create_subnet(
-            VpcId=vpc["VpcId"], CidrBlock="10.42.2.0/24",
+            VpcId=vpc["VpcId"],
+            CidrBlock="10.42.2.0/24",
             AvailabilityZone="us-west-2b",
         )["Subnet"]
         elbv2.create_load_balancer(
@@ -165,6 +174,7 @@ class TestCutoverAgainstMoto:
 
         # Discover + plan.
         from remote_compose.v1_migrate.discover import discover
+
         stack, inv = discover(
             rc_v1_yml_path=sandbox_ecs["rc_yml"],
             aws_session=sess,
@@ -181,14 +191,13 @@ class TestCutoverAgainstMoto:
                 taskDefinition=f"migrate-test-{s}",
             )["taskDefinition"]
             env_names = {
-                e["name"] for e in td["containerDefinitions"][0]
-                .get("environment", [])
+                e["name"] for e in td["containerDefinitions"][0].get("environment", [])
             }
             assert "POSTGRES_PASSWORD" in env_names
             secret_block = td["containerDefinitions"][0].get("secrets", [])
-            assert secret_block == [], (
-                f"v1 fixture should have no secrets[] block; got {secret_block}"
-            )
+            assert (
+                secret_block == []
+            ), f"v1 fixture should have no secrets[] block; got {secret_block}"
 
         # Run the cutover.
         result = ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
@@ -199,12 +208,13 @@ class TestCutoverAgainstMoto:
         for s in sandbox_ecs["services"]:
             svc_name = f"migrate-test-{s}"
             desc = ecs.describe_services(
-                cluster=cluster, services=[svc_name],
+                cluster=cluster,
+                services=[svc_name],
             )
             current_td_arn = desc["services"][0]["taskDefinition"]
-            assert current_td_arn.endswith(":2"), (
-                f"expected revision 2, got {current_td_arn}"
-            )
+            assert current_td_arn.endswith(
+                ":2"
+            ), f"expected revision 2, got {current_td_arn}"
             td = ecs.describe_task_definition(
                 taskDefinition=current_td_arn,
             )["taskDefinition"]
@@ -213,9 +223,7 @@ class TestCutoverAgainstMoto:
             assert "POSTGRES_PASSWORD" in secret_names
             assert "SECRET_KEY" in secret_names
             for sec in c0["secrets"]:
-                assert sec["valueFrom"].startswith(
-                    "arn:aws:secretsmanager:"
-                )
+                assert sec["valueFrom"].startswith("arn:aws:secretsmanager:")
             # env collision dropped:
             env_names = {e["name"] for e in c0.get("environment", [])}
             assert "POSTGRES_PASSWORD" not in env_names
@@ -238,10 +246,12 @@ class TestCutoverAgainstMoto:
             SecretId="migrate-test/POSTGRES_PASSWORD",
         )["SecretString"]
         fs_id_before = efs.describe_file_systems()["FileSystems"][0]["FileSystemId"]
-        alb_arn_before = elbv2.describe_load_balancers()[
-            "LoadBalancers"][0]["LoadBalancerArn"]
+        alb_arn_before = elbv2.describe_load_balancers()["LoadBalancers"][0][
+            "LoadBalancerArn"
+        ]
 
         from remote_compose.v1_migrate.discover import discover
+
         stack, inv = discover(
             rc_v1_yml_path=sandbox_ecs["rc_yml"],
             aws_session=sess,
@@ -250,10 +260,17 @@ class TestCutoverAgainstMoto:
         ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
 
         # All three resources exactly as before.
-        assert sm.get_secret_value(
-            SecretId="migrate-test/POSTGRES_PASSWORD",
-        )["SecretString"] == sm_pg_before
-        assert efs.describe_file_systems()[
-            "FileSystems"][0]["FileSystemId"] == fs_id_before
-        assert elbv2.describe_load_balancers()[
-            "LoadBalancers"][0]["LoadBalancerArn"] == alb_arn_before
+        assert (
+            sm.get_secret_value(
+                SecretId="migrate-test/POSTGRES_PASSWORD",
+            )["SecretString"]
+            == sm_pg_before
+        )
+        assert (
+            efs.describe_file_systems()["FileSystems"][0]["FileSystemId"]
+            == fs_id_before
+        )
+        assert (
+            elbv2.describe_load_balancers()["LoadBalancers"][0]["LoadBalancerArn"]
+            == alb_arn_before
+        )

@@ -12,12 +12,9 @@ from django.utils import timezone
 from django.db.models import QuerySet
 
 from ..models import Deployment, DeploymentTarget, DeploymentLog
-from ..conf import get_setting
-from ..exceptions import ValidationError
 from .base import BaseService
 from .target_service import TargetService
 from .compose_service import ComposeService
-
 
 logger = logging.getLogger(__name__)
 
@@ -25,29 +22,31 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HealthCheckResult:
     """Result of a health check."""
+
     healthy: bool
     target_name: str
     deployment_id: Optional[int] = None
     project_name: Optional[str] = None
-    message: str = ''
+    message: str = ""
     details: Optional[Dict[str, Any]] = None
     checked_at: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
-            'healthy': self.healthy,
-            'target_name': self.target_name,
-            'deployment_id': self.deployment_id,
-            'project_name': self.project_name,
-            'message': self.message,
-            'details': self.details or {},
-            'checked_at': self.checked_at or timezone.now().isoformat(),
+            "healthy": self.healthy,
+            "target_name": self.target_name,
+            "deployment_id": self.deployment_id,
+            "project_name": self.project_name,
+            "message": self.message,
+            "details": self.details or {},
+            "checked_at": self.checked_at or timezone.now().isoformat(),
         }
 
 
 @dataclass
 class HealthReport:
     """Aggregated health report."""
+
     total_checked: int
     healthy_count: int
     unhealthy_count: int
@@ -60,12 +59,12 @@ class HealthReport:
 
     def to_dict(self) -> dict:
         return {
-            'overall_healthy': self.overall_healthy,
-            'total_checked': self.total_checked,
-            'healthy_count': self.healthy_count,
-            'unhealthy_count': self.unhealthy_count,
-            'results': [r.to_dict() for r in self.results],
-            'generated_at': self.generated_at,
+            "overall_healthy": self.overall_healthy,
+            "total_checked": self.total_checked,
+            "healthy_count": self.healthy_count,
+            "unhealthy_count": self.unhealthy_count,
+            "results": [r.to_dict() for r in self.results],
+            "generated_at": self.generated_at,
         }
 
 
@@ -78,7 +77,7 @@ class HealthService(BaseService):
         self,
         target_service: Optional[TargetService] = None,
         compose_service: Optional[ComposeService] = None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.target_service = target_service or TargetService()
@@ -111,10 +110,14 @@ class HealthService(BaseService):
                 target_name=target.name,
                 message=message,
                 details={
-                    'host': target.host,
-                    'port': target.port,
-                    'health_status': target.health_status,
-                    'last_health_check': target.last_health_check.isoformat() if target.last_health_check else None,
+                    "host": target.host,
+                    "port": target.port,
+                    "health_status": target.health_status,
+                    "last_health_check": (
+                        target.last_health_check.isoformat()
+                        if target.last_health_check
+                        else None
+                    ),
                 },
             )
 
@@ -185,7 +188,7 @@ class HealthService(BaseService):
                 # Get service status
                 service_status = self.compose_service.get_service_status(
                     ssh_client=ssh_client,
-                    compose_path=f'/tmp/remote-compose/{deployment.project_name}/docker-compose.yml',
+                    compose_path=f"/tmp/remote-compose/{deployment.project_name}/docker-compose.yml",
                     project_name=deployment.project_name,
                 )
 
@@ -194,16 +197,20 @@ class HealthService(BaseService):
                 service_details = {}
 
                 for name, info in service_status.items():
-                    state = info.get('state', '').lower()
-                    is_running = state in ('running', 'up')
+                    state = info.get("state", "").lower()
+                    is_running = state in ("running", "up")
                     service_details[name] = {
-                        'state': state,
-                        'healthy': is_running,
+                        "state": state,
+                        "healthy": is_running,
                     }
                     if not is_running:
                         all_running = False
 
-                message = "All services running" if all_running else "Some services not running"
+                message = (
+                    "All services running"
+                    if all_running
+                    else "Some services not running"
+                )
 
                 return HealthCheckResult(
                     healthy=all_running,
@@ -212,8 +219,8 @@ class HealthService(BaseService):
                     project_name=deployment.project_name,
                     message=message,
                     details={
-                        'services': service_details,
-                        'container_ids': deployment.container_ids,
+                        "services": service_details,
+                        "container_ids": deployment.container_ids,
                     },
                 )
 
@@ -251,7 +258,7 @@ class HealthService(BaseService):
 
         # Get only the latest deployment per project/target combination
         latest_deployments = {}
-        for deployment in deployments.order_by('-completed_at'):
+        for deployment in deployments.order_by("-completed_at"):
             key = (deployment.target_id, deployment.project_name)
             if key not in latest_deployments:
                 latest_deployments[key] = deployment
@@ -292,7 +299,7 @@ class HealthService(BaseService):
         return Deployment.objects.filter(
             status=Deployment.Status.RUNNING,
             started_at__lt=cutoff_time,
-        ).select_related('target')
+        ).select_related("target")
 
     def get_health_history(
         self,
@@ -315,17 +322,19 @@ class HealthService(BaseService):
         logs = DeploymentLog.objects.filter(
             deployment__target=target,
             created_at__gte=cutoff_time,
-            message__icontains='health',
-        ).order_by('-created_at')[:100]
+            message__icontains="health",
+        ).order_by("-created_at")[:100]
 
         history = []
         for log in logs:
-            history.append({
-                'timestamp': log.created_at.isoformat(),
-                'deployment_id': log.deployment_id,
-                'message': log.message,
-                'level': log.level,
-            })
+            history.append(
+                {
+                    "timestamp": log.created_at.isoformat(),
+                    "deployment_id": log.deployment_id,
+                    "message": log.message,
+                    "level": log.level,
+                }
+            )
 
         return history
 
@@ -374,12 +383,16 @@ class HealthService(BaseService):
                     target_name=deployment.target.name,
                     deployment_id=deployment.id,
                     project_name=deployment.project_name,
-                    message="Custom health check passed" if healthy else "Custom health check failed",
+                    message=(
+                        "Custom health check passed"
+                        if healthy
+                        else "Custom health check failed"
+                    ),
                     details={
-                        'command': command,
-                        'exit_code': result.exit_code,
-                        'stdout': result.stdout[:500],  # Truncate
-                        'expected_exit_code': expected_exit_code,
+                        "command": command,
+                        "exit_code": result.exit_code,
+                        "stdout": result.stdout[:500],  # Truncate
+                        "expected_exit_code": expected_exit_code,
                     },
                 )
 
@@ -400,26 +413,40 @@ class HealthService(BaseService):
         """
         # Allowed command prefixes for health checks
         allowed_prefixes = (
-            'docker ps',
-            'docker inspect',
-            'docker compose ps',
-            'docker compose top',
-            'curl ',
-            'wget ',
-            'nc ',
-            'cat /proc/',
-            'echo ',
-            'test ',
-            'true',
-            'false',
+            "docker ps",
+            "docker inspect",
+            "docker compose ps",
+            "docker compose top",
+            "curl ",
+            "wget ",
+            "nc ",
+            "cat /proc/",
+            "echo ",
+            "test ",
+            "true",
+            "false",
         )
 
         # Dangerous patterns to block
         dangerous_patterns = (
-            ';', '&&', '||', '|', '`', '$(',
-            'rm ', 'mv ', 'cp ', 'chmod ', 'chown ',
-            'kill ', 'pkill ', 'shutdown ', 'reboot ',
-            '>', '>>', '<',
+            ";",
+            "&&",
+            "||",
+            "|",
+            "`",
+            "$(",
+            "rm ",
+            "mv ",
+            "cp ",
+            "chmod ",
+            "chown ",
+            "kill ",
+            "pkill ",
+            "shutdown ",
+            "reboot ",
+            ">",
+            ">>",
+            "<",
         )
 
         command_lower = command.lower().strip()

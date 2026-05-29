@@ -18,7 +18,6 @@ the prod dry-run output is also trustworthy.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import boto3
 import pytest
@@ -31,13 +30,13 @@ from remote_compose.v1_migrate.apply import (
 from remote_compose.v1_migrate.discover import discover
 from remote_compose.v1_migrate.plan import build_plan
 
-
 pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------
 # Sandbox v1 stack fixture (moto)
 # ---------------------------------------------------------------------
+
 
 @pytest.fixture
 def sandbox_v1_stack(tmp_path):
@@ -49,20 +48,27 @@ def sandbox_v1_stack(tmp_path):
         # VPC + subnets
         ec2 = sess.client("ec2")
         vpc = ec2.create_vpc(CidrBlock="10.99.0.0/16")["Vpc"]
-        ec2.create_tags(Resources=[vpc["VpcId"]], Tags=[
-            {"Key": "remote-compose:managed", "Value": "true"},
-            {"Key": "remote-compose:cluster", "Value": "migrate-test-cluster"},
-        ])
+        ec2.create_tags(
+            Resources=[vpc["VpcId"]],
+            Tags=[
+                {"Key": "remote-compose:managed", "Value": "true"},
+                {"Key": "remote-compose:cluster", "Value": "migrate-test-cluster"},
+            ],
+        )
         subnet_a = ec2.create_subnet(
-            VpcId=vpc["VpcId"], CidrBlock="10.99.1.0/24",
+            VpcId=vpc["VpcId"],
+            CidrBlock="10.99.1.0/24",
             AvailabilityZone=f"{region}a",
         )["Subnet"]
         subnet_b = ec2.create_subnet(
-            VpcId=vpc["VpcId"], CidrBlock="10.99.2.0/24",
+            VpcId=vpc["VpcId"],
+            CidrBlock="10.99.2.0/24",
             AvailabilityZone=f"{region}b",
         )["Subnet"]
         sg = ec2.create_security_group(
-            GroupName="migrate-test-sg", Description="x", VpcId=vpc["VpcId"],
+            GroupName="migrate-test-sg",
+            Description="x",
+            VpcId=vpc["VpcId"],
         )
 
         # ECS cluster
@@ -88,12 +94,16 @@ def sandbox_v1_stack(tmp_path):
             Type="application",
         )["LoadBalancers"][0]
         tg = elbv2.create_target_group(
-            Name="migrate-test-tg", Protocol="HTTP", Port=80,
-            VpcId=vpc["VpcId"], TargetType="ip",
+            Name="migrate-test-tg",
+            Protocol="HTTP",
+            Port=80,
+            VpcId=vpc["VpcId"],
+            TargetType="ip",
         )["TargetGroups"][0]
-        listener = elbv2.create_listener(
+        elbv2.create_listener(
             LoadBalancerArn=alb["LoadBalancerArn"],
-            Protocol="HTTP", Port=80,
+            Protocol="HTTP",
+            Port=80,
             DefaultActions=[
                 {"Type": "forward", "TargetGroupArn": tg["TargetGroupArn"]},
             ],
@@ -153,6 +163,7 @@ def sandbox_v1_stack(tmp_path):
 # (a) discover + build_plan against moto sandbox
 # ---------------------------------------------------------------------
 
+
 class TestDiscoverAgainstSandbox:
     def test_discover_picks_up_efs_and_alb(self, sandbox_v1_stack):
         stack, inv = discover(
@@ -176,10 +187,9 @@ class TestDiscoverAgainstSandbox:
 # (b) Dry-run terraform plan must show ZERO destroys
 # ---------------------------------------------------------------------
 
+
 class TestDryRunNoDestroys:
-    def test_emit_then_plan_shows_only_imports(
-        self, sandbox_v1_stack, tmp_path
-    ):
+    def test_emit_then_plan_shows_only_imports(self, sandbox_v1_stack, tmp_path):
         stack, inv = discover(
             rc_v1_yml_path=sandbox_v1_stack["rc_yml"],
             aws_session=sandbox_v1_stack["session"],
@@ -192,6 +202,7 @@ class TestDryRunNoDestroys:
         # Need a terraform binary on PATH to plan. Skip if not present —
         # this is the integration-tier contract; lower tiers are unit tests.
         import shutil
+
         if not shutil.which("terraform"):
             pytest.skip("terraform binary not on PATH")
 
@@ -215,6 +226,6 @@ class TestDryRunNoDestroys:
         # from 4.1 alone.
         out = result.details.lower()
         assert "- destroy" not in out, f"plan output contains '- destroy': {out}"
-        assert "will be destroyed" not in out, (
-            f"plan output contains 'will be destroyed': {out}"
-        )
+        assert (
+            "will be destroyed" not in out
+        ), f"plan output contains 'will be destroyed': {out}"

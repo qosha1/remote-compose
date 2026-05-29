@@ -23,7 +23,6 @@ from remote_compose.copilot.translate import (
     compose_app,
 )
 
-
 CORPUS = Path(__file__).parent.parent.parent / "fixtures" / "copilot"
 
 
@@ -98,7 +97,9 @@ class TestRcYmlServices:
         # intentionally skipped (not lost to a parser bug).
         assert "site" in (result.rc_yml.get("compose") or {}).get("exclude", [])
         # An UnsupportedServiceTypeWarning is captured.
-        assert any(isinstance(w, UnsupportedServiceTypeWarning) for w in result.warnings)
+        assert any(
+            isinstance(w, UnsupportedServiceTypeWarning) for w in result.warnings
+        )
 
 
 class TestComposeFile:
@@ -177,16 +178,21 @@ class TestSummary:
             "name: site2\ntype: Static Site\n"
         )
         result = compose_app(discover(tmp_path), project="m")
-        assert "Unsupported service type" in result.summary or \
-               "UnsupportedServiceType" in result.summary
+        assert (
+            "Unsupported service type" in result.summary
+            or "UnsupportedServiceType" in result.summary
+        )
 
 
 class TestCorpusGenerality:
-    @pytest.mark.parametrize("fixture,subdir", [
-        ("sentinal", ""),
-        ("external-shanikaediriweera", ""),
-        ("aws-cli-app-with-domain", "copilot"),
-    ])
+    @pytest.mark.parametrize(
+        "fixture,subdir",
+        [
+            ("sentinal", ""),
+            ("external-shanikaediriweera", ""),
+            ("aws-cli-app-with-domain", "copilot"),
+        ],
+    )
     def test_corpus_app_composes_without_crash(self, fixture, subdir):
         path = CORPUS / fixture
         if subdir:

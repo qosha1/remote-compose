@@ -14,7 +14,7 @@ import json
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -81,6 +81,7 @@ class TerraformRunner:
 
     def init(self, backend: bool = True, upgrade: bool = False) -> None:
         from ..heartbeat import heartbeat
+
         args = ["init", "-input=false"]
         if not backend:
             args.append("-backend=false")
@@ -94,6 +95,7 @@ class TerraformRunner:
 
     def plan(self, out_file: Optional[Path] = None) -> PlanSummary:
         from ..heartbeat import heartbeat
+
         args = ["plan", "-input=false", "-no-color"]
         if out_file:
             args += ["-out", str(out_file)]
@@ -101,8 +103,11 @@ class TerraformRunner:
             stdout = self._run(args)
         return _parse_plan_summary(stdout)
 
-    def apply(self, plan_file: Optional[Path] = None, auto_approve: bool = True) -> None:
+    def apply(
+        self, plan_file: Optional[Path] = None, auto_approve: bool = True
+    ) -> None:
         from ..heartbeat import heartbeat
+
         args = ["apply", "-input=false", "-no-color"]
         if auto_approve and plan_file is None:
             args.append("-auto-approve")
@@ -113,6 +118,7 @@ class TerraformRunner:
 
     def destroy(self, auto_approve: bool = True) -> None:
         from ..heartbeat import heartbeat
+
         args = ["destroy", "-input=false", "-no-color"]
         if auto_approve:
             args.append("-auto-approve")

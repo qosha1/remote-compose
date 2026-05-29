@@ -15,7 +15,6 @@ import pytest
 
 from remote_compose.terraform.runner import TerraformRunner, TerraformError
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -35,7 +34,9 @@ def _terraform_usable() -> bool:
     try:
         result = subprocess.run(
             ["terraform", "-version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -52,18 +53,18 @@ requires_terraform = pytest.mark.skipif(
 def hcl_valid(tmp_path):
     """A minimal provider-less terraform module that validates cleanly."""
     (tmp_path / "main.tf").write_text(
-        'terraform {\n'
+        "terraform {\n"
         '  required_version = ">= 1.0"\n'
-        '}\n'
-        '\n'
+        "}\n"
+        "\n"
         'variable "name" {\n'
-        '  type    = string\n'
+        "  type    = string\n"
         '  default = "test"\n'
-        '}\n'
-        '\n'
+        "}\n"
+        "\n"
         'output "name" {\n'
-        '  value = var.name\n'
-        '}\n'
+        "  value = var.name\n"
+        "}\n"
     )
     return tmp_path
 
@@ -72,9 +73,7 @@ def hcl_valid(tmp_path):
 def hcl_invalid(tmp_path):
     """HCL that parses but fails validation."""
     (tmp_path / "main.tf").write_text(
-        'variable "bad" {\n'
-        '  type = some_nonexistent_type\n'
-        '}\n'
+        'variable "bad" {\n' "  type = some_nonexistent_type\n" "}\n"
     )
     return tmp_path
 
@@ -106,9 +105,9 @@ class TestTerraformRunnerAgainstRealBinary:
         events: list[str] = []
         runner = TerraformRunner(hcl_valid, progress=events.append)
         runner.init(backend=False)
-        assert any("terraform init" in e or "Initializing" in e for e in events), (
-            f"progress callback received no init-related lines: {events[:5]}"
-        )
+        assert any(
+            "terraform init" in e or "Initializing" in e for e in events
+        ), f"progress callback received no init-related lines: {events[:5]}"
 
 
 @pytest.fixture
@@ -121,13 +120,13 @@ def hcl_with_terraform_data(tmp_path):
     input — perfect for this since no provider plugins or AWS auth needed.
     """
     (tmp_path / "main.tf").write_text(
-        'terraform {\n'
+        "terraform {\n"
         '  required_version = ">= 1.4"\n'
-        '}\n'
-        '\n'
+        "}\n"
+        "\n"
         'resource "terraform_data" "thing" {\n'
         '  input = "hello"\n'
-        '}\n'
+        "}\n"
     )
     return tmp_path
 
@@ -142,7 +141,8 @@ class TestImportResourceAgainstRealBinary:
     """
 
     def test_import_already_managed_raises_with_swallow_pattern_in_stderr(
-        self, hcl_with_terraform_data,
+        self,
+        hcl_with_terraform_data,
     ):
         runner = TerraformRunner(hcl_with_terraform_data)
         runner.init(backend=False)
@@ -161,7 +161,8 @@ class TestImportResourceAgainstRealBinary:
         )
 
     def test_import_resource_calls_terraform_import_subcommand(
-        self, hcl_with_terraform_data,
+        self,
+        hcl_with_terraform_data,
     ):
         """Sanity: import_resource() actually runs `terraform import` (not e.g.
         `terraform state push`). Captures argv via the progress callback."""
@@ -173,6 +174,5 @@ class TestImportResourceAgainstRealBinary:
         except TerraformError:
             pass  # We don't care if import succeeds — only that it ran.
         assert any("terraform import" in e for e in events), (
-            f"progress callback never saw 'terraform import' line: "
-            f"{events[:10]}"
+            f"progress callback never saw 'terraform import' line: " f"{events[:10]}"
         )

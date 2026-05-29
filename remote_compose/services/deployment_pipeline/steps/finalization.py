@@ -84,7 +84,11 @@ class FinalizeDeploymentStep(PipelineStep):
         if context.warnings:
             parts.append(f"Warnings: {len(context.warnings)}")
 
-        return "Deployment complete: " + ", ".join(parts) if parts else "Deployment complete"
+        return (
+            "Deployment complete: " + ", ".join(parts)
+            if parts
+            else "Deployment complete"
+        )
 
     def _dry_run_summary(self, context: PipelineContext) -> StepResult:
         """Generate dry run summary."""

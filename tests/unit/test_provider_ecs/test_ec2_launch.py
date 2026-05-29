@@ -30,10 +30,16 @@ def _ctx(tmp_path: Path, services: dict, **ecs_cfg_overrides) -> DeployContext:
     )
 
 
-def _svc(name: str, launch_type: str | None = None, cpu: int = 512, memory: int = 1024) -> ServiceSpec:
+def _svc(
+    name: str, launch_type: str | None = None, cpu: int = 512, memory: int = 1024
+) -> ServiceSpec:
     return ServiceSpec(
-        name=name, cpu=cpu, memory=memory, replicas=1,
-        type="application", launch_type=launch_type,
+        name=name,
+        cpu=cpu,
+        memory=memory,
+        replicas=1,
+        type="application",
+        launch_type=launch_type,
     )
 
 
@@ -60,7 +66,10 @@ class TestFargateOnly:
 
 class TestEc2Only:
     def test_capacity_tf_populated_for_ec2_service(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2", cpu=1024, memory=2048)})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2", cpu=1024, memory=2048)},
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
@@ -94,10 +103,13 @@ class TestEc2Only:
 
 class TestMixedMode:
     def test_fargate_and_ec2_coexist_in_same_module(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "web":    _svc("web", launch_type="FARGATE"),
-            "worker": _svc("worker", launch_type="EC2"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "web": _svc("web", launch_type="FARGATE"),
+                "worker": _svc("worker", launch_type="EC2"),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -107,10 +119,16 @@ class TestMixedMode:
         # capacity.tf present because at least one EC2 service
         assert (out / "capacity.tf").read_text().strip() != ""
 
-    def test_default_launch_type_ec2_applies_to_services_without_override(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "worker": _svc("worker"),  # no launch_type
-        }, default_launch_type="EC2")
+    def test_default_launch_type_ec2_applies_to_services_without_override(
+        self, tmp_path
+    ):
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc("worker"),  # no launch_type
+            },
+            default_launch_type="EC2",
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -118,9 +136,13 @@ class TestMixedMode:
         assert "capacity_provider_strategy" in services
 
     def test_service_launch_type_overrides_default(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "web": _svc("web", launch_type="FARGATE"),  # override
-        }, default_launch_type="EC2")
+        ctx = _ctx(
+            tmp_path,
+            {
+                "web": _svc("web", launch_type="FARGATE"),  # override
+            },
+            default_launch_type="EC2",
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services = (out / "services.tf").read_text()
@@ -131,8 +153,11 @@ class TestMixedMode:
 
 class TestCapacityType:
     def test_on_demand_renders_simple_launch_template(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")},
-                   ec2_capacity={"capacity_type": "ON_DEMAND"})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            ec2_capacity={"capacity_type": "ON_DEMAND"},
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
@@ -140,8 +165,11 @@ class TestCapacityType:
         assert "mixed_instances_policy" not in cap
 
     def test_spot_renders_mixed_instances_policy(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")},
-                   ec2_capacity={"capacity_type": "SPOT"})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            ec2_capacity={"capacity_type": "SPOT"},
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
@@ -149,8 +177,11 @@ class TestCapacityType:
         assert "on_demand_percentage_above_base_capacity = 0" in cap
 
     def test_mixed_renders_mixed_instances_policy_with_percentage(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")},
-                   ec2_capacity={"capacity_type": "MIXED", "spot_weight": 3})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            ec2_capacity={"capacity_type": "MIXED", "spot_weight": 3},
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
@@ -158,16 +189,27 @@ class TestCapacityType:
         assert "on_demand_base_capacity                  = 1" in cap
 
     def test_invalid_capacity_type_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")},
-                   ec2_capacity={"capacity_type": "BOGUS"})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            ec2_capacity={"capacity_type": "BOGUS"},
+        )
         with pytest.raises(ProviderConfigError, match="capacity_type"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
 
 class TestAutoSizing:
     def test_explicit_instance_type_wins(self, tmp_path):
-        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2", cpu=512, memory=1024)},
-                   ec2_capacity={"instance_type": "m5.2xlarge", "min": 2, "max": 10, "desired": 3})
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2", cpu=512, memory=1024)},
+            ec2_capacity={
+                "instance_type": "m5.2xlarge",
+                "min": 2,
+                "max": 10,
+                "desired": 3,
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
@@ -176,11 +218,14 @@ class TestAutoSizing:
 
     def test_auto_size_when_instance_type_absent(self, tmp_path):
         """Summed demand 6144 CPU + 12 GiB should produce a working sizing."""
-        ctx = _ctx(tmp_path, {
-            "a": _svc("a", launch_type="EC2", cpu=2048, memory=4096),
-            "b": _svc("b", launch_type="EC2", cpu=2048, memory=4096),
-            "c": _svc("c", launch_type="EC2", cpu=2048, memory=4096),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "a": _svc("a", launch_type="EC2", cpu=2048, memory=4096),
+                "b": _svc("b", launch_type="EC2", cpu=2048, memory=4096),
+                "c": _svc("c", launch_type="EC2", cpu=2048, memory=4096),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()

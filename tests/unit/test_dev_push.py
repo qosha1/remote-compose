@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import io
 import textwrap
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,7 +25,6 @@ from remote_compose.dev_push import (
     push_one,
     resolve_targets,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -48,7 +46,7 @@ def rc_yml(tmp_path: Path) -> Path:
     (backend / "app" / "models.py").write_text("# stub\n")
 
     rc_path = tmp_path / "rc.yml"
-    rc_path.write_text(textwrap.dedent(f"""
+    rc_path.write_text(textwrap.dedent("""
         version: 2
         project: rc-test-devpush
         compose_file: docker-compose.yml
@@ -174,11 +172,13 @@ class TestResolveTargets:
 
 def _fake_session_with_running_task(task_arn: str = "arn:task/abc123"):
     """Build a session_factory that returns one RUNNING task."""
+
     def factory():
         ecs = SimpleNamespace(
             list_tasks=lambda **kw: {"taskArns": [task_arn]},
         )
         return SimpleNamespace(client=lambda name: ecs)
+
     return factory
 
 
@@ -186,6 +186,7 @@ def _fake_session_no_tasks():
     def factory():
         ecs = SimpleNamespace(list_tasks=lambda **kw: {"taskArns": []})
         return SimpleNamespace(client=lambda name: ecs)
+
     return factory
 
 
@@ -288,7 +289,8 @@ class TestPushOne:
 
         def fake_runner(cmd, payload, env):
             return SimpleNamespace(
-                returncode=255, stdout=b"",
+                returncode=255,
+                stdout=b"",
                 stderr=b"SessionManagerPlugin not found",
             )
 
@@ -322,7 +324,10 @@ class TestPushOne:
         # Inspect the tarball contents to confirm filtering.
         import gzip
         import tarfile
-        with tarfile.open(fileobj=io.BytesIO(gzip.decompress(captured["payload"])), mode="r:") as tf:
+
+        with tarfile.open(
+            fileobj=io.BytesIO(gzip.decompress(captured["payload"])), mode="r:"
+        ) as tf:
             names = tf.getnames()
         # Real source files made it.
         assert "manage.py" in names
@@ -373,7 +378,8 @@ class TestPushAll:
     def test_filter_to_one_service(self, multi_service_rc_yml, monkeypatch):
         calls: list = []
         monkeypatch.setattr(
-            dev_push, "push_one",
+            dev_push,
+            "push_one",
             lambda t, **kw: (calls.append(t["service"]) or 0.1),
         )
         push_all(
@@ -401,6 +407,7 @@ class TestWatchMode:
         to return a closed-EOF pipe, which makes the loop exit
         immediately."""
         import os
+
         monkeypatch.setattr(dev_push, "_detect_watcher", lambda: "fswatch")
 
         seeded: list = []

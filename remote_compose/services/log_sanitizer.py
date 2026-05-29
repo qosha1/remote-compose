@@ -4,7 +4,7 @@ Log sanitization for removing sensitive data from logs.
 
 import re
 import logging
-from typing import Any, Dict, List, Optional, Pattern, Set
+from typing import Any, Dict, List, Optional, Set
 
 from ..conf import get_setting
 
@@ -25,35 +25,37 @@ class LogSanitizer:
     """
 
     # Default sensitive field names (case-insensitive)
-    DEFAULT_SENSITIVE_FIELDS: Set[str] = frozenset({
-        'password',
-        'passwd',
-        'pwd',
-        'secret',
-        'token',
-        'api_key',
-        'apikey',
-        'api-key',
-        'auth_token',
-        'access_token',
-        'refresh_token',
-        'bearer',
-        'credential',
-        'private_key',
-        'privatekey',
-        'ssh_key',
-        'sshkey',
-        'aws_secret',
-        'aws_secret_access_key',
-        'encryption_key',
-        'db_password',
-        'database_password',
-        'mysql_password',
-        'postgres_password',
-        'redis_password',
-        'auth',
-        'authorization',
-    })
+    DEFAULT_SENSITIVE_FIELDS: Set[str] = frozenset(
+        {
+            "password",
+            "passwd",
+            "pwd",
+            "secret",
+            "token",
+            "api_key",
+            "apikey",
+            "api-key",
+            "auth_token",
+            "access_token",
+            "refresh_token",
+            "bearer",
+            "credential",
+            "private_key",
+            "privatekey",
+            "ssh_key",
+            "sshkey",
+            "aws_secret",
+            "aws_secret_access_key",
+            "encryption_key",
+            "db_password",
+            "database_password",
+            "mysql_password",
+            "postgres_password",
+            "redis_password",
+            "auth",
+            "authorization",
+        }
+    )
 
     # Regex patterns to detect and mask sensitive data in strings.
     # Each tuple is (pattern, replacement).
@@ -62,76 +64,64 @@ class LogSanitizer:
         # SSH private keys - matches PEM-formatted private keys
         # Handles RSA, EC, DSA, and OpenSSH key formats
         # Uses [\s\S]*? for non-greedy match across newlines
-        (r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
-         '[REDACTED SSH KEY]'),
-
+        (
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+            "[REDACTED SSH KEY]",
+        ),
         # AWS Access Key ID - starts with specific prefixes followed by 16 alphanumeric chars
         # AKIA = long-term access key, ASIA = temporary STS credentials
         # A3T, AGPA, AIDA, AROA, AIPA, ANPA, ANVA are other AWS credential types
-        (r'(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}',
-         '[REDACTED AWS KEY ID]'),
-
+        (
+            r"(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}",
+            "[REDACTED AWS KEY ID]",
+        ),
         # AWS Secret Key - 40 character base64-encoded string
         # Uses negative lookbehind/ahead to avoid matching within longer strings
-        (r'(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])',
-         '[REDACTED AWS SECRET]'),
-
+        (
+            r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])",
+            "[REDACTED AWS SECRET]",
+        ),
         # Generic API keys - matches common key assignment patterns
         # Handles api_key=xxx, apikey: "xxx", api-key='xxx' etc.
-        (r'(?:api[_-]?key|apikey|api_token)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-]{20,})["\']?',
-         r'api_key=[REDACTED]'),
-
+        (
+            r'(?:api[_-]?key|apikey|api_token)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-]{20,})["\']?',
+            r"api_key=[REDACTED]",
+        ),
         # Bearer tokens in Authorization headers
         # Matches "Bearer <token>" pattern used in OAuth2/JWT auth
-        (r'[Bb]earer\s+[A-Za-z0-9\-_\.]+',
-         'Bearer [REDACTED]'),
-
+        (r"[Bb]earer\s+[A-Za-z0-9\-_\.]+", "Bearer [REDACTED]"),
         # Basic auth credentials embedded in URLs
         # Matches https://user:password@host format, preserves URL structure
-        (r'(https?://)([^:]+):([^@]+)@',
-         r'\1[REDACTED]:[REDACTED]@'),
-
+        (r"(https?://)([^:]+):([^@]+)@", r"\1[REDACTED]:[REDACTED]@"),
         # Password in connection strings and config
         # Matches password=xxx, passwd: "xxx", pwd='xxx' patterns
-        (r'(password|passwd|pwd)\s*[=:]\s*["\']?[^"\'\s&;]+["\']?',
-         r'\1=[REDACTED]'),
-
+        (r'(password|passwd|pwd)\s*[=:]\s*["\']?[^"\'\s&;]+["\']?', r"\1=[REDACTED]"),
         # Credit card numbers - basic pattern for 13-16 digit numbers
         # Allows spaces or hyphens between digit groups
         # Note: May have false positives on other long numbers
-        (r'\b(?:\d[ -]*?){13,16}\b',
-         '[REDACTED CARD]'),
-
+        (r"\b(?:\d[ -]*?){13,16}\b", "[REDACTED CARD]"),
         # US Social Security Numbers - XXX-XX-XXXX format
         # Allows hyphens or spaces as separators
-        (r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',
-         '[REDACTED SSN]'),
-
+        (r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b", "[REDACTED SSN]"),
         # Email addresses (commented out - may be too aggressive for some use cases)
         # Uncomment if you want to redact email addresses
         # (r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
         #  '[REDACTED EMAIL]'),
-
         # JWT tokens - three base64url-encoded segments separated by dots
         # Header starts with eyJ (base64 of '{"'), payload also starts with eyJ
-        (r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
-         '[REDACTED JWT]'),
-
+        (r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "[REDACTED JWT]"),
         # GitHub personal access tokens and other GitHub tokens
         # gh[p|o|u|s|r]_ prefix identifies token type (personal, oauth, user-to-server, etc.)
-        (r'gh[pousr]_[A-Za-z0-9_]{36,}',
-         '[REDACTED GITHUB TOKEN]'),
-
+        (r"gh[pousr]_[A-Za-z0-9_]{36,}", "[REDACTED GITHUB TOKEN]"),
         # Slack API tokens - xoxb (bot), xoxp (user), xoxa (app), xoxr (refresh), xoxs (legacy)
-        (r'xox[baprs]-[0-9]{10,}-[A-Za-z0-9]+',
-         '[REDACTED SLACK TOKEN]'),
+        (r"xox[baprs]-[0-9]{10,}-[A-Za-z0-9]+", "[REDACTED SLACK TOKEN]"),
     ]
 
     def __init__(
         self,
         sensitive_fields: Optional[Set[str]] = None,
         additional_patterns: Optional[List[tuple]] = None,
-        mask_string: str = '***',
+        mask_string: str = "***",
         enabled: bool = True,
     ):
         """
@@ -145,7 +135,7 @@ class LogSanitizer:
         """
         self.sensitive_fields = sensitive_fields or self.DEFAULT_SENSITIVE_FIELDS
         self.mask_string = mask_string
-        self.enabled = enabled and get_setting('MASK_SENSITIVE_LOGS', True)
+        self.enabled = enabled and get_setting("MASK_SENSITIVE_LOGS", True)
 
         # Compile patterns
         self.patterns: List[tuple] = []
@@ -158,7 +148,9 @@ class LogSanitizer:
         if additional_patterns:
             for pattern, replacement in additional_patterns:
                 try:
-                    self.patterns.append((re.compile(pattern, re.IGNORECASE), replacement))
+                    self.patterns.append(
+                        (re.compile(pattern, re.IGNORECASE), replacement)
+                    )
                 except re.error as e:
                     logger.warning(f"Invalid additional pattern: {pattern}, error: {e}")
 
@@ -187,7 +179,7 @@ class LogSanitizer:
     def sanitize_dict(
         self,
         data: Dict[str, Any],
-        parent_key: str = '',
+        parent_key: str = "",
     ) -> Dict[str, Any]:
         """
         Sanitize a dictionary, masking sensitive fields.
@@ -249,7 +241,7 @@ class LogSanitizer:
 
     def _is_sensitive_key(self, key: str) -> bool:
         """Check if a key name indicates sensitive data."""
-        key_lower = key.lower().replace('-', '_')
+        key_lower = key.lower().replace("-", "_")
 
         # Direct match
         if key_lower in self.sensitive_fields:
@@ -291,7 +283,9 @@ class SanitizingLogHandler(logging.Handler):
     Log handler that sanitizes log records before emitting.
     """
 
-    def __init__(self, base_handler: logging.Handler, sanitizer: Optional[LogSanitizer] = None):
+    def __init__(
+        self, base_handler: logging.Handler, sanitizer: Optional[LogSanitizer] = None
+    ):
         """
         Initialize sanitizing handler.
 
@@ -315,9 +309,7 @@ class SanitizingLogHandler(logging.Handler):
             if isinstance(record.args, dict):
                 record.args = self.sanitizer.sanitize_dict(record.args)
             elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    self.sanitizer.sanitize(arg) for arg in record.args
-                )
+                record.args = tuple(self.sanitizer.sanitize(arg) for arg in record.args)
 
         # Pass to base handler
         self.base_handler.emit(record)
@@ -331,7 +323,7 @@ class SanitizingLogHandler(logging.Handler):
         self.base_handler.setFormatter(fmt)
 
 
-def setup_sanitized_logging(logger_name: str = 'remote_compose') -> None:
+def setup_sanitized_logging(logger_name: str = "remote_compose") -> None:
     """
     Configure a logger to use sanitized handlers.
 

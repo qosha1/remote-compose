@@ -40,6 +40,7 @@ def _client_error(code: str, op: str = "Create") -> ClientError:
 class TestEfsSgBoundedRetry:
     def _service(self):
         from remote_compose.services.efs_service import EFSService
+
         # Skip Django factory-style construction; the AWS factory call
         # is the only thing we need to mock.
         svc = EFSService.__new__(EFSService)
@@ -59,12 +60,16 @@ class TestEfsSgBoundedRetry:
         # second find returns the existing SG (race resolved).
         find_results = [
             {"SecurityGroups": []},
-            {"SecurityGroups": [{
-                "GroupId": "sg-real",
-                "GroupName": "test-sg",
-                "VpcId": "vpc-1",
-                "Description": "found by retry",
-            }]},
+            {
+                "SecurityGroups": [
+                    {
+                        "GroupId": "sg-real",
+                        "GroupName": "test-sg",
+                        "VpcId": "vpc-1",
+                        "Description": "found by retry",
+                    }
+                ]
+            },
         ]
         ec2.describe_security_groups.side_effect = find_results
         ec2.create_security_group.side_effect = _client_error(
@@ -76,7 +81,8 @@ class TestEfsSgBoundedRetry:
         svc._get_vpc_cidr = MagicMock(return_value="10.0.0.0/16")
 
         out = svc.get_or_create_efs_security_group(
-            vpc_id="vpc-1", name="test-sg",
+            vpc_id="vpc-1",
+            name="test-sg",
         )
         assert out["security_group_id"] == "sg-real"
         # find was called twice (initial + retry); create attempted once.
@@ -99,11 +105,11 @@ class TestEfsSgBoundedRetry:
         # Old behavior: infinite recursion. New: bounded raise.
         with pytest.raises(EFSError, match="retries"):
             svc.get_or_create_efs_security_group(
-                vpc_id="vpc-1", name="test-sg",
+                vpc_id="vpc-1",
+                name="test-sg",
             )
         # Bounded at _MAX_DUPLICATE_RETRIES.
-        assert ec2.create_security_group.call_count == \
-            svc._MAX_DUPLICATE_RETRIES
+        assert ec2.create_security_group.call_count == svc._MAX_DUPLICATE_RETRIES
 
     def test_non_duplicate_create_error_raises_immediately(self):
         svc = self._service()
@@ -117,7 +123,8 @@ class TestEfsSgBoundedRetry:
 
         with pytest.raises(EFSError, match="Failed to create"):
             svc.get_or_create_efs_security_group(
-                vpc_id="vpc-1", name="test-sg",
+                vpc_id="vpc-1",
+                name="test-sg",
             )
         # No retry on non-Duplicate errors — fail-fast.
         assert ec2.create_security_group.call_count == 1

@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
@@ -25,11 +24,13 @@ def _ctx(tmp_path: Path, cluster: str = "myapp-prod") -> DeployContext:
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": cluster,
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": cluster,
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
@@ -63,9 +64,11 @@ def _provider(runner_holder: dict, session):
 class TestOrphanLogGroupImport:
     def test_imports_when_aws_has_orphan(self, tmp_path):
         """boto3 reports the log group exists → terraform import runs."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
-        ])
+        sess = _logs_session(
+            [
+                {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+            ]
+        )
         holder: dict = {"runner": None}
         provider = _provider(holder, sess)
 
@@ -95,10 +98,16 @@ class TestOrphanLogGroupImport:
 
     def test_skips_import_when_describe_returns_unrelated_log_groups(self, tmp_path):
         """Prefix matches MUST be filtered to exact-name matches."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance-other"},
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance.bak"},
-        ])
+        sess = _logs_session(
+            [
+                {
+                    "logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance-other"
+                },
+                {
+                    "logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance.bak"
+                },
+            ]
+        )
         holder: dict = {"runner": None}
         provider = _provider(holder, sess)
 
@@ -112,16 +121,19 @@ class TestOrphanLogGroupImport:
         resource, emit a '✓ already in terraform state' follow-up so
         the user knows the prior raw 'Error: Resource already managed'
         stderr was handled cleanly."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
-        ])
+        sess = _logs_session(
+            [
+                {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+            ]
+        )
         emitted: list[str] = []
 
         class _AlreadyManagedRunner(RecordingTerraformRunner):
             def import_resource(self, address, resource_id):
                 self.calls.append(
                     type(self.calls[0])(args=["import", address, resource_id])
-                    if self.calls else None
+                    if self.calls
+                    else None
                 )
                 raise TerraformError(
                     cmd=["terraform", "import", address, resource_id],
@@ -144,9 +156,11 @@ class TestOrphanLogGroupImport:
 
     def test_swallows_already_managed_error(self, tmp_path):
         """If import fails because state already has it, do not crash deploy."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
-        ])
+        sess = _logs_session(
+            [
+                {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+            ]
+        )
         holder: dict = {"runner": None}
         provider = _provider(holder, sess)
 
@@ -179,9 +193,11 @@ class TestOrphanLogGroupImport:
         WITHOUT the 'already managed' phrase if the user's tf version
         prints only the second sentence. Make sure that case is also
         recognized as 'already in state'."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
-        ])
+        sess = _logs_session(
+            [
+                {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+            ]
+        )
         holder: dict = {"runner": None}
         provider = _provider(holder, sess)
 
@@ -189,7 +205,8 @@ class TestOrphanLogGroupImport:
             def import_resource(self, address, resource_id):
                 self.calls.append(
                     type(self.calls[0])(args=["import", address, resource_id])
-                    if self.calls else None
+                    if self.calls
+                    else None
                 )
                 raise TerraformError(
                     cmd=["terraform", "import", address, resource_id],
@@ -227,9 +244,13 @@ class TestOrphanLogGroupImport:
 
     def test_default_cluster_name_used_when_unset(self, tmp_path):
         """If provider_config.ecs.cluster is unset, defaults to {project}-cluster."""
-        sess = _logs_session([
-            {"logGroupName": "/aws/ecs/containerinsights/myapp-cluster/performance"},
-        ])
+        sess = _logs_session(
+            [
+                {
+                    "logGroupName": "/aws/ecs/containerinsights/myapp-cluster/performance"
+                },
+            ]
+        )
         holder: dict = {"runner": None}
         provider = _provider(holder, sess)
 
@@ -245,9 +266,7 @@ class TestOrphanLogGroupImport:
         assert call_kwargs["logGroupNamePrefix"] == (
             "/aws/ecs/containerinsights/myapp-cluster/performance"
         )
-        import_call = next(
-            c for c in holder["runner"].calls if c.args[0] == "import"
-        )
+        import_call = next(c for c in holder["runner"].calls if c.args[0] == "import")
         assert import_call.args[-1] == (
             "/aws/ecs/containerinsights/myapp-cluster/performance"
         )

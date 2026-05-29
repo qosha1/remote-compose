@@ -14,8 +14,15 @@ from remote_compose.provider.ecs.provider import _zone_from_domain
 
 def _ctx(tmp_path: Path, **overrides) -> DeployContext:
     services = overrides.pop("services", None) or {
-        "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                           public=True, port=80, health_check_path="/"),
+        "web": ServiceSpec(
+            name="web",
+            cpu=256,
+            memory=512,
+            type="proxy",
+            public=True,
+            port=80,
+            health_check_path="/",
+        ),
     }
     rc_yml = overrides.pop("rc_yml_v2", {}) or {}
     domain = overrides.pop("domain", None)
@@ -28,9 +35,13 @@ def _ctx(tmp_path: Path, **overrides) -> DeployContext:
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2=rc_yml,
-        provider_config={"ecs": {
-            "region": "us-west-2", "cluster": "test", "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "test",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -68,7 +79,8 @@ class TestAcmDomain:
     def test_acm_certificate_resource_rendered(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com"), out,
+            _ctx(tmp_path, domain="api.example.com"),
+            out,
         )
         domain = (out / "domain.tf").read_text()
         assert 'aws_acm_certificate" "main"' in domain
@@ -78,7 +90,8 @@ class TestAcmDomain:
     def test_route53_zone_derived_from_domain(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com"), out,
+            _ctx(tmp_path, domain="api.example.com"),
+            out,
         )
         domain = (out / "domain.tf").read_text()
         assert 'name         = "example.com"' in domain
@@ -86,7 +99,8 @@ class TestAcmDomain:
     def test_route53_a_record_points_at_alb(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com"), out,
+            _ctx(tmp_path, domain="api.example.com"),
+            out,
         )
         domain = (out / "domain.tf").read_text()
         # Multi-domain rewrite numbers app records by index.
@@ -97,21 +111,23 @@ class TestAcmDomain:
     def test_alb_has_https_listener(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com"), out,
+            _ctx(tmp_path, domain="api.example.com"),
+            out,
         )
         alb = (out / "alb.tf").read_text()
         assert 'aws_lb_listener" "https"' in alb
-        assert 'port              = 443' in alb
+        assert "port              = 443" in alb
         assert "aws_acm_certificate_validation.main.certificate_arn" in alb
 
     def test_http_listener_redirects_to_https(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com"), out,
+            _ctx(tmp_path, domain="api.example.com"),
+            out,
         )
         alb = (out / "alb.tf").read_text()
         assert 'aws_lb_listener" "http"' in alb
-        assert "type = \"redirect\"" in alb
+        assert 'type = "redirect"' in alb
         assert 'status_code = "HTTP_301"' in alb
 
 
@@ -120,8 +136,11 @@ class TestManualTls:
         arn = "arn:aws:acm:us-west-2:111122223333:certificate/abcd-1234"
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="api.example.com",
-                 tls={"mode": "manual", "certificate_arn": arn}),
+            _ctx(
+                tmp_path,
+                domain="api.example.com",
+                tls={"mode": "manual", "certificate_arn": arn},
+            ),
             out,
         )
         alb = (out / "alb.tf").read_text()
@@ -139,17 +158,22 @@ class TestManualTls:
 
 class TestValidation:
     def test_domain_without_public_service_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, domain="api.example.com", services={
-            "worker": ServiceSpec(name="worker", cpu=256, memory=512, type="worker"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            domain="api.example.com",
+            services={
+                "worker": ServiceSpec(
+                    name="worker", cpu=256, memory=512, type="worker"
+                ),
+            },
+        )
         with pytest.raises(ProviderConfigError, match="public"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
     def test_unsupported_tls_mode_rejected(self, tmp_path):
         with pytest.raises(ProviderConfigError, match="tls.mode"):
             ECSProvider().emit_terraform(
-                _ctx(tmp_path, domain="api.example.com",
-                     tls={"mode": "cert-manager"}),
+                _ctx(tmp_path, domain="api.example.com", tls={"mode": "cert-manager"}),
                 tmp_path / "tf",
             )
 
@@ -180,8 +204,7 @@ class TestRoute53ZoneOverride:
     lets users bypass the heuristic."""
 
     def test_explicit_zone_wins_over_heuristic(self, tmp_path):
-        ctx = _ctx(tmp_path,
-                   domain="migration-test.api.startsimpli.com")
+        ctx = _ctx(tmp_path, domain="migration-test.api.startsimpli.com")
         ctx.provider_config["ecs"]["route53_zone"] = "api.startsimpli.com"
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
@@ -190,8 +213,7 @@ class TestRoute53ZoneOverride:
         assert 'name         = "startsimpli.com"' not in domain
 
     def test_no_override_falls_back_to_heuristic(self, tmp_path):
-        ctx = _ctx(tmp_path,
-                   domain="migration-test.api.startsimpli.com")
+        ctx = _ctx(tmp_path, domain="migration-test.api.startsimpli.com")
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         domain = (out / "domain.tf").read_text()
@@ -212,32 +234,52 @@ class TestPerServiceDomain:
             project="multi",
             compose_path=tmp_path / "docker-compose.yml",
             rc_yml_v2={},
-            provider_config={"ecs": {
-                "region": "us-west-2",
-                "cluster": "multi-cluster",
-                "vpc_cidr": "10.0.0.0/16",
-                "route53_zone": "example.com",
-            }},
+            provider_config={
+                "ecs": {
+                    "region": "us-west-2",
+                    "cluster": "multi-cluster",
+                    "vpc_cidr": "10.0.0.0/16",
+                    "route53_zone": "example.com",
+                }
+            },
             tf_backend_config={"type": "local"},
             working_dir=tmp_path,
             services={
                 "django": ServiceSpec(
-                    name="django", cpu=512, memory=1024, type="application",
-                    public=True, port=8001, health_check_path="/api/health/",
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    public=True,
+                    port=8001,
+                    health_check_path="/api/health/",
                     domain="api.example.com",
                 ),
                 "docs": ServiceSpec(
-                    name="docs", cpu=256, memory=512, type="application",
-                    public=True, port=9000, health_check_path="/",
+                    name="docs",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    public=True,
+                    port=9000,
+                    health_check_path="/",
                     domain="docs.example.com",
                 ),
                 "nginx": ServiceSpec(
-                    name="nginx", cpu=256, memory=512, type="proxy",
-                    public=True, port=80, health_check_path="/",
+                    name="nginx",
+                    cpu=256,
+                    memory=512,
+                    type="proxy",
+                    public=True,
+                    port=80,
+                    health_check_path="/",
                     domain="example.com",
                 ),
                 "worker": ServiceSpec(
-                    name="worker", cpu=256, memory=512, type="worker",
+                    name="worker",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
                 ),
             },
             secrets=[],
@@ -298,7 +340,9 @@ class TestPerServiceDomain:
         services_tf = (out / "services.tf").read_text()
         # django service block must point at aws_lb_target_group.django.arn,
         # not the catch-all default.
-        django_svc = services_tf.split('aws_ecs_service" "django"')[1].split("resource ")[0]
+        django_svc = services_tf.split('aws_ecs_service" "django"')[1].split(
+            "resource "
+        )[0]
         assert "aws_lb_target_group.django.arn" in django_svc
 
     def test_listener_rules_have_distinct_priorities(self, tmp_path):
@@ -306,10 +350,11 @@ class TestPerServiceDomain:
         ECSProvider().emit_terraform(self._multidomain_ctx(tmp_path), out)
         alb = (out / "alb.tf").read_text()
         import re as _re
+
         priorities = _re.findall(r"priority\s*=\s*(\d+)", alb)
-        assert len(priorities) == len(set(priorities)), (
-            f"listener rule priorities must be distinct, got {priorities}"
-        )
+        assert len(priorities) == len(
+            set(priorities)
+        ), f"listener rule priorities must be distinct, got {priorities}"
 
     def test_default_target_service_with_domain_serves_default_action(self, tmp_path):
         """When the default_target service ALSO declares its own domain,
@@ -322,19 +367,26 @@ class TestPerServiceDomain:
             project="combo",
             compose_path=tmp_path / "docker-compose.yml",
             rc_yml_v2={},
-            provider_config={"ecs": {
-                "region": "us-west-2", "cluster": "combo",
-                "vpc_cidr": "10.0.0.0/16",
-                "domain": "apex.example.com",
-                "route53_zone": "example.com",
-            }},
+            provider_config={
+                "ecs": {
+                    "region": "us-west-2",
+                    "cluster": "combo",
+                    "vpc_cidr": "10.0.0.0/16",
+                    "domain": "apex.example.com",
+                    "route53_zone": "example.com",
+                }
+            },
             tf_backend_config={"type": "local"},
             working_dir=tmp_path,
             services={
                 # Only public service → automatically the default target.
                 "django": ServiceSpec(
-                    name="django", cpu=512, memory=1024, type="application",
-                    public=True, port=8001,
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    public=True,
+                    port=8001,
                     domain="api.example.com",
                 ),
             },
@@ -356,7 +408,8 @@ class TestPerServiceDomain:
         # without breaking.
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, domain="legacy.example.com"), out,
+            _ctx(tmp_path, domain="legacy.example.com"),
+            out,
         )
         domain = (out / "domain.tf").read_text()
         assert "aws_acm_certificate" in domain
@@ -374,22 +427,33 @@ class TestServiceAliases:
             project="front",
             compose_path=tmp_path / "docker-compose.yml",
             rc_yml_v2={},
-            provider_config={"ecs": {
-                "region": "us-west-2", "cluster": "front",
-                "vpc_cidr": "10.0.0.0/16",
-                "route53_zone": "example.com",
-            }},
+            provider_config={
+                "ecs": {
+                    "region": "us-west-2",
+                    "cluster": "front",
+                    "vpc_cidr": "10.0.0.0/16",
+                    "route53_zone": "example.com",
+                }
+            },
             tf_backend_config={"type": "local"},
             working_dir=tmp_path,
             services={
                 "nginx": ServiceSpec(
-                    name="nginx", cpu=256, memory=512, type="proxy",
-                    public=True, port=80, health_check_path="/health",
+                    name="nginx",
+                    cpu=256,
+                    memory=512,
+                    type="proxy",
+                    public=True,
+                    port=80,
+                    health_check_path="/health",
                     domain="example.com",
                     aliases=["api.example.com", "docs.example.com"],
                 ),
                 "django": ServiceSpec(
-                    name="django", cpu=512, memory=1024, type="application",
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
                     # Private — accessed by nginx via service-discovery DNS.
                 ),
             },
@@ -410,6 +474,7 @@ class TestServiceAliases:
         domain = (out / "domain.tf").read_text()
         # Three A-records: primary + 2 aliases.
         import re as _re
+
         record_count = len(_re.findall(r'aws_route53_record" "app_\d+"', domain))
         assert record_count == 3, f"expected 3 app A-records, got {record_count}"
 
@@ -425,9 +490,9 @@ class TestServiceAliases:
             # aws_lb_listener_rule should host_header on it.
             for rule_block in alb.split('aws_lb_listener_rule"')[1:]:
                 rule_block_short = rule_block.split("resource ")[0]
-                assert alias not in rule_block_short, (
-                    f"alias {alias} should not appear in any listener_rule"
-                )
+                assert (
+                    alias not in rule_block_short
+                ), f"alias {alias} should not appear in any listener_rule"
 
     def test_aliases_count_toward_default_target_logic(self, tmp_path):
         # With nginx as the only public service + aliases, nginx's TG IS

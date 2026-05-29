@@ -7,20 +7,34 @@ or account-hygiene check.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import click
 
 
-@click.command(name='audit')
-@click.option('--project', 'project_name', default=None,
-              help='Project name to scan for. Defaults to rc.yml v2 project.')
-@click.option('--region', 'region_name', default=None,
-              help='AWS region to scan. Defaults to rc.yml v2 provider_config.ecs.region.')
-@click.option('--profile', 'profile_name', default=None,
-              help='AWS profile. Defaults to rc.yml v2 provider_config.ecs.aws_profile.')
-@click.option('--delete', is_flag=True,
-              help='Prompt to delete every leftover. Off by default — dry-run is the safer default.')
+@click.command(name="audit")
+@click.option(
+    "--project",
+    "project_name",
+    default=None,
+    help="Project name to scan for. Defaults to rc.yml v2 project.",
+)
+@click.option(
+    "--region",
+    "region_name",
+    default=None,
+    help="AWS region to scan. Defaults to rc.yml v2 provider_config.ecs.region.",
+)
+@click.option(
+    "--profile",
+    "profile_name",
+    default=None,
+    help="AWS profile. Defaults to rc.yml v2 provider_config.ecs.aws_profile.",
+)
+@click.option(
+    "--delete",
+    is_flag=True,
+    help="Prompt to delete every leftover. Off by default — dry-run is the safer default.",
+)
 @click.pass_context
 def audit_cmd(ctx, project_name, region_name, profile_name, delete):
     """Find AWS resources matching this project — orphans, leftovers, etc.
@@ -41,21 +55,25 @@ def audit_cmd(ctx, project_name, region_name, profile_name, delete):
 
     if not project_name or not region_name or not profile_name:
         from ._dispatchers import _load_v2_if_present
-        loaded = _load_v2_if_present(ctx.obj.get('config_path'), strict=False)
+
+        loaded = _load_v2_if_present(ctx.obj.get("config_path"), strict=False)
         if loaded is not None:
             _, _, v2 = loaded
             project_name = project_name or v2.project
-            ecs_cfg = (v2.provider_config or {}).get('ecs') or {}
-            region_name = region_name or ecs_cfg.get('region')
-            profile_name = profile_name or ecs_cfg.get('aws_profile')
+            ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+            region_name = region_name or ecs_cfg.get("region")
+            profile_name = profile_name or ecs_cfg.get("aws_profile")
 
     if not project_name:
-        click.echo("rc audit: --project required (or run from a dir with rc.yml v2).",
-                   err=True)
+        click.echo(
+            "rc audit: --project required (or run from a dir with rc.yml v2).", err=True
+        )
         raise click.exceptions.Exit(1)
     if not region_name:
-        click.echo("rc audit: --region required (or set provider_config.ecs.region in rc.yml).",
-                   err=True)
+        click.echo(
+            "rc audit: --region required (or set provider_config.ecs.region in rc.yml).",
+            err=True,
+        )
         raise click.exceptions.Exit(1)
 
     session = boto3.Session(region_name=region_name, profile_name=profile_name)
@@ -68,6 +86,9 @@ def audit_cmd(ctx, project_name, region_name, profile_name, delete):
     if not click.confirm(f"\nDelete {len(report.findings)} resource(s)?"):
         click.echo("Aborted.")
         return
-    click.echo("\n  --delete is dry-run today. Per-resource deletion will land "
-               "in the next iteration; for now use the listed identifiers with "
-               "the matching `aws <svc> delete-...` commands.", err=True)
+    click.echo(
+        "\n  --delete is dry-run today. Per-resource deletion will land "
+        "in the next iteration; for now use the listed identifiers with "
+        "the matching `aws <svc> delete-...` commands.",
+        err=True,
+    )

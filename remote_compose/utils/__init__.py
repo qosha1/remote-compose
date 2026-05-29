@@ -23,17 +23,17 @@ def sanitize_name(name: str) -> str:
     Returns:
         Sanitized name
     """
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
-    sanitized = re.sub(r'-+', '-', sanitized)
-    sanitized = sanitized.strip('-')
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "-", name)
+    sanitized = re.sub(r"-+", "-", sanitized)
+    sanitized = sanitized.strip("-")
     sanitized = sanitized.lower()
     return sanitized[:128]
 
 
 __all__ = [
-    'encrypt_value',
-    'decrypt_value',
-    'SSHClient',
-    'poll_until',
-    'sanitize_name',
+    "encrypt_value",
+    "decrypt_value",
+    "SSHClient",
+    "poll_until",
+    "sanitize_name",
 ]

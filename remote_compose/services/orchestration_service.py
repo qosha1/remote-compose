@@ -8,16 +8,10 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from django.db import transaction
 from django.utils import timezone
 
-from ..models import Deployment, DeploymentTarget, DeploymentLog
-from ..conf import get_setting
-from ..exceptions import (
-    DeploymentError,
-    ValidationError,
-    RollbackError,
-)
+from ..models import Deployment, DeploymentTarget
+from ..exceptions import ValidationError
 from .base import BaseService
 from .deployment_service import DeploymentService
 
@@ -26,20 +20,22 @@ logger = logging.getLogger(__name__)
 
 class DeploymentStrategy(str, Enum):
     """Deployment strategy for multi-service deployments."""
-    SEQUENTIAL = 'sequential'  # Deploy one at a time
-    PARALLEL = 'parallel'  # Deploy all at once
-    ROLLING = 'rolling'  # Deploy in batches
-    CANARY = 'canary'  # Deploy to canary target first
+
+    SEQUENTIAL = "sequential"  # Deploy one at a time
+    PARALLEL = "parallel"  # Deploy all at once
+    ROLLING = "rolling"  # Deploy in batches
+    CANARY = "canary"  # Deploy to canary target first
 
 
 @dataclass
 class ServiceDeployment:
     """Configuration for a single service deployment."""
+
     target_id: int
     compose_file_path: str
     project_name: str
     environment: Dict[str, str] = field(default_factory=dict)
-    version: str = ''
+    version: str = ""
     priority: int = 0  # Lower = higher priority
     depends_on: List[str] = field(default_factory=list)  # Project names this depends on
     health_check_timeout: int = 60
@@ -49,6 +45,7 @@ class ServiceDeployment:
 @dataclass
 class OrchestrationResult:
     """Result of an orchestrated deployment."""
+
     success: bool
     total_services: int
     successful_count: int
@@ -60,14 +57,14 @@ class OrchestrationResult:
 
     def to_dict(self) -> dict:
         return {
-            'success': self.success,
-            'total_services': self.total_services,
-            'successful_count': self.successful_count,
-            'failed_count': self.failed_count,
-            'deployment_ids': [d.id for d in self.deployments],
-            'errors': self.errors,
-            'duration_seconds': self.duration_seconds,
-            'strategy': self.strategy,
+            "success": self.success,
+            "total_services": self.total_services,
+            "successful_count": self.successful_count,
+            "failed_count": self.failed_count,
+            "deployment_ids": [d.id for d in self.deployments],
+            "errors": self.errors,
+            "duration_seconds": self.duration_seconds,
+            "strategy": self.strategy,
         }
 
 
@@ -80,7 +77,7 @@ class OrchestrationService(BaseService):
         self,
         deployment_service: Optional[DeploymentService] = None,
         max_parallel: int = 5,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.deployment_service = deployment_service or DeploymentService()
@@ -90,7 +87,7 @@ class OrchestrationService(BaseService):
         self,
         services: List[ServiceDeployment],
         strategy: DeploymentStrategy = DeploymentStrategy.SEQUENTIAL,
-        deployed_by: str = '',
+        deployed_by: str = "",
         rollback_on_failure: bool = True,
         batch_size: int = 2,
         canary_target_id: Optional[int] = None,
@@ -110,7 +107,9 @@ class OrchestrationService(BaseService):
             OrchestrationResult
         """
         start_time = timezone.now()
-        self.log_info(f"Starting orchestrated deployment of {len(services)} services with strategy: {strategy}")
+        self.log_info(
+            f"Starting orchestrated deployment of {len(services)} services with strategy: {strategy}"
+        )
 
         if not services:
             raise ValidationError("No services to deploy")
@@ -123,13 +122,19 @@ class OrchestrationService(BaseService):
 
         try:
             if strategy == DeploymentStrategy.SEQUENTIAL:
-                deployments, errors = self._deploy_sequential(sorted_services, deployed_by)
+                deployments, errors = self._deploy_sequential(
+                    sorted_services, deployed_by
+                )
 
             elif strategy == DeploymentStrategy.PARALLEL:
-                deployments, errors = self._deploy_parallel(sorted_services, deployed_by)
+                deployments, errors = self._deploy_parallel(
+                    sorted_services, deployed_by
+                )
 
             elif strategy == DeploymentStrategy.ROLLING:
-                deployments, errors = self._deploy_rolling(sorted_services, deployed_by, batch_size)
+                deployments, errors = self._deploy_rolling(
+                    sorted_services, deployed_by, batch_size
+                )
 
             elif strategy == DeploymentStrategy.CANARY:
                 if not canary_target_id:
@@ -140,25 +145,33 @@ class OrchestrationService(BaseService):
 
             # Handle rollback if needed
             if errors and rollback_on_failure:
-                self.log_warning(f"Deployment errors occurred, rolling back {len(deployments)} successful deployments")
+                self.log_warning(
+                    f"Deployment errors occurred, rolling back {len(deployments)} successful deployments"
+                )
                 self._rollback_deployments(deployments, deployed_by)
-                errors.append({
-                    'action': 'rollback',
-                    'message': f"Rolled back {len(deployments)} deployments due to failures",
-                })
+                errors.append(
+                    {
+                        "action": "rollback",
+                        "message": f"Rolled back {len(deployments)} deployments due to failures",
+                    }
+                )
 
         except Exception as e:
             self.log_error(f"Orchestration failed: {e}")
-            errors.append({
-                'action': 'orchestration',
-                'error': str(e),
-            })
+            errors.append(
+                {
+                    "action": "orchestration",
+                    "error": str(e),
+                }
+            )
 
         end_time = timezone.now()
         duration = (end_time - start_time).total_seconds()
 
         success = len(errors) == 0
-        successful_count = len([d for d in deployments if d.status == Deployment.Status.SUCCESS])
+        successful_count = len(
+            [d for d in deployments if d.status == Deployment.Status.SUCCESS]
+        )
 
         result = OrchestrationResult(
             success=success,
@@ -171,12 +184,16 @@ class OrchestrationService(BaseService):
             strategy=strategy.value,
         )
 
-        self.log_info(f"Orchestration completed: {successful_count}/{len(services)} successful in {duration:.1f}s")
-        self.notify_observers('orchestration_completed', result=result)
+        self.log_info(
+            f"Orchestration completed: {successful_count}/{len(services)} successful in {duration:.1f}s"
+        )
+        self.notify_observers("orchestration_completed", result=result)
 
         return result
 
-    def _sort_by_dependencies(self, services: List[ServiceDeployment]) -> List[ServiceDeployment]:
+    def _sort_by_dependencies(
+        self, services: List[ServiceDeployment]
+    ) -> List[ServiceDeployment]:
         """
         Sort services by dependencies using Kahn's topological sort algorithm.
 
@@ -214,7 +231,11 @@ class OrchestrationService(BaseService):
         # Initialize queue with services that have no dependencies
         # Use (priority, name) tuples so lower priority numbers deploy first
         result = []
-        queue = [(s.priority, s.project_name) for s in services if in_degree[s.project_name] == 0]
+        queue = [
+            (s.priority, s.project_name)
+            for s in services
+            if in_degree[s.project_name] == 0
+        ]
         queue.sort()  # Sort by priority
 
         while queue:
@@ -232,7 +253,9 @@ class OrchestrationService(BaseService):
 
         # If we couldn't process all services, there must be a cycle
         if len(result) != len(services):
-            raise ValidationError("Circular dependency detected in service configuration")
+            raise ValidationError(
+                "Circular dependency detected in service configuration"
+            )
 
         return result
 
@@ -251,19 +274,23 @@ class OrchestrationService(BaseService):
                 deployments.append(deployment)
 
                 if deployment.status != Deployment.Status.SUCCESS:
-                    errors.append({
-                        'project_name': service.project_name,
-                        'target_id': service.target_id,
-                        'error': deployment.error_message,
-                    })
+                    errors.append(
+                        {
+                            "project_name": service.project_name,
+                            "target_id": service.target_id,
+                            "error": deployment.error_message,
+                        }
+                    )
                     break  # Stop on first failure
 
             except Exception as e:
-                errors.append({
-                    'project_name': service.project_name,
-                    'target_id': service.target_id,
-                    'error': str(e),
-                })
+                errors.append(
+                    {
+                        "project_name": service.project_name,
+                        "target_id": service.target_id,
+                        "error": str(e),
+                    }
+                )
                 break
 
         return deployments, errors
@@ -279,7 +306,9 @@ class OrchestrationService(BaseService):
 
         with ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
             futures = {
-                executor.submit(self._deploy_single_service, service, deployed_by): service
+                executor.submit(
+                    self._deploy_single_service, service, deployed_by
+                ): service
                 for service in services
             }
 
@@ -290,18 +319,22 @@ class OrchestrationService(BaseService):
                     deployments.append(deployment)
 
                     if deployment.status != Deployment.Status.SUCCESS:
-                        errors.append({
-                            'project_name': service.project_name,
-                            'target_id': service.target_id,
-                            'error': deployment.error_message,
-                        })
+                        errors.append(
+                            {
+                                "project_name": service.project_name,
+                                "target_id": service.target_id,
+                                "error": deployment.error_message,
+                            }
+                        )
 
                 except Exception as e:
-                    errors.append({
-                        'project_name': service.project_name,
-                        'target_id': service.target_id,
-                        'error': str(e),
-                    })
+                    errors.append(
+                        {
+                            "project_name": service.project_name,
+                            "target_id": service.target_id,
+                            "error": str(e),
+                        }
+                    )
 
         return deployments, errors
 
@@ -316,7 +349,9 @@ class OrchestrationService(BaseService):
         errors = []
 
         # Split into batches
-        batches = [services[i:i + batch_size] for i in range(0, len(services), batch_size)]
+        batches = [
+            services[i : i + batch_size] for i in range(0, len(services), batch_size)
+        ]
 
         for batch_num, batch in enumerate(batches):
             self.log_info(f"Deploying batch {batch_num + 1}/{len(batches)}")
@@ -328,7 +363,9 @@ class OrchestrationService(BaseService):
 
             # Stop if batch had errors
             if batch_errors:
-                self.log_warning(f"Batch {batch_num + 1} had errors, stopping rolling deployment")
+                self.log_warning(
+                    f"Batch {batch_num + 1} had errors, stopping rolling deployment"
+                )
                 break
 
         return deployments, errors
@@ -348,11 +385,15 @@ class OrchestrationService(BaseService):
         other_services = [s for s in services if s.target_id != canary_target_id]
 
         if not canary_services:
-            raise ValidationError(f"No services configured for canary target {canary_target_id}")
+            raise ValidationError(
+                f"No services configured for canary target {canary_target_id}"
+            )
 
         # Deploy to canary first
         self.log_info(f"Deploying {len(canary_services)} services to canary target")
-        canary_deployments, canary_errors = self._deploy_sequential(canary_services, deployed_by)
+        canary_deployments, canary_errors = self._deploy_sequential(
+            canary_services, deployed_by
+        )
         deployments.extend(canary_deployments)
         errors.extend(canary_errors)
 
@@ -363,7 +404,9 @@ class OrchestrationService(BaseService):
         self.log_info("Canary deployment successful, proceeding to other targets")
 
         # Deploy to remaining targets
-        other_deployments, other_errors = self._deploy_parallel(other_services, deployed_by)
+        other_deployments, other_errors = self._deploy_parallel(
+            other_services, deployed_by
+        )
         deployments.extend(other_deployments)
         errors.extend(other_errors)
 
@@ -402,7 +445,9 @@ class OrchestrationService(BaseService):
                     )
                     self.log_info(f"Rolled back deployment {deployment.id}")
                 except Exception as e:
-                    self.log_error(f"Failed to rollback deployment {deployment.id}: {e}")
+                    self.log_error(
+                        f"Failed to rollback deployment {deployment.id}: {e}"
+                    )
 
     def create_deployment_plan(
         self,
@@ -422,9 +467,9 @@ class OrchestrationService(BaseService):
         sorted_services = self._sort_by_dependencies(services)
 
         plan = {
-            'strategy': strategy.value,
-            'total_services': len(services),
-            'deployment_order': [],
+            "strategy": strategy.value,
+            "total_services": len(services),
+            "deployment_order": [],
         }
 
         for i, service in enumerate(sorted_services):
@@ -434,14 +479,16 @@ class OrchestrationService(BaseService):
             except DeploymentTarget.DoesNotExist:
                 target_name = f"unknown-{service.target_id}"
 
-            plan['deployment_order'].append({
-                'order': i + 1,
-                'project_name': service.project_name,
-                'target': target_name,
-                'version': service.version,
-                'depends_on': service.depends_on,
-                'priority': service.priority,
-            })
+            plan["deployment_order"].append(
+                {
+                    "order": i + 1,
+                    "project_name": service.project_name,
+                    "target": target_name,
+                    "version": service.version,
+                    "depends_on": service.depends_on,
+                    "priority": service.priority,
+                }
+            )
 
         return plan
 
@@ -451,8 +498,8 @@ class OrchestrationService(BaseService):
         compose_file_path: str,
         project_name: str,
         environment: Optional[Dict[str, str]] = None,
-        version: str = '',
-        deployed_by: str = '',
+        version: str = "",
+        deployed_by: str = "",
         strategy: DeploymentStrategy = DeploymentStrategy.ROLLING,
         batch_size: int = 2,
     ) -> OrchestrationResult:

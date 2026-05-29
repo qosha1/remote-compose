@@ -14,7 +14,6 @@ from remote_compose.cli_v2 import (
     resolve_provider,
 )
 
-
 V2_SAMPLE = {
     "version": 2,
     "project": "cli-test",
@@ -22,8 +21,7 @@ V2_SAMPLE = {
     "provider": "fake",
     "provider_config": {},
     "services": {
-        "web": {"cpu": 256, "memory": 512, "type": "proxy",
-                "public": True, "port": 80},
+        "web": {"cpu": 256, "memory": 512, "type": "proxy", "public": True, "port": 80},
     },
     "terraform": {"backend": {"type": "local"}},
 }
@@ -79,7 +77,9 @@ class TestBuildDeployContext:
         assert ctx.working_dir == tmp_path.resolve()
 
     def test_relative_compose_path_resolved(self, tmp_path):
-        (tmp_path / "docker-compose.yml").write_text("services:\n  web: {image: nginx}\n")
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  web: {image: nginx}\n"
+        )
         p = tmp_path / "rc.yml"
         _write(p, V2_SAMPLE)
         _, raw, v2 = load_rc_yml(p)
@@ -88,8 +88,15 @@ class TestBuildDeployContext:
 
     def test_none_backend_fields_stripped(self, tmp_path):
         cfg = dict(V2_SAMPLE)
-        cfg["terraform"] = {"backend": {"type": "s3", "bucket": "b", "key": "k.tfstate",
-                                         "region": "us-west-2", "dynamodb_table": None}}
+        cfg["terraform"] = {
+            "backend": {
+                "type": "s3",
+                "bucket": "b",
+                "key": "k.tfstate",
+                "region": "us-west-2",
+                "dynamodb_table": None,
+            }
+        }
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         _, raw, v2 = load_rc_yml(p)
@@ -131,6 +138,7 @@ class TestResolveProvider:
         _write(p, cfg)
         _, _, v2 = load_rc_yml(p)
         from remote_compose.provider import ProviderNotFoundError
+
         with pytest.raises(ProviderNotFoundError, match="azure"):
             resolve_provider(v2)
 
@@ -147,29 +155,33 @@ class TestV2LegacyFlatten:
             "project": "ss-debuggai",
             "compose_file": "docker-compose.ecs.yml",
             "provider": "ecs",
-            "provider_config": {"ecs": {
-                "cluster": "ss-debuggai-prod",
-                "region": "us-west-2",
-                "aws_profile": "debuggai",
-            }},
-            "services": {"django": {"cpu": 1024, "memory": 4096,
-                                     "type": "application"}},
+            "provider_config": {
+                "ecs": {
+                    "cluster": "ss-debuggai-prod",
+                    "region": "us-west-2",
+                    "aws_profile": "debuggai",
+                }
+            },
+            "services": {
+                "django": {"cpu": 1024, "memory": 4096, "type": "application"}
+            },
             "backup": {"bucket": "ss-debuggai-db-dumps", "service": "django"},
         }
 
     def test_flatten_exposes_legacy_keys(self):
         from remote_compose.cli import _flatten_v2_to_legacy
+
         flat = _flatten_v2_to_legacy(self._v2())
         assert flat["project_name"] == "ss-debuggai"
         assert flat["compose_file"] == "docker-compose.ecs.yml"
         assert flat["cluster"] == "ss-debuggai-prod"
         assert flat["region"] == "us-west-2"
         assert flat["aws_profile"] == "debuggai"
-        assert flat["backup"] == {"bucket": "ss-debuggai-db-dumps",
-                                   "service": "django"}
+        assert flat["backup"] == {"bucket": "ss-debuggai-db-dumps", "service": "django"}
 
     def test_load_config_accepts_v2(self, tmp_path, monkeypatch):
         from remote_compose import cli as cli_mod
+
         p = tmp_path / "rc.yml"
         _write(p, self._v2())
         monkeypatch.chdir(tmp_path)
@@ -181,6 +193,7 @@ class TestV2LegacyFlatten:
 
     def test_load_config_still_accepts_v1(self, tmp_path, monkeypatch):
         from remote_compose import cli as cli_mod
+
         p = tmp_path / "rc.yml"
         _write(p, V1_SAMPLE)
         monkeypatch.chdir(tmp_path)
@@ -195,15 +208,17 @@ class TestComposeBuildTarget:
     wrong image."""
 
     def test_build_target_extracted(self, tmp_path):
-        from remote_compose.cli_v2 import _service_build_info
+
         compose = tmp_path / "docker-compose.yml"
-        compose.write_text("services:\n  web:\n    build:\n      context: .\n      target: dev\n")
+        compose.write_text(
+            "services:\n  web:\n    build:\n      context: .\n      target: dev\n"
+        )
         svc = {"build": {"context": ".", "target": "dev"}}
         _bc, _args, dfile, img, target = _service_build_info_full(svc, compose)
         assert target == "dev"
 
     def test_build_target_absent_returns_none(self, tmp_path):
-        from remote_compose.cli_v2 import _service_build_info
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text("")
         svc = {"build": {"context": "."}}
@@ -211,7 +226,7 @@ class TestComposeBuildTarget:
         assert target is None
 
     def test_short_build_string_no_target(self, tmp_path):
-        from remote_compose.cli_v2 import _service_build_info
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text("")
         svc = {"build": "."}
@@ -220,15 +235,22 @@ class TestComposeBuildTarget:
 
     def test_target_flows_to_service_spec(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             "services:\n  api:\n    build:\n      context: .\n      target: production\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -239,9 +261,12 @@ class TestComposeBuildTarget:
 # Helper that asserts the new 5-tuple shape of _service_build_info.
 def _service_build_info_full(svc_compose, compose_path):
     from remote_compose.cli_v2 import _service_build_info
+
     result = _service_build_info(svc_compose, compose_path)
     # New shape: (build_context, build_args, dockerfile, image, target).
-    assert len(result) == 5, f"_service_build_info must return 5-tuple, got {len(result)}"
+    assert (
+        len(result) == 5
+    ), f"_service_build_info must return 5-tuple, got {len(result)}"
     return result
 
 
@@ -251,8 +276,11 @@ class TestComposeEnvFile:
     a secret entry in DeployContext.secrets, scoped to the services
     that reference it via env_file_secret_names."""
 
-    def test_single_env_file_routes_to_secrets_not_plaintext(self, tmp_path, monkeypatch):
+    def test_single_env_file_routes_to_secrets_not_plaintext(
+        self, tmp_path, monkeypatch
+    ):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         env = tmp_path / ".env.api"
         env.write_text("FOO=1\nBAR=two\n")
         compose = tmp_path / "docker-compose.yml"
@@ -260,10 +288,16 @@ class TestComposeEnvFile:
             f"services:\n  api:\n    image: busybox\n    env_file:\n      - {env}\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -276,19 +310,30 @@ class TestComposeEnvFile:
         # And the service is wired to that secret.
         assert len(ctx.services["api"].env_file_secret_names) == 1
 
-    def test_multiple_env_files_each_become_their_own_secret(self, tmp_path, monkeypatch):
+    def test_multiple_env_files_each_become_their_own_secret(
+        self, tmp_path, monkeypatch
+    ):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        e1 = tmp_path / ".env.1"; e1.write_text("FOO=from1\nA=alpha\n")
-        e2 = tmp_path / ".env.2"; e2.write_text("FOO=from2\nB=beta\n")
+
+        e1 = tmp_path / ".env.1"
+        e1.write_text("FOO=from1\nA=alpha\n")
+        e2 = tmp_path / ".env.2"
+        e2.write_text("FOO=from2\nB=beta\n")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             f"services:\n  api:\n    image: busybox\n    env_file:\n      - {e1}\n      - {e2}\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -300,7 +345,9 @@ class TestComposeEnvFile:
         assert len(file_secrets) == 2
         assert len(ctx.services["api"].env_file_secret_names) == 2
 
-    def test_environment_map_overrides_env_file_in_plaintext(self, tmp_path, monkeypatch):
+    def test_environment_map_overrides_env_file_in_plaintext(
+        self, tmp_path, monkeypatch
+    ):
         # When compose has BOTH env_file: (now SM-secret-routed) AND
         # environment: { FOO: ... } (still plaintext), the plaintext
         # `environment:` entry wins for FOO. The env_file's FOO
@@ -308,17 +355,25 @@ class TestComposeEnvFile:
         # filter strips its key from secrets[] (rc-z30), letting the
         # plaintext `environment:` value land verbatim.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        e1 = tmp_path / ".env"; e1.write_text("FOO=from_file\n")
+
+        e1 = tmp_path / ".env"
+        e1.write_text("FOO=from_file\n")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             f"services:\n  api:\n    image: busybox\n    env_file: [{e1}]\n"
             f"    environment:\n      FOO: from_environment\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -327,25 +382,37 @@ class TestComposeEnvFile:
     def test_env_file_string_form_routes_to_secrets(self, tmp_path, monkeypatch):
         # Compose accepts 'env_file: ./path' as a shortcut for a single file.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        e = tmp_path / ".env"; e.write_text("FOO=ok\n")
+
+        e = tmp_path / ".env"
+        e.write_text("FOO=ok\n")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             f"services:\n  api:\n    image: busybox\n    env_file: {e}\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
         assert "FOO" not in ctx.services["api"].env
         assert any(s.source == "file" for s in ctx.secrets)
 
-    def test_env_file_relative_path_resolves_and_routes_to_secret(self, tmp_path, monkeypatch):
+    def test_env_file_relative_path_resolves_and_routes_to_secret(
+        self, tmp_path, monkeypatch
+    ):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        envs = tmp_path / ".envs" / ".local"; envs.mkdir(parents=True)
+
+        envs = tmp_path / ".envs" / ".local"
+        envs.mkdir(parents=True)
         (envs / ".django").write_text("DJANGO_SETTING=ok\n")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
@@ -353,10 +420,16 @@ class TestComposeEnvFile:
             "      - ./.envs/.local/.django\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -373,16 +446,23 @@ class TestComposePortsArray:
 
     def test_multiple_ports_extracted(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             "services:\n  vnc:\n    image: busybox\n    ports:\n"
             "      - '7788:7788'\n      - '5901:5901'\n      - '9222:9222'\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -394,13 +474,20 @@ class TestComposePortsArray:
 
     def test_no_ports_means_empty_extras(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text("services:\n  worker:\n    image: busybox\n")
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake", "services": {},
-        })
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {},
+            },
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -419,7 +506,8 @@ class TestComposeAutoImport:
 
     def _v2(self, **overrides) -> dict:
         base = {
-            "version": 2, "project": "auto",
+            "version": 2,
+            "project": "auto",
             "compose_file": "docker-compose.yml",
             "provider": "fake",
             "services": {},
@@ -429,6 +517,7 @@ class TestComposeAutoImport:
 
     def test_compose_only_service_auto_included(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(tmp_path, "  api:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, self._v2())
@@ -439,11 +528,17 @@ class TestComposeAutoImport:
 
     def test_rc_yml_service_overrides_compose_defaults(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(tmp_path, "  api:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
-        _write(p, self._v2(services={
-            "api": {"cpu": 1024, "memory": 4096, "type": "application"},
-        }))
+        _write(
+            p,
+            self._v2(
+                services={
+                    "api": {"cpu": 1024, "memory": 4096, "type": "application"},
+                }
+            ),
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(p)
         ctx = build_deploy_context(v2, raw, p)
@@ -452,6 +547,7 @@ class TestComposeAutoImport:
 
     def test_exclude_skips_compose_services(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(
             tmp_path,
             "  api:\n    image: busybox\n  ngrok:\n    image: busybox\n  worker:\n    image: busybox\n",
@@ -467,6 +563,7 @@ class TestComposeAutoImport:
 
     def test_include_narrows_to_whitelist(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(
             tmp_path,
             "  api:\n    image: busybox\n  worker:\n    image: busybox\n  flower:\n    image: busybox\n",
@@ -482,11 +579,17 @@ class TestComposeAutoImport:
         # Sometimes a service has no compose definition (pre-built image
         # only, no build context). rc.yml should still deploy it.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(tmp_path, "  api:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
-        _write(p, self._v2(services={
-            "redis": {"cpu": 256, "memory": 512, "type": "infrastructure"},
-        }))
+        _write(
+            p,
+            self._v2(
+                services={
+                    "redis": {"cpu": 256, "memory": 512, "type": "infrastructure"},
+                }
+            ),
+        )
         monkeypatch.chdir(tmp_path)
         version, raw, v2 = load_rc_yml(p)
         ctx = build_deploy_context(v2, raw, p)
@@ -495,6 +598,7 @@ class TestComposeAutoImport:
 
     def test_include_unknown_service_rejected(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         self._write_compose(tmp_path, "  api:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, self._v2(compose={"include": ["api", "ghost"]}))
@@ -510,14 +614,17 @@ class TestSecretsPushV2:
 
     def _v2_cfg(self, env_path: str) -> dict:
         return {
-            "version": 2, "project": "testproj",
+            "version": 2,
+            "project": "testproj",
             "compose_file": "docker-compose.yml",
             "provider": "ecs",
-            "provider_config": {"ecs": {
-                "cluster": "testproj-cluster", "region": "us-west-1",
-            }},
-            "services": {"django": {"cpu": 256, "memory": 512,
-                                     "type": "application"}},
+            "provider_config": {
+                "ecs": {
+                    "cluster": "testproj-cluster",
+                    "region": "us-west-1",
+                }
+            },
+            "services": {"django": {"cpu": 256, "memory": 512, "type": "application"}},
             "secrets": [{"name": "django", "source": "file", "path": env_path}],
         }
 
@@ -537,7 +644,9 @@ class TestSecretsPushV2:
         sm = mock.Mock()
         ecs = mock.Mock()
         session = mock.Mock()
-        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[name]
+        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[
+            name
+        ]
         with mock.patch("boto3.Session", return_value=session):
             handled = cli_mod._secrets_push_v2(str(p), rollout=True)
 
@@ -548,7 +657,9 @@ class TestSecretsPushV2:
         body = _json.loads(call_kwargs["SecretString"])
         assert body == {"SECRET_KEY": "abc", "DATABASE_URL": "postgres://x"}
         ecs.update_service.assert_called_once_with(
-            cluster="testproj-cluster", service="django", forceNewDeployment=True,
+            cluster="testproj-cluster",
+            service="django",
+            forceNewDeployment=True,
         )
 
     def test_push_skips_rollout_when_flagged(self, tmp_path, monkeypatch):
@@ -561,15 +672,19 @@ class TestSecretsPushV2:
         _write(p, self._v2_cfg(str(env_file)))
         monkeypatch.chdir(tmp_path)
 
-        sm = mock.Mock(); ecs = mock.Mock()
+        sm = mock.Mock()
+        ecs = mock.Mock()
         session = mock.Mock()
-        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[name]
+        session.client.side_effect = lambda name: {"secretsmanager": sm, "ecs": ecs}[
+            name
+        ]
         with mock.patch("boto3.Session", return_value=session):
             cli_mod._secrets_push_v2(str(p), rollout=False)
         ecs.update_service.assert_not_called()
 
     def test_push_returns_false_for_v1(self, tmp_path, monkeypatch):
         from remote_compose import cli as cli_mod
+
         p = tmp_path / "rc.yml"
         _write(p, V1_SAMPLE)
         monkeypatch.chdir(tmp_path)
@@ -582,15 +697,19 @@ class TestAutoOnDeployHooks:
 
     def _v2_with_hooks(self, hooks: dict) -> dict:
         return {
-            "version": 2, "project": "p",
+            "version": 2,
+            "project": "p",
             "compose_file": "docker-compose.yml",
             "provider": "fake",
             "provider_config": {},
             "terraform": {"backend": {"type": "local"}},
             "services": {
                 "django": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "public": True, "port": 80,
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
+                    "public": True,
+                    "port": 80,
                     "lifecycle": hooks,
                 },
             },
@@ -599,20 +718,28 @@ class TestAutoOnDeployHooks:
     def test_auto_on_deploy_hook_runs_after_deploy(self, tmp_path, monkeypatch):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "migrate": {"command": ["./bin/migrate"], "auto_on_deploy": True},
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "migrate": {"command": ["./bin/migrate"], "auto_on_deploy": True},
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         provider.exec.return_value = mock.Mock(
-            exit_code=0, stdout="ok", stderr="",
+            exit_code=0,
+            stdout="ok",
+            stderr="",
         )
         with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
             assert v2mod.dispatch_if_v2(str(p), "deploy") is True
@@ -625,19 +752,25 @@ class TestAutoOnDeployHooks:
     def test_auto_on_deploy_runs_in_declaration_order(self, tmp_path, monkeypatch):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "first": {"command": ["./first"], "auto_on_deploy": True},
-            "second": {"command": ["./second"], "auto_on_deploy": True},
-            "third": {"command": ["./third"], "auto_on_deploy": True},
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "first": {"command": ["./first"], "auto_on_deploy": True},
+                "second": {"command": ["./second"], "auto_on_deploy": True},
+                "third": {"command": ["./third"], "auto_on_deploy": True},
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         provider.exec.return_value = mock.Mock(exit_code=0, stdout="", stderr="")
         with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
@@ -648,20 +781,28 @@ class TestAutoOnDeployHooks:
     def test_run_once_probe_skips_when_satisfied(self, tmp_path, monkeypatch):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "createsuperuser": {
-                "command": ["./csu"], "auto_on_deploy": True,
-                "run_once": True, "probe": ["./check"],
-            },
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "createsuperuser": {
+                    "command": ["./csu"],
+                    "auto_on_deploy": True,
+                    "run_once": True,
+                    "probe": ["./check"],
+                },
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         # Probe returns exit 0 — already done.
         probe_result = mock.Mock(exit_code=0, stdout="", stderr="")
@@ -673,23 +814,33 @@ class TestAutoOnDeployHooks:
         assert provider.exec.call_count == 1
         assert provider.exec.call_args.args[2] == ["./check"]
 
-    def test_run_once_probe_runs_command_when_not_satisfied(self, tmp_path, monkeypatch):
+    def test_run_once_probe_runs_command_when_not_satisfied(
+        self, tmp_path, monkeypatch
+    ):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "csu": {
-                "command": ["./csu"], "auto_on_deploy": True,
-                "run_once": True, "probe": ["./check"],
-            },
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "csu": {
+                    "command": ["./csu"],
+                    "auto_on_deploy": True,
+                    "run_once": True,
+                    "probe": ["./check"],
+                },
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         # Probe nonzero -> not done -> run command.
         provider.exec.side_effect = [
@@ -704,20 +855,28 @@ class TestAutoOnDeployHooks:
     def test_hook_failure_does_not_fail_deploy(self, tmp_path, monkeypatch):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "migrate": {"command": ["./fail"], "auto_on_deploy": True},
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "migrate": {"command": ["./fail"], "auto_on_deploy": True},
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         provider.exec.return_value = mock.Mock(
-            exit_code=1, stdout="", stderr="boom",
+            exit_code=1,
+            stdout="",
+            stderr="boom",
         )
         with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
             # Should NOT raise; hook failures are warnings.
@@ -726,17 +885,23 @@ class TestAutoOnDeployHooks:
     def test_no_auto_hooks_short_circuits(self, tmp_path, monkeypatch):
         from unittest import mock
         from remote_compose import cli_v2 as v2mod
-        cfg = self._v2_with_hooks({
-            "shell": {"command": ["./shell"], "interactive": True},
-        })
+
+        cfg = self._v2_with_hooks(
+            {
+                "shell": {"command": ["./shell"], "interactive": True},
+            }
+        )
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
 
         provider = mock.Mock()
         provider.deploy.return_value = mock.Mock(
-            revision_id="r1", services=["django"], duration_s=1.0,
-            terraform_outputs={}, warnings=[],
+            revision_id="r1",
+            services=["django"],
+            duration_s=1.0,
+            terraform_outputs={},
+            warnings=[],
         )
         with mock.patch.object(v2mod, "resolve_provider", return_value=provider):
             v2mod.dispatch_if_v2(str(p), "deploy")
@@ -746,21 +911,25 @@ class TestAutoOnDeployHooks:
 class TestDbPushFormatDetection:
     def test_dump_extension(self):
         from remote_compose.cli import _detect_dump_format
+
         assert _detect_dump_format("foo.dump") == "pg_restore"
         assert _detect_dump_format("backup.pgdump") == "pg_restore"
 
     def test_targz_extension(self):
         from remote_compose.cli import _detect_dump_format
+
         assert _detect_dump_format("dir.tar.gz") == "tar+pg_restore"
         assert _detect_dump_format("dir.tgz") == "tar+pg_restore"
 
     def test_sql_extension(self):
         from remote_compose.cli import _detect_dump_format
+
         assert _detect_dump_format("seed.sql") == "psql"
 
     def test_unknown_extension_rejected(self):
         from remote_compose.cli import _detect_dump_format
         import click
+
         with pytest.raises(click.exceptions.UsageError, match="cannot detect"):
             _detect_dump_format("data.bak")
 
@@ -768,6 +937,7 @@ class TestDbPushFormatDetection:
 class TestDbPushRestoreScript:
     def test_pg_restore_script_uses_curl_then_pg_restore(self):
         from remote_compose.cli import _build_restore_script
+
         s = _build_restore_script("x.dump", "https://signed", "pg_restore")
         assert "curl -fsSL" in s
         assert "pg_restore" in s
@@ -776,20 +946,26 @@ class TestDbPushRestoreScript:
 
     def test_targz_script_extracts_then_restores_directory(self):
         from remote_compose.cli import _build_restore_script
+
         s = _build_restore_script("x.tar.gz", "https://signed", "tar+pg_restore")
         assert "tar -xzf" in s
         assert "pg_restore -Fd" in s
 
     def test_psql_script_uses_psql_f(self):
         from remote_compose.cli import _build_restore_script
+
         s = _build_restore_script("seed.sql", "https://signed", "psql")
         assert "psql " in s
         assert "-f /tmp/_rcpush.sql" in s
 
     def test_script_cleans_up_on_exit(self):
         from remote_compose.cli import _build_restore_script
-        for fmt, name in [("pg_restore", "x.dump"), ("psql", "x.sql"),
-                          ("tar+pg_restore", "x.tar.gz")]:
+
+        for fmt, name in [
+            ("pg_restore", "x.dump"),
+            ("psql", "x.sql"),
+            ("tar+pg_restore", "x.tar.gz"),
+        ]:
             s = _build_restore_script(name, "https://signed", fmt)
             assert "rm -rf /tmp/_rcpush*" in s
 
@@ -804,33 +980,42 @@ class TestServiceV2EnvMerge:
 
     def test_rc_yml_env_merges_on_top_of_compose_env(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             "services:\n  api:\n    image: busybox\n"
             "    environment:\n      FOO: from_compose\n      KEEP: original\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "env": {"FOO": "from_rc_yml", "EXTRA": "added"},
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {
+                    "api": {
+                        "cpu": 256,
+                        "memory": 512,
+                        "type": "application",
+                        "env": {"FOO": "from_rc_yml", "EXTRA": "added"},
+                    },
                 },
             },
-        })
+        )
         monkeypatch.chdir(tmp_path)
         _, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
         assert ctx.services["api"].env["FOO"] == "from_rc_yml"  # rc.yml wins
-        assert ctx.services["api"].env["KEEP"] == "original"   # compose pass-through
-        assert ctx.services["api"].env["EXTRA"] == "added"     # rc.yml adds
+        assert ctx.services["api"].env["KEEP"] == "original"  # compose pass-through
+        assert ctx.services["api"].env["EXTRA"] == "added"  # rc.yml adds
 
     def test_rc_yml_env_overrides_env_file(self, tmp_path, monkeypatch):
         # The .46.4 use case: env_file pins DJANGO_ALLOWED_HOSTS=mydomain
         # but rc.yml's testing-defaults injection wants '*'. rc.yml wins.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         ef = tmp_path / ".env"
         ef.write_text("DJANGO_ALLOWED_HOSTS=mydomain.com\n")
         compose = tmp_path / "docker-compose.yml"
@@ -838,16 +1023,23 @@ class TestServiceV2EnvMerge:
             f"services:\n  django:\n    image: busybox\n    env_file: [{ef}]\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "django": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "env": {"DJANGO_ALLOWED_HOSTS": "*"},
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {
+                    "django": {
+                        "cpu": 256,
+                        "memory": 512,
+                        "type": "application",
+                        "env": {"DJANGO_ALLOWED_HOSTS": "*"},
+                    },
                 },
             },
-        })
+        )
         monkeypatch.chdir(tmp_path)
         _, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -855,19 +1047,25 @@ class TestServiceV2EnvMerge:
 
     def test_empty_rc_env_is_a_noop(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(
             "services:\n  api:\n    image: busybox\n"
             "    environment:\n      FOO: bar\n"
         )
         rc = tmp_path / "rc.yml"
-        _write(rc, {
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "api": {"cpu": 256, "memory": 512, "type": "application"},
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {
+                    "api": {"cpu": 256, "memory": 512, "type": "application"},
+                },
             },
-        })
+        )
         monkeypatch.chdir(tmp_path)
         _, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -878,19 +1076,28 @@ class TestServiceV2EnvMerge:
         # the value can flow into the task-def environment[] (env values
         # must be strings).
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         compose = tmp_path / "docker-compose.yml"
         compose.write_text("services:\n  api:\n    image: busybox\n")
         rc = tmp_path / "rc.yml"
-        rc.write_text(yaml.safe_dump({
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "env": {"DJANGO_DEBUG": False, "PORT": 8080},
-                },
-            },
-        }))
+        rc.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "p",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "fake",
+                    "services": {
+                        "api": {
+                            "cpu": 256,
+                            "memory": 512,
+                            "type": "application",
+                            "env": {"DJANGO_DEBUG": False, "PORT": 8080},
+                        },
+                    },
+                }
+            )
+        )
         monkeypatch.chdir(tmp_path)
         _, raw, v2 = load_rc_yml(rc)
         ctx = build_deploy_context(v2, raw, rc)
@@ -937,17 +1144,26 @@ class TestRcJ08DriftWarning:
             sp.write_text("DEBUG = True\n")
 
         rc = tmp_path / "rc.yml"
-        rc.write_text(yaml.safe_dump({
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "django": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "public": True, "port": 8000,
-                    "domain": "app.example.com",
-                },
-            },
-        }))
+        rc.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "p",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "fake",
+                    "services": {
+                        "django": {
+                            "cpu": 256,
+                            "memory": 512,
+                            "type": "application",
+                            "public": True,
+                            "port": 8000,
+                            "domain": "app.example.com",
+                        },
+                    },
+                }
+            )
+        )
         return rc
 
     def test_warns_when_marker_missing(self, tmp_path, monkeypatch, capsys):
@@ -973,26 +1189,32 @@ class TestRcJ08DriftWarning:
         # No domain → no CSRF_TRUSTED_ORIGINS injection → no warning even
         # if marker is missing (the patch isn't needed).
         compose = tmp_path / "docker-compose.yml"
-        compose.write_text(
-            "services:\n  django:\n    image: example_django\n"
-        )
+        compose.write_text("services:\n  django:\n    image: example_django\n")
         sp = tmp_path / "backend/config/settings/local.py"
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text("DEBUG = True\n")
         rc = tmp_path / "rc.yml"
-        rc.write_text(yaml.safe_dump({
-            "version": 2, "project": "p", "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {
-                "django": {
-                    "cpu": 256, "memory": 512, "type": "application",
-                    "public": True, "port": 8000,
-                },
-            },
-        }))
+        rc.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "p",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "fake",
+                    "services": {
+                        "django": {
+                            "cpu": 256,
+                            "memory": 512,
+                            "type": "application",
+                            "public": True,
+                            "port": 8000,
+                        },
+                    },
+                }
+            )
+        )
         monkeypatch.chdir(tmp_path)
         _, raw, v2 = load_rc_yml(rc)
         build_deploy_context(v2, raw, rc)
         captured = capsys.readouterr()
         assert "rc-j08" not in captured.err
-

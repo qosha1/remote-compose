@@ -7,10 +7,7 @@ CSRF_TRUSTED_ORIGINS, RAILS_HOSTS, PHX_HOST). Without this, every
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
-from unittest import mock
 
-import pytest
 
 from remote_compose.frameworks import DJANGO, RAILS, PHOENIX
 
@@ -33,8 +30,7 @@ class TestDjangoDomainEnv:
             "app.example.com,www.example.com,alt.example.com"
         )
         assert env["CSRF_TRUSTED_ORIGINS"] == (
-            "https://app.example.com,https://www.example.com,"
-            "https://alt.example.com"
+            "https://app.example.com,https://www.example.com," "https://alt.example.com"
         )
 
 
@@ -70,7 +66,9 @@ class TestBuildDeployContextInjectsDomainEnv:
     def _scaffold_django(self, tmp_path):
         ctx = tmp_path / "django"
         ctx.mkdir()
-        (ctx / "Dockerfile").write_text("FROM python\nWORKDIR /app\nRUN pip install django\nCOPY manage.py /app/\n")
+        (ctx / "Dockerfile").write_text(
+            "FROM python\nWORKDIR /app\nRUN pip install django\nCOPY manage.py /app/\n"
+        )
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""
             services:
@@ -83,7 +81,8 @@ class TestBuildDeployContextInjectsDomainEnv:
 
     def test_django_domain_set_injects_allowed_hosts_and_csrf(self, tmp_path):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        compose = self._scaffold_django(tmp_path)
+
+        self._scaffold_django(tmp_path)
         rc_yml = tmp_path / "rc.yml"
         rc_yml.write_text(textwrap.dedent("""
             version: 2
@@ -107,9 +106,7 @@ class TestBuildDeployContextInjectsDomainEnv:
         _, raw, v2 = load_rc_yml(rc_yml)
         ctx = build_deploy_context(v2, raw, rc_yml)
         env = ctx.services["django"].env
-        assert env.get("DJANGO_ALLOWED_HOSTS") == (
-            "app.example.com,alt.example.com"
-        )
+        assert env.get("DJANGO_ALLOWED_HOSTS") == ("app.example.com,alt.example.com")
         assert env.get("CSRF_TRUSTED_ORIGINS") == (
             "https://app.example.com,https://alt.example.com"
         )
@@ -117,7 +114,8 @@ class TestBuildDeployContextInjectsDomainEnv:
     def test_user_rcyml_env_overrides_domain_defaults(self, tmp_path):
         # User has explicit ALLOWED_HOSTS in rc.yml.env → don't clobber.
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        compose = self._scaffold_django(tmp_path)
+
+        self._scaffold_django(tmp_path)
         rc_yml = tmp_path / "rc.yml"
         rc_yml.write_text(textwrap.dedent("""
             version: 2
@@ -149,7 +147,8 @@ class TestBuildDeployContextInjectsDomainEnv:
 
     def test_no_domain_no_injection(self, tmp_path):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-        compose = self._scaffold_django(tmp_path)
+
+        self._scaffold_django(tmp_path)
         rc_yml = tmp_path / "rc.yml"
         rc_yml.write_text(textwrap.dedent("""
             version: 2
@@ -175,6 +174,7 @@ class TestBuildDeployContextInjectsDomainEnv:
         # nginx service with domain — shouldn't get DJANGO_* env (no
         # framework match on a stock nginx Dockerfile).
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
         ctx_dir = tmp_path / "nginx"
         ctx_dir.mkdir()
         (ctx_dir / "Dockerfile").write_text("FROM nginx:alpine\n")

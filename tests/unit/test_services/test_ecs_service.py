@@ -6,12 +6,14 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from botocore.exceptions import ClientError
 
-from remote_compose.models import ECSCluster, ECSTaskDefinition, ECSService as ECSServiceModel
+from remote_compose.models import (
+    ECSCluster,
+    ECSTaskDefinition,
+    ECSService as ECSServiceModel,
+)
 from remote_compose.services import ECSService, ComposeToECSConverter
 from remote_compose.exceptions import (
-    ECSClusterError,
     ECSClusterNotFoundError,
-    ECSServiceError,
     ECSTaskDefinitionError,
     ComposeConversionError,
 )
@@ -24,43 +26,45 @@ def ecs_service():
 
 @pytest.fixture
 def mock_boto_client():
-    with patch('boto3.client') as mock:
+    with patch("boto3.client") as mock:
         yield mock
 
 
 @pytest.fixture
 def cluster(db):
     return ECSCluster.objects.create(
-        name='test-cluster',
-        aws_cluster_name='test-cluster',
-        aws_cluster_arn='arn:aws:ecs:us-east-1:123456789:cluster/test-cluster',
-        aws_region='us-east-1',
+        name="test-cluster",
+        aws_cluster_name="test-cluster",
+        aws_cluster_arn="arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
+        aws_region="us-east-1",
         launch_type=ECSCluster.LaunchType.FARGATE,
         status=ECSCluster.ClusterStatus.ACTIVE,
-        subnet_ids=['subnet-123', 'subnet-456'],
-        security_group_ids=['sg-123'],
+        subnet_ids=["subnet-123", "subnet-456"],
+        security_group_ids=["sg-123"],
     )
 
 
 @pytest.fixture
 def task_definition(db, cluster):
     return ECSTaskDefinition.objects.create(
-        name='test-app',
+        name="test-app",
         cluster=cluster,
         revision=1,
-        container_definitions=[{
-            'name': 'web',
-            'image': 'nginx:alpine',
-            'cpu': 256,
-            'memory': 512,
-            'portMappings': [{'containerPort': 80}],
-        }],
-        cpu='256',
-        memory='512',
-        requires_compatibilities=['FARGATE'],
-        network_mode='awsvpc',
+        container_definitions=[
+            {
+                "name": "web",
+                "image": "nginx:alpine",
+                "cpu": 256,
+                "memory": 512,
+                "portMappings": [{"containerPort": 80}],
+            }
+        ],
+        cpu="256",
+        memory="512",
+        requires_compatibilities=["FARGATE"],
+        network_mode="awsvpc",
         status=ECSTaskDefinition.Status.REGISTERED,
-        aws_task_definition_arn='arn:aws:ecs:us-east-1:123456789:task-definition/test-app:1',
+        aws_task_definition_arn="arn:aws:ecs:us-east-1:123456789:task-definition/test-app:1",
     )
 
 
@@ -73,25 +77,27 @@ class TestECSServiceClusterOperations:
         mock_boto_client.return_value = mock_client
 
         mock_client.get_paginator.return_value.paginate.return_value = [
-            {'clusterArns': ['arn:aws:ecs:us-east-1:123:cluster/test']}
+            {"clusterArns": ["arn:aws:ecs:us-east-1:123:cluster/test"]}
         ]
         mock_client.describe_clusters.return_value = {
-            'clusters': [{
-                'clusterArn': 'arn:aws:ecs:us-east-1:123:cluster/test',
-                'clusterName': 'test',
-                'status': 'ACTIVE',
-                'runningTasksCount': 5,
-                'pendingTasksCount': 0,
-                'activeServicesCount': 2,
-            }]
+            "clusters": [
+                {
+                    "clusterArn": "arn:aws:ecs:us-east-1:123:cluster/test",
+                    "clusterName": "test",
+                    "status": "ACTIVE",
+                    "runningTasksCount": 5,
+                    "pendingTasksCount": 0,
+                    "activeServicesCount": 2,
+                }
+            ]
         }
 
         clusters = ecs_service.list_clusters()
 
         assert len(clusters) == 1
-        assert clusters[0]['name'] == 'test'
-        assert clusters[0]['status'] == 'ACTIVE'
-        assert clusters[0]['running_tasks'] == 5
+        assert clusters[0]["name"] == "test"
+        assert clusters[0]["status"] == "ACTIVE"
+        assert clusters[0]["running_tasks"] == 5
 
     def test_get_cluster(self, ecs_service, mock_boto_client):
         """Test getting a specific cluster."""
@@ -99,17 +105,19 @@ class TestECSServiceClusterOperations:
         mock_boto_client.return_value = mock_client
 
         mock_client.describe_clusters.return_value = {
-            'clusters': [{
-                'clusterArn': 'arn:aws:ecs:us-east-1:123:cluster/test',
-                'clusterName': 'test',
-                'status': 'ACTIVE',
-            }]
+            "clusters": [
+                {
+                    "clusterArn": "arn:aws:ecs:us-east-1:123:cluster/test",
+                    "clusterName": "test",
+                    "status": "ACTIVE",
+                }
+            ]
         }
 
-        cluster = ecs_service.get_cluster('test')
+        cluster = ecs_service.get_cluster("test")
 
-        assert cluster['name'] == 'test'
-        mock_client.describe_clusters.assert_called_once_with(clusters=['test'])
+        assert cluster["name"] == "test"
+        mock_client.describe_clusters.assert_called_once_with(clusters=["test"])
 
     def test_get_cluster_not_found(self, ecs_service, mock_boto_client):
         """Test getting a non-existent cluster."""
@@ -117,12 +125,12 @@ class TestECSServiceClusterOperations:
         mock_boto_client.return_value = mock_client
 
         mock_client.describe_clusters.return_value = {
-            'clusters': [],
-            'failures': [{'reason': 'MISSING', 'arn': 'test'}]
+            "clusters": [],
+            "failures": [{"reason": "MISSING", "arn": "test"}],
         }
 
         with pytest.raises(ECSClusterNotFoundError):
-            ecs_service.get_cluster('non-existent')
+            ecs_service.get_cluster("non-existent")
 
     @pytest.mark.django_db
     def test_create_cluster(self, ecs_service, mock_boto_client):
@@ -131,17 +139,19 @@ class TestECSServiceClusterOperations:
         mock_boto_client.return_value = mock_client
 
         mock_client.create_cluster.return_value = {
-            'cluster': {
-                'clusterArn': 'arn:aws:ecs:us-east-1:123:cluster/new-cluster',
-                'clusterName': 'new-cluster',
-                'status': 'ACTIVE',
+            "cluster": {
+                "clusterArn": "arn:aws:ecs:us-east-1:123:cluster/new-cluster",
+                "clusterName": "new-cluster",
+                "status": "ACTIVE",
             }
         }
 
-        cluster = ecs_service.create_cluster('new-cluster', region='us-east-1')
+        cluster = ecs_service.create_cluster("new-cluster", region="us-east-1")
 
-        assert cluster.name == 'new-cluster'
-        assert cluster.aws_cluster_arn == 'arn:aws:ecs:us-east-1:123:cluster/new-cluster'
+        assert cluster.name == "new-cluster"
+        assert (
+            cluster.aws_cluster_arn == "arn:aws:ecs:us-east-1:123:cluster/new-cluster"
+        )
         assert cluster.status == ECSCluster.ClusterStatus.ACTIVE
         assert cluster.is_managed is True
 
@@ -152,16 +162,18 @@ class TestECSServiceClusterOperations:
         mock_boto_client.return_value = mock_client
 
         mock_client.describe_clusters.return_value = {
-            'clusters': [{
-                'clusterArn': 'arn:aws:ecs:us-east-1:123:cluster/existing',
-                'clusterName': 'existing',
-                'status': 'ACTIVE',
-            }]
+            "clusters": [
+                {
+                    "clusterArn": "arn:aws:ecs:us-east-1:123:cluster/existing",
+                    "clusterName": "existing",
+                    "status": "ACTIVE",
+                }
+            ]
         }
 
-        cluster = ecs_service.import_cluster('existing', region='us-east-1')
+        cluster = ecs_service.import_cluster("existing", region="us-east-1")
 
-        assert cluster.name == 'existing'
+        assert cluster.name == "existing"
         assert cluster.is_managed is False
 
 
@@ -175,43 +187,53 @@ class TestECSServiceTaskDefinitions:
         mock_boto_client.return_value = mock_client
 
         task_def = ECSTaskDefinition.objects.create(
-            name='new-task',
+            name="new-task",
             cluster=cluster,
-            container_definitions=[{'name': 'web', 'image': 'nginx'}],
-            cpu='256',
-            memory='512',
+            container_definitions=[{"name": "web", "image": "nginx"}],
+            cpu="256",
+            memory="512",
         )
 
         mock_client.register_task_definition.return_value = {
-            'taskDefinition': {
-                'taskDefinitionArn': 'arn:aws:ecs:us-east-1:123:task-definition/new-task:1',
-                'revision': 1,
+            "taskDefinition": {
+                "taskDefinitionArn": "arn:aws:ecs:us-east-1:123:task-definition/new-task:1",
+                "revision": 1,
             }
         }
 
         result = ecs_service.register_task_definition(task_def)
 
-        assert result.aws_task_definition_arn == 'arn:aws:ecs:us-east-1:123:task-definition/new-task:1'
+        assert (
+            result.aws_task_definition_arn
+            == "arn:aws:ecs:us-east-1:123:task-definition/new-task:1"
+        )
         assert result.revision == 1
         assert result.status == ECSTaskDefinition.Status.REGISTERED
 
     @pytest.mark.django_db
-    def test_register_task_definition_error(self, ecs_service, mock_boto_client, cluster):
+    def test_register_task_definition_error(
+        self, ecs_service, mock_boto_client, cluster
+    ):
         """Test task definition registration failure."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
 
         task_def = ECSTaskDefinition.objects.create(
-            name='fail-task',
+            name="fail-task",
             cluster=cluster,
-            container_definitions=[{'name': 'web', 'image': 'invalid'}],
-            cpu='256',
-            memory='512',
+            container_definitions=[{"name": "web", "image": "invalid"}],
+            cpu="256",
+            memory="512",
         )
 
         mock_client.register_task_definition.side_effect = ClientError(
-            {'Error': {'Code': 'InvalidParameterException', 'Message': 'Invalid image'}},
-            'RegisterTaskDefinition'
+            {
+                "Error": {
+                    "Code": "InvalidParameterException",
+                    "Message": "Invalid image",
+                }
+            },
+            "RegisterTaskDefinition",
         )
 
         with pytest.raises(ECSTaskDefinitionError):
@@ -222,52 +244,59 @@ class TestECSServiceOperations:
     """Tests for ECS service operations."""
 
     @pytest.mark.django_db
-    def test_create_service(self, ecs_service, mock_boto_client, cluster, task_definition):
+    def test_create_service(
+        self, ecs_service, mock_boto_client, cluster, task_definition
+    ):
         """Test creating an ECS service."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
 
         ecs_svc = ECSServiceModel.objects.create(
-            name='web-service',
+            name="web-service",
             cluster=cluster,
             task_definition=task_definition,
             desired_count=2,
         )
 
         mock_client.create_service.return_value = {
-            'service': {
-                'serviceArn': 'arn:aws:ecs:us-east-1:123:service/test-cluster/web-service',
-                'serviceName': 'web-service',
-                'status': 'ACTIVE',
+            "service": {
+                "serviceArn": "arn:aws:ecs:us-east-1:123:service/test-cluster/web-service",
+                "serviceName": "web-service",
+                "status": "ACTIVE",
             }
         }
 
         result = ecs_service.create_service(ecs_svc)
 
-        assert result.aws_service_arn == 'arn:aws:ecs:us-east-1:123:service/test-cluster/web-service'
+        assert (
+            result.aws_service_arn
+            == "arn:aws:ecs:us-east-1:123:service/test-cluster/web-service"
+        )
         assert result.status == ECSServiceModel.ServiceStatus.CREATING
 
     @pytest.mark.django_db
-    def test_update_service(self, ecs_service, mock_boto_client, cluster, task_definition):
+    def test_update_service(
+        self, ecs_service, mock_boto_client, cluster, task_definition
+    ):
         """Test updating an ECS service."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
 
         ecs_svc = ECSServiceModel.objects.create(
-            name='web-service',
+            name="web-service",
             cluster=cluster,
             task_definition=task_definition,
             desired_count=2,
-            aws_service_arn='arn:aws:ecs:us-east-1:123:service/test-cluster/web-service',
+            aws_service_arn="arn:aws:ecs:us-east-1:123:service/test-cluster/web-service",
         )
 
         mock_client.update_service.return_value = {
-            'service': {
-                'serviceArn': ecs_svc.aws_service_arn,
-                'serviceName': 'web-service',
-                'status': 'ACTIVE',
-                'runningCount': 2,
-                'desiredCount': 3,
+            "service": {
+                "serviceArn": ecs_svc.aws_service_arn,
+                "serviceName": "web-service",
+                "status": "ACTIVE",
+                "runningCount": 2,
+                "desiredCount": 3,
             }
         }
 
@@ -295,12 +324,12 @@ services:
     ports:
       - "80:80"
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
-        assert result.name == 'test-app'
+        assert result.name == "test-app"
         assert len(result.container_definitions) == 1
-        assert result.container_definitions[0]['name'] == 'web'
-        assert result.container_definitions[0]['image'] == 'nginx:alpine'
+        assert result.container_definitions[0]["name"] == "web"
+        assert result.container_definitions[0]["image"] == "nginx:alpine"
 
     @pytest.mark.django_db
     def test_convert_with_environment(self, converter, cluster):
@@ -314,11 +343,11 @@ services:
       - DEBUG=true
       - API_KEY=secret
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
-        env_vars = result.container_definitions[0]['environment']
-        assert {'name': 'DEBUG', 'value': 'true'} in env_vars
-        assert {'name': 'API_KEY', 'value': 'secret'} in env_vars
+        env_vars = result.container_definitions[0]["environment"]
+        assert {"name": "DEBUG", "value": "true"} in env_vars
+        assert {"name": "API_KEY", "value": "secret"} in env_vars
 
     @pytest.mark.django_db
     def test_convert_with_healthcheck(self, converter, cluster):
@@ -334,13 +363,13 @@ services:
       timeout: 10s
       retries: 3
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
-        health = result.container_definitions[0]['healthCheck']
-        assert health['command'] == ['CMD', 'curl', '-f', 'http://localhost/']
-        assert health['interval'] == 30
-        assert health['timeout'] == 10
-        assert health['retries'] == 3
+        health = result.container_definitions[0]["healthCheck"]
+        assert health["command"] == ["CMD", "curl", "-f", "http://localhost/"]
+        assert health["interval"] == 30
+        assert health["timeout"] == 10
+        assert health["retries"] == 3
 
     @pytest.mark.django_db
     def test_convert_with_resources(self, converter, cluster):
@@ -356,7 +385,7 @@ services:
           cpus: '0.5'
           memory: 1G
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
         # Should round up to valid Fargate values
         assert int(result.cpu) >= 512
@@ -377,12 +406,12 @@ services:
     ports:
       - "6379:6379"
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
         assert len(result.container_definitions) == 2
-        names = [c['name'] for c in result.container_definitions]
-        assert 'web' in names
-        assert 'redis' in names
+        names = [c["name"] for c in result.container_definitions]
+        assert "web" in names
+        assert "redis" in names
 
     @pytest.mark.django_db
     def test_convert_with_depends_on(self, converter, cluster):
@@ -397,21 +426,23 @@ services:
   db:
     image: postgres
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        result = converter.convert(compose, cluster, "test-app")
 
-        web_container = next(c for c in result.container_definitions if c['name'] == 'web')
-        assert 'dependsOn' in web_container
-        assert web_container['dependsOn'][0]['containerName'] == 'db'
+        web_container = next(
+            c for c in result.container_definitions if c["name"] == "web"
+        )
+        assert "dependsOn" in web_container
+        assert web_container["dependsOn"][0]["containerName"] == "db"
 
     def test_convert_invalid_yaml(self, converter):
         """Test converting invalid YAML."""
         with pytest.raises(ComposeConversionError):
-            converter.convert("invalid: yaml: content:", Mock(), 'test')
+            converter.convert("invalid: yaml: content:", Mock(), "test")
 
     def test_convert_empty_compose(self, converter):
         """Test converting empty compose file."""
         with pytest.raises(ComposeConversionError):
-            converter.convert("", Mock(), 'test')
+            converter.convert("", Mock(), "test")
 
     def test_convert_no_services(self, converter):
         """Test converting compose with no services."""
@@ -421,7 +452,7 @@ networks:
   default:
 """
         with pytest.raises(ComposeConversionError):
-            converter.convert(compose, Mock(), 'test')
+            converter.convert(compose, Mock(), "test")
 
     @pytest.mark.django_db
     def test_convert_build_warning(self, converter, cluster):
@@ -432,10 +463,10 @@ services:
   app:
     build: ./app
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        converter.convert(compose, cluster, "test-app")
 
         assert len(converter.warnings) > 0
-        assert any('build' in w.lower() for w in converter.warnings)
+        assert any("build" in w.lower() for w in converter.warnings)
 
     @pytest.mark.django_db
     def test_convert_volume_warning_for_fargate(self, converter, cluster):
@@ -451,10 +482,12 @@ services:
     volumes:
       - /host/path:/container/path
 """
-        result = converter.convert(compose, cluster, 'test-app')
+        converter.convert(compose, cluster, "test-app")
 
         assert len(converter.warnings) > 0
-        assert any('volume' in w.lower() or 'fargate' in w.lower() for w in converter.warnings)
+        assert any(
+            "volume" in w.lower() or "fargate" in w.lower() for w in converter.warnings
+        )
 
 
 class TestECSModels:
@@ -464,9 +497,9 @@ class TestECSModels:
     def test_cluster_is_active_property(self):
         """Test cluster is_active property."""
         cluster = ECSCluster.objects.create(
-            name='test',
-            aws_cluster_name='test',
-            aws_region='us-east-1',
+            name="test",
+            aws_cluster_name="test",
+            aws_region="us-east-1",
             status=ECSCluster.ClusterStatus.ACTIVE,
         )
 
@@ -478,30 +511,30 @@ class TestECSModels:
     @pytest.mark.django_db
     def test_task_definition_to_aws_format(self, cluster):
         """Test task definition to AWS format conversion."""
-        cluster.task_execution_role_arn = 'arn:aws:iam::123:role/ecsTaskExecutionRole'
+        cluster.task_execution_role_arn = "arn:aws:iam::123:role/ecsTaskExecutionRole"
         cluster.save()
 
         task_def = ECSTaskDefinition.objects.create(
-            name='test-task',
+            name="test-task",
             cluster=cluster,
-            container_definitions=[{'name': 'web', 'image': 'nginx'}],
-            cpu='256',
-            memory='512',
-            requires_compatibilities=['FARGATE'],
+            container_definitions=[{"name": "web", "image": "nginx"}],
+            cpu="256",
+            memory="512",
+            requires_compatibilities=["FARGATE"],
         )
 
         aws_format = task_def.to_aws_format()
 
-        assert aws_format['family'] == 'test-task'
-        assert aws_format['cpu'] == '256'
-        assert aws_format['memory'] == '512'
-        assert aws_format['executionRoleArn'] == cluster.task_execution_role_arn
+        assert aws_format["family"] == "test-task"
+        assert aws_format["cpu"] == "256"
+        assert aws_format["memory"] == "512"
+        assert aws_format["executionRoleArn"] == cluster.task_execution_role_arn
 
     @pytest.mark.django_db
     def test_service_is_healthy(self, cluster, task_definition):
         """Test service is_healthy property."""
         service = ECSServiceModel.objects.create(
-            name='test-service',
+            name="test-service",
             cluster=cluster,
             task_definition=task_definition,
             desired_count=2,
@@ -522,12 +555,12 @@ class TestECSModels:
     def test_service_to_aws_create_format(self, cluster, task_definition):
         """Test service to AWS create format."""
         cluster.launch_type = ECSCluster.LaunchType.FARGATE
-        cluster.subnet_ids = ['subnet-1', 'subnet-2']
-        cluster.security_group_ids = ['sg-1']
+        cluster.subnet_ids = ["subnet-1", "subnet-2"]
+        cluster.security_group_ids = ["sg-1"]
         cluster.save()
 
         service = ECSServiceModel.objects.create(
-            name='test-service',
+            name="test-service",
             cluster=cluster,
             task_definition=task_definition,
             desired_count=2,
@@ -535,8 +568,11 @@ class TestECSModels:
 
         aws_format = service.to_aws_create_format()
 
-        assert aws_format['serviceName'] == 'test-service'
-        assert aws_format['desiredCount'] == 2
-        assert aws_format['launchType'] == 'FARGATE'
-        assert 'networkConfiguration' in aws_format
-        assert aws_format['networkConfiguration']['awsvpcConfiguration']['subnets'] == ['subnet-1', 'subnet-2']
+        assert aws_format["serviceName"] == "test-service"
+        assert aws_format["desiredCount"] == 2
+        assert aws_format["launchType"] == "FARGATE"
+        assert "networkConfiguration" in aws_format
+        assert aws_format["networkConfiguration"]["awsvpcConfiguration"]["subnets"] == [
+            "subnet-1",
+            "subnet-2",
+        ]

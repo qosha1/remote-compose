@@ -8,7 +8,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 import yaml
 
 from remote_compose.compose_warnings import detect_python_pyc_in_build_context
@@ -37,36 +36,45 @@ def _scaffold(
 
 class TestDetectsPycInPythonContext:
     def test_warns_for_python_image_without_dockerignore(self, tmp_path):
-        compose, path = _scaffold(tmp_path, textwrap.dedent("""
+        compose, path = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               api:
                 build: .
                 image: my-py:latest
                 command: python manage.py runserver
-        """).strip())
+        """).strip(),
+        )
         warnings = detect_python_pyc_in_build_context(compose, path)
         assert len(warnings) == 1
         assert "rc-ife" in warnings[0]
         assert "__pycache__" in warnings[0]
 
     def test_warns_for_uvicorn_command(self, tmp_path):
-        compose, path = _scaffold(tmp_path, textwrap.dedent("""
+        compose, path = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               api:
                 build: .
                 image: anything
                 command: uvicorn config.asgi:app --host 0.0.0.0
-        """).strip())
+        """).strip(),
+        )
         warnings = detect_python_pyc_in_build_context(compose, path)
         assert len(warnings) == 1
 
     def test_warns_for_python_base_image(self, tmp_path):
-        compose, path = _scaffold(tmp_path, textwrap.dedent("""
+        compose, path = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               api:
                 build: .
                 image: python:3.11-slim
-        """).strip())
+        """).strip(),
+        )
         warnings = detect_python_pyc_in_build_context(compose, path)
         assert len(warnings) == 1
 
@@ -101,22 +109,28 @@ class TestDoesNotWarn:
         assert warnings == []
 
     def test_silent_for_non_python_service(self, tmp_path):
-        compose, path = _scaffold(tmp_path, textwrap.dedent("""
+        compose, path = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               web:
                 build: .
                 image: nginx:alpine
-        """).strip())
+        """).strip(),
+        )
         warnings = detect_python_pyc_in_build_context(compose, path)
         assert warnings == []
 
     def test_silent_when_no_build_context(self, tmp_path):
-        compose, path = _scaffold(tmp_path, textwrap.dedent("""
+        compose, path = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               api:
                 image: python:3.11
                 command: python -m mymodule
-        """).strip())
+        """).strip(),
+        )
         # No build: stanza, so no context to scan.
         warnings = detect_python_pyc_in_build_context(compose, path)
         assert warnings == []

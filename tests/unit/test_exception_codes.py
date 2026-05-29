@@ -18,7 +18,6 @@ import pytest
 
 from remote_compose import exceptions as ex
 
-
 # ---------------------------------------------------------------------------
 # Range expectations: (class, expected_range)
 # ---------------------------------------------------------------------------

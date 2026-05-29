@@ -15,7 +15,6 @@ import pytest
 from remote_compose.exceptions import ComposeConversionError
 from remote_compose.services.compose_converter import ComposeToECSConverter
 
-
 # ---------------------------------------------------------------------------
 # Happy path: account_id + region produce a real ARN
 # ---------------------------------------------------------------------------
@@ -28,19 +27,22 @@ class TestSecretsArnGeneration:
             [{"source": "db-password", "target": "DB_PASSWORD"}],
             region="us-west-2",
         )
-        assert out == [{
-            "name": "DB_PASSWORD",  # upper + dashes-to-underscores
-            "valueFrom": (
-                "arn:aws:secretsmanager:us-west-2:123456789012:"
-                "secret:db-password"
-            ),
-        }]
+        assert out == [
+            {
+                "name": "DB_PASSWORD",  # upper + dashes-to-underscores
+                "valueFrom": (
+                    "arn:aws:secretsmanager:us-west-2:123456789012:"
+                    "secret:db-password"
+                ),
+            }
+        ]
 
     def test_secret_name_falls_back_to_name_field(self):
         # Compose accepts both ``source: foo`` and ``name: foo`` shapes.
         c = ComposeToECSConverter(account_id="123456789012")
         out = c._convert_secrets(
-            [{"name": "api_key"}], region="us-east-1",
+            [{"name": "api_key"}],
+            region="us-east-1",
         )
         assert len(out) == 1
         assert "api_key" in out[0]["valueFrom"]
@@ -52,10 +54,7 @@ class TestSecretsArnGeneration:
         c = ComposeToECSConverter(account_id="123456789012")
         out = c._convert_secrets(["bare-string-secret"], region="us-west-1")
         assert out == []
-        assert any(
-            "manual configuration" in w
-            for w in c._conversion_warnings
-        )
+        assert any("manual configuration" in w for w in c._conversion_warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -68,14 +67,16 @@ class TestSecretsArnErrors:
         c = ComposeToECSConverter()  # default account_id=None
         with pytest.raises(ComposeConversionError, match="account_id"):
             c._convert_secrets(
-                [{"source": "db-password"}], region="us-west-2",
+                [{"source": "db-password"}],
+                region="us-west-2",
             )
 
     def test_missing_region_raises_when_secrets_present(self):
         c = ComposeToECSConverter(account_id="123456789012")
         with pytest.raises(ComposeConversionError, match="region"):
             c._convert_secrets(
-                [{"source": "db-password"}], region=None,
+                [{"source": "db-password"}],
+                region=None,
             )
 
     def test_no_secrets_no_account_id_is_a_noop(self):
@@ -89,7 +90,8 @@ class TestSecretsArnErrors:
     def test_arn_does_not_contain_literal_placeholder(self):
         c = ComposeToECSConverter(account_id="999999999999")
         out = c._convert_secrets(
-            [{"source": "x"}], region="eu-west-1",
+            [{"source": "x"}],
+            region="eu-west-1",
         )
         rendered = out[0]["valueFrom"]
         assert "REGION" not in rendered

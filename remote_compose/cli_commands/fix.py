@@ -11,7 +11,7 @@ import yaml
 from ..defaults import VPC_CIDR_DEFAULT
 
 
-@click.group(name='fix')
+@click.group(name="fix")
 def fix_group():
     """One-shot scaffolders for common ECS deploy gotchas.
 
@@ -31,24 +31,38 @@ def fix_group():
     """
 
 
-@fix_group.command(name='nginx-conf')
-@click.option('--upstream', 'upstream_specs', multiple=True,
-              help='Upstream service to proxy, in NAME:PORT form. Repeat '
-                   'for multi-upstream configs. The first --upstream is '
-                   'wired into the catch-all default_server block.')
-@click.option('--django', 'django_names', multiple=True,
-              help='Mark the named upstream(s) as Django so the generator '
-                   "injects 'proxy_set_header Host localhost;' (works around "
-                   "ALLOWED_HOSTS rejection of ALB DNS Host headers). "
-                   "Use --django=NAME or just --django to mark every "
-                   "upstream.")
-@click.option('--out', 'out_dir', default='compose/ecs/nginx', show_default=True,
-              type=click.Path(file_okay=False),
-              help='Subdir under the project to write nginx.conf + '
-                   'Dockerfile into. The default mirrors the convention '
-                   "verified against rc-test-startsimpli.")
-@click.option('--force', is_flag=True,
-              help='Overwrite existing nginx.conf / Dockerfile in --out.')
+@fix_group.command(name="nginx-conf")
+@click.option(
+    "--upstream",
+    "upstream_specs",
+    multiple=True,
+    help="Upstream service to proxy, in NAME:PORT form. Repeat "
+    "for multi-upstream configs. The first --upstream is "
+    "wired into the catch-all default_server block.",
+)
+@click.option(
+    "--django",
+    "django_names",
+    multiple=True,
+    help="Mark the named upstream(s) as Django so the generator "
+    "injects 'proxy_set_header Host localhost;' (works around "
+    "ALLOWED_HOSTS rejection of ALB DNS Host headers). "
+    "Use --django=NAME or just --django to mark every "
+    "upstream.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default="compose/ecs/nginx",
+    show_default=True,
+    type=click.Path(file_okay=False),
+    help="Subdir under the project to write nginx.conf + "
+    "Dockerfile into. The default mirrors the convention "
+    "verified against rc-test-startsimpli.",
+)
+@click.option(
+    "--force", is_flag=True, help="Overwrite existing nginx.conf / Dockerfile in --out."
+)
 @click.pass_context
 def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
     """Emit an ECS-ready nginx.conf + Dockerfile (rc-e5u.44.21).
@@ -78,19 +92,22 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
       rc fix nginx-conf  # reads upstreams from rc.yml services with port:
     """
     from remote_compose.fix_nginx_conf import (
-        Upstream, parse_upstream_arg, upstreams_from_rc_v2, write_ecs_nginx,
+        Upstream,
+        parse_upstream_arg,
+        upstreams_from_rc_v2,
+        write_ecs_nginx,
     )
 
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     rc_path = Path(config_path)
     if not rc_path.exists():
         click.echo(f"Error: {rc_path} not found.", err=True)
         sys.exit(1)
 
     raw = yaml.safe_load(rc_path.read_text()) or {}
-    project = str(raw.get('project') or '')
-    ecs_cfg = ((raw.get('provider_config') or {}).get('ecs') or {})
-    vpc_cidr = ecs_cfg.get('vpc_cidr')
+    project = str(raw.get("project") or "")
+    ecs_cfg = (raw.get("provider_config") or {}).get("ecs") or {}
+    vpc_cidr = ecs_cfg.get("vpc_cidr")
 
     django_set = {str(d) for d in (django_names or ())}
 
@@ -126,27 +143,29 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    click.echo(f"\nrc fix nginx-conf")
+    click.echo("\nrc fix nginx-conf")
     click.echo(f"  project:    {project or '<unset>'}")
     click.echo(f"  vpc_cidr:   {vpc_cidr or f'{VPC_CIDR_DEFAULT} (default)'}")
-    click.echo(f"  upstreams:  " + ", ".join(
-        f"{u.name}:{u.port}{' (django)' if u.django else ''}"
-        for u in upstreams
-    ))
+    click.echo(
+        "  upstreams:  "
+        + ", ".join(
+            f"{u.name}:{u.port}{' (django)' if u.django else ''}" for u in upstreams
+        )
+    )
     click.echo(f"  wrote:      {nginx_path.relative_to(project_dir)}")
     click.echo(f"              {dockerfile_path.relative_to(project_dir)}")
     # rc-2kp: ensure next rc up doesn't reuse a stale buildx layer cache
     # that predates the nginx-conf write.
     from remote_compose.no_cache_state import mark_no_cache
+
     mark_no_cache(project_dir, reason="rc fix nginx-conf")
     click.echo(
-        f"\n  Wire it into your compose ECS variant (build context = "
-        f"project root):"
+        "\n  Wire it into your compose ECS variant (build context = " "project root):"
     )
-    click.echo(f"\n    services:")
-    click.echo(f"      nginx:")
-    click.echo(f"        build:")
-    click.echo(f"          context: .")
+    click.echo("\n    services:")
+    click.echo("      nginx:")
+    click.echo("        build:")
+    click.echo("          context: .")
     click.echo(f"          dockerfile: {out_dir}/Dockerfile")
     click.echo(
         "\n  Then `rc deploy --services nginx` should produce a healthy "
@@ -154,10 +173,13 @@ def fix_nginx_conf_cmd(ctx, upstream_specs, django_names, out_dir, force):
     )
 
 
-@fix_group.command(name='bake-bind-mount-source')
-@click.argument('service')
-@click.option('--force', is_flag=True,
-              help='Append the COPY line even if a similar one already exists.')
+@fix_group.command(name="bake-bind-mount-source")
+@click.argument("service")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Append the COPY line even if a similar one already exists.",
+)
 @click.pass_context
 def fix_bake_bind_mount_source_cmd(ctx, service, force):
     """Patch a service's Dockerfile so its bind-mount source dirs are baked in.
@@ -191,7 +213,7 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
     """
     from remote_compose.fix_bake_bind import bake_bind_mount_source
 
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     rc_path = Path(config_path)
     if not rc_path.exists():
         raise click.ClickException(f"{rc_path} not found.")
@@ -209,14 +231,17 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
 
     try:
         result = bake_bind_mount_source(
-            compose_path, service, force=force,
+            compose_path,
+            service,
+            force=force,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
     if result.skipped_reason:
-        click.echo(f"  rc fix bake-bind-mount-source {service}: "
-                   f"{result.skipped_reason}")
+        click.echo(
+            f"  rc fix bake-bind-mount-source {service}: " f"{result.skipped_reason}"
+        )
         return
 
     # rc-2kp: edits to the Dockerfile may not invalidate the buildx layer
@@ -225,6 +250,7 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
     # sentinel so the next `rc up` rebuilds without --cache-from for this
     # service's image.
     from remote_compose.no_cache_state import mark_no_cache
+
     mark_no_cache(
         rc_path.parent.resolve(),
         reason=f"rc fix bake-bind-mount-source {service}",
@@ -232,16 +258,20 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
 
     click.echo(f"\nrc fix bake-bind-mount-source {service}")
     click.echo(f"  dockerfile:  {result.dockerfile_path}")
-    click.echo(f"  added COPY:")
+    click.echo("  added COPY:")
     for host, container in result.copies_added:
         click.echo(f"    COPY {host} {container}")
     if result.skipped_dockerignored:
-        click.echo(f"\n  ⚠ skipped (excluded by .dockerignore — "
-                   f"adding COPY would break docker build):")
+        click.echo(
+            "\n  ⚠ skipped (excluded by .dockerignore — "
+            "adding COPY would break docker build):"
+        )
         for host, container in result.skipped_dockerignored:
             click.echo(f"    COPY {host} {container}")
-        click.echo(f"  → remove the dockerignore entry for these paths if "
-                   f"you need them baked into the ECS image.")
+        click.echo(
+            "  → remove the dockerignore entry for these paths if "
+            "you need them baked into the ECS image."
+        )
     click.echo(
         "\n  Local docker-compose still bind-mounts these paths at runtime "
         "(the bind mount overrides the COPY), so local hot-reload keeps "
@@ -249,19 +279,28 @@ def fix_bake_bind_mount_source_cmd(ctx, service, force):
     )
 
 
-@fix_group.command(name='django-tls')
-@click.option('--settings', 'settings_module', default=None,
-              help='Django settings module to patch (dotted path or '
-                   'relative path). Auto-detected when omitted from the '
-                   'usual locations: backend/config/settings/local.py, '
-                   'config/settings.py, etc.')
-@click.option('--secure-cookies', is_flag=True,
-              help='Also append SESSION_COOKIE_SECURE + CSRF_COOKIE_SECURE. '
-                   'Skip when any path in the stack is reachable over '
-                   'plain HTTP (e.g. service-to-service health checks).')
-@click.option('--force', is_flag=True,
-              help='Re-append the block even when the rc-j08 marker is '
-                   'already present.')
+@fix_group.command(name="django-tls")
+@click.option(
+    "--settings",
+    "settings_module",
+    default=None,
+    help="Django settings module to patch (dotted path or "
+    "relative path). Auto-detected when omitted from the "
+    "usual locations: backend/config/settings/local.py, "
+    "config/settings.py, etc.",
+)
+@click.option(
+    "--secure-cookies",
+    is_flag=True,
+    help="Also append SESSION_COOKIE_SECURE + CSRF_COOKIE_SECURE. "
+    "Skip when any path in the stack is reachable over "
+    "plain HTTP (e.g. service-to-service health checks).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-append the block even when the rc-j08 marker is " "already present.",
+)
 @click.pass_context
 def fix_django_tls_cmd(ctx, settings_module, secure_cookies, force):
     """Patch a Django settings module so it consumes the env vars rc up --domain injects.
@@ -294,7 +333,7 @@ def fix_django_tls_cmd(ctx, settings_module, secure_cookies, force):
     """
     from remote_compose.fix_django_tls import fix_django_tls
 
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     rc_path = Path(config_path)
     if not rc_path.exists():
         raise click.ClickException(f"{rc_path} not found.")
@@ -322,17 +361,18 @@ def fix_django_tls_cmd(ctx, settings_module, secure_cookies, force):
     # registry layer cache may not invalidate reliably across
     # source-content changes. Force --no-cache on next rc up.
     from remote_compose.no_cache_state import mark_no_cache
+
     mark_no_cache(project_dir, reason="rc fix django-tls")
 
-    click.echo(f"\nrc fix django-tls")
+    click.echo("\nrc fix django-tls")
     click.echo(f"  settings:  {result.settings_path}")
-    click.echo(f"  appended:")
-    click.echo(f"    CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')")
-    click.echo(f"    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')")
-    click.echo(f"    USE_X_FORWARDED_HOST = True")
+    click.echo("  appended:")
+    click.echo("    CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')")
+    click.echo("    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')")
+    click.echo("    USE_X_FORWARDED_HOST = True")
     if secure_cookies:
-        click.echo(f"    SESSION_COOKIE_SECURE = True")
-        click.echo(f"    CSRF_COOKIE_SECURE = True")
+        click.echo("    SESSION_COOKIE_SECURE = True")
+        click.echo("    CSRF_COOKIE_SECURE = True")
     click.echo(
         "\n  Now `rc up --domain X` will produce a stack where /admin "
         "POST login works first time."

@@ -29,10 +29,7 @@ class SetupEFSVolumesStep(PipelineStep):
 
     def should_run(self, context: PipelineContext) -> bool:
         """Only run if there are named volumes that need EFS."""
-        return (
-            context.create_efs_for_volumes and
-            context.has_named_volumes
-        )
+        return context.create_efs_for_volumes and context.has_named_volumes
 
     def execute(self, context: PipelineContext) -> StepResult:
         """Set up EFS for named volumes, reusing existing resources."""
@@ -49,9 +46,7 @@ class SetupEFSVolumesStep(PipelineStep):
             context.add_warning(
                 "Cannot create EFS: missing VPC/subnet configuration on cluster"
             )
-            return StepResult.ok(
-                "Skipped EFS setup: missing network configuration"
-            )
+            return StepResult.ok("Skipped EFS setup: missing network configuration")
 
         from ....models import EFSFileSystem
 
@@ -65,8 +60,7 @@ class SetupEFSVolumesStep(PipelineStep):
         try:
             # First, check if we have an existing EFS model for this project
             existing_efs_model = EFSFileSystem.objects.filter(
-                cluster=cluster,
-                name=efs_name
+                cluster=cluster, name=efs_name
             ).first()
 
             # If we have a model, verify the EFS still exists in AWS
@@ -78,16 +72,16 @@ class SetupEFSVolumesStep(PipelineStep):
                         credential=cluster.aws_credential,
                     )
                     self.emit_event(
-                        'efs_reused',
+                        "efs_reused",
                         file_system_id=existing_efs_model.aws_file_system_id,
-                        name=efs_name
+                        name=efs_name,
                     )
                 except Exception:
                     # EFS was deleted in AWS, remove stale record
                     self.emit_event(
-                        'efs_stale_record_removed',
+                        "efs_stale_record_removed",
                         file_system_id=existing_efs_model.aws_file_system_id,
-                        name=efs_name
+                        name=efs_name,
                     )
                     existing_efs_model.delete()
                     existing_efs_model = None
@@ -102,10 +96,10 @@ class SetupEFSVolumesStep(PipelineStep):
                 credential=cluster.aws_credential,
             )
 
-            file_system_id = efs_fs['file_system_id']
+            file_system_id = efs_fs["file_system_id"]
 
             context.track_resource(
-                resource_type='efs_file_system',
+                resource_type="efs_file_system",
                 resource_id=file_system_id,
                 name=efs_name,
             )
@@ -126,7 +120,7 @@ class SetupEFSVolumesStep(PipelineStep):
 
                     # Handle both dict format and direct ID format
                     if isinstance(existing_ap_id, dict):
-                        access_point_id = existing_ap_id.get('access_point_id')
+                        access_point_id = existing_ap_id.get("access_point_id")
                     else:
                         access_point_id = existing_ap_id
 
@@ -139,15 +133,15 @@ class SetupEFSVolumesStep(PipelineStep):
                         )
                         # Access point exists, reuse it
                         context.efs_config[volume_name] = {
-                            'file_system_id': file_system_id,
-                            'access_point_id': access_point_id,
+                            "file_system_id": file_system_id,
+                            "access_point_id": access_point_id,
                         }
                         reused_count += 1
 
                         self.emit_event(
-                            'access_point_reused',
+                            "access_point_reused",
                             volume=volume_name,
-                            access_point_id=access_point_id
+                            access_point_id=access_point_id,
                         )
                         continue
                     except Exception:
@@ -163,27 +157,27 @@ class SetupEFSVolumesStep(PipelineStep):
                     credential=cluster.aws_credential,
                 )
 
-                access_point_id = access_point['access_point_id']
+                access_point_id = access_point["access_point_id"]
 
                 context.efs_config[volume_name] = {
-                    'file_system_id': file_system_id,
-                    'access_point_id': access_point_id,
+                    "file_system_id": file_system_id,
+                    "access_point_id": access_point_id,
                 }
 
                 self._created_access_points.append(access_point_id)
                 created_count += 1
 
                 context.track_resource(
-                    resource_type='efs_access_point',
+                    resource_type="efs_access_point",
                     resource_id=access_point_id,
                     volume_name=volume_name,
                     file_system_id=file_system_id,
                 )
 
                 self.emit_event(
-                    'access_point_created',
+                    "access_point_created",
                     volume=volume_name,
-                    access_point_id=access_point_id
+                    access_point_id=access_point_id,
                 )
 
             # Store or update EFSFileSystem model with new access point mappings
@@ -195,16 +189,16 @@ class SetupEFSVolumesStep(PipelineStep):
                     efs_model, _ = EFSFileSystem.objects.get_or_create(
                         aws_file_system_id=file_system_id,
                         defaults={
-                            'name': efs_name,
-                            'cluster': cluster,
-                            'aws_region': cluster.aws_region,
-                            'vpc_id': vpc_id,
-                        }
+                            "name": efs_name,
+                            "cluster": cluster,
+                            "aws_region": cluster.aws_region,
+                            "vpc_id": vpc_id,
+                        },
                     )
 
                 # Update access points mapping (store just the IDs for simplicity)
                 access_point_mapping = {
-                    vol: cfg['access_point_id']
+                    vol: cfg["access_point_id"]
                     for vol, cfg in context.efs_config.items()
                 }
                 efs_model.access_points = access_point_mapping
@@ -226,10 +220,7 @@ class SetupEFSVolumesStep(PipelineStep):
             return StepResult.ok(msg)
 
         except Exception as e:
-            return StepResult.fail(
-                f"EFS setup failed: {e}",
-                error=e
-            )
+            return StepResult.fail(f"EFS setup failed: {e}", error=e)
 
     def _dry_run(self, context: PipelineContext) -> StepResult:
         """Simulate EFS setup."""
@@ -249,15 +240,13 @@ class SetupEFSVolumesStep(PipelineStep):
 
             aws_factory = get_aws_client_factory()
             ec2 = aws_factory.get_client(
-                'ec2',
-                region=cluster.aws_region,
-                credential=cluster.aws_credential
+                "ec2", region=cluster.aws_region, credential=cluster.aws_credential
             )
 
             try:
                 response = ec2.describe_subnets(SubnetIds=[subnet_ids[0]])
-                if response.get('Subnets'):
-                    vpc_id = response['Subnets'][0].get('VpcId')
+                if response.get("Subnets"):
+                    vpc_id = response["Subnets"][0].get("VpcId")
             except Exception:
                 pass
 

@@ -23,7 +23,6 @@ import os
 import sys
 import subprocess
 import tempfile
-import shutil
 from pathlib import Path
 
 # Add the project root to the path
@@ -40,42 +39,43 @@ def setup_django():
         return
 
     # Create a temporary directory for the SQLite database
-    temp_dir = tempfile.mkdtemp(prefix='remote_compose_test_')
+    temp_dir = tempfile.mkdtemp(prefix="remote_compose_test_")
 
     settings.configure(
         DEBUG=True,
         DATABASES={
-            'default': {
-                'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': os.path.join(temp_dir, 'test_db.sqlite3'),
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": os.path.join(temp_dir, "test_db.sqlite3"),
             }
         },
         INSTALLED_APPS=[
-            'django.contrib.contenttypes',
-            'django.contrib.auth',
-            'remote_compose',
+            "django.contrib.contenttypes",
+            "django.contrib.auth",
+            "remote_compose",
         ],
-        DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
+        DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
         USE_TZ=True,
         REMOTE_COMPOSE={
-            'DEPLOYMENT_TIMEOUT': 300,
-            'SSH_CONNECT_TIMEOUT': 30,
-            'SSH_COMMAND_TIMEOUT': 120,
-            'MASK_SENSITIVE_LOGS': True,
+            "DEPLOYMENT_TIMEOUT": 300,
+            "SSH_CONNECT_TIMEOUT": 30,
+            "SSH_COMMAND_TIMEOUT": 120,
+            "MASK_SENSITIVE_LOGS": True,
         },
         CACHES={
-            'default': {
-                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
             }
         },
-        SECRET_KEY='test-secret-key-for-local-testing-only',
+        SECRET_KEY="test-secret-key-for-local-testing-only",
     )
 
     django.setup()
 
     # Run migrations
     from django.core.management import call_command
-    call_command('migrate', '--run-syncdb', verbosity=0)
+
+    call_command("migrate", "--run-syncdb", verbosity=0)
 
     return temp_dir
 
@@ -84,10 +84,7 @@ def check_docker():
     """Check if Docker is available."""
     try:
         result = subprocess.run(
-            ['docker', 'info'],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["docker", "info"], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
             print("Error: Docker is not running or not accessible")
@@ -107,26 +104,20 @@ def check_docker_compose():
     # Try docker compose (v2)
     try:
         result = subprocess.run(
-            ['docker', 'compose', 'version'],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["docker", "compose", "version"], capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
-            return 'docker compose'
+            return "docker compose"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
     # Try docker-compose (v1)
     try:
         result = subprocess.run(
-            ['docker-compose', 'version'],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["docker-compose", "version"], capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
-            return 'docker-compose'
+            return "docker-compose"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
@@ -138,10 +129,19 @@ def check_ssh_localhost():
     """Check if SSH to localhost is available."""
     try:
         result = subprocess.run(
-            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'localhost', 'echo', 'ok'],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "localhost",
+                "echo",
+                "ok",
+            ],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -160,12 +160,12 @@ def find_compose_file(repo_path: str, compose_file: str = None) -> str:
 
     # Try common names
     common_names = [
-        'docker-compose.yml',
-        'docker-compose.yaml',
-        'compose.yml',
-        'compose.yaml',
-        'docker-compose.dev.yml',
-        'docker-compose.local.yml',
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+        "docker-compose.dev.yml",
+        "docker-compose.local.yml",
     ]
 
     for name in common_names:
@@ -185,7 +185,7 @@ def create_local_target(use_ssh: bool = True):
 
     # Check if target already exists
     try:
-        target = DeploymentTarget.objects.get(name='localhost')
+        target = DeploymentTarget.objects.get(name="localhost")
         print(f"Using existing target: localhost ({target.host})")
         return target
     except DeploymentTarget.DoesNotExist:
@@ -194,31 +194,31 @@ def create_local_target(use_ssh: bool = True):
     if use_ssh:
         # Create SSH-based localhost target
         target = DeploymentTarget.objects.create(
-            name='localhost',
-            host='127.0.0.1',
+            name="localhost",
+            host="127.0.0.1",
             port=22,
-            username=os.environ.get('USER', 'root'),
+            username=os.environ.get("USER", "root"),
             target_type=DeploymentTarget.TargetType.SSH,
             environment=DeploymentTarget.Environment.DEVELOPMENT,
-            description='Local development machine (SSH)',
+            description="Local development machine (SSH)",
             health_status=DeploymentTarget.HealthStatus.UNKNOWN,
-            metadata={'created_by': 'local_test.py'},
+            metadata={"created_by": "local_test.py"},
         )
     else:
         # Create local target (will need special handling)
         target = DeploymentTarget.objects.create(
-            name='localhost',
-            host='127.0.0.1',
+            name="localhost",
+            host="127.0.0.1",
             port=0,  # No SSH
-            username=os.environ.get('USER', 'root'),
-            target_type='local',  # Custom type
+            username=os.environ.get("USER", "root"),
+            target_type="local",  # Custom type
             environment=DeploymentTarget.Environment.DEVELOPMENT,
-            description='Local development machine (direct)',
+            description="Local development machine (direct)",
             health_status=DeploymentTarget.HealthStatus.HEALTHY,
-            metadata={'created_by': 'local_test.py', 'local_mode': True},
+            metadata={"created_by": "local_test.py", "local_mode": True},
         )
 
-    print(f"Created target: localhost")
+    print("Created target: localhost")
     return target
 
 
@@ -226,7 +226,7 @@ def deploy_local(
     repo_path: str,
     compose_file: str = None,
     project_name: str = None,
-    version: str = '',
+    version: str = "",
     env_vars: dict = None,
     pull_images: bool = True,
     build_images: bool = False,
@@ -253,21 +253,25 @@ def deploy_local(
 
     try:
         result = target_service.test_connection(target)
-        if result['success']:
+        if result["success"]:
             print(f"  Connection OK: {result['message']}")
         else:
             print(f"  Connection FAILED: {result['message']}")
-            print("\nTip: Make sure SSH is enabled and you can 'ssh localhost' without password")
+            print(
+                "\nTip: Make sure SSH is enabled and you can 'ssh localhost' without password"
+            )
             return None
     except Exception as e:
         print(f"  Connection error: {e}")
-        print("\nTip: Make sure SSH is enabled and you can 'ssh localhost' without password")
+        print(
+            "\nTip: Make sure SSH is enabled and you can 'ssh localhost' without password"
+        )
         return None
 
     # Deploy
     deployment_service = DeploymentService()
 
-    print(f"\nStarting deployment...")
+    print("\nStarting deployment...")
     print(f"  Target: {target.name} ({target.host})")
     print(f"  Project: {project_name}")
     if version:
@@ -282,7 +286,7 @@ def deploy_local(
             project_name=project_name,
             environment=env_vars or {},
             version=version,
-            deployed_by='local_test',
+            deployed_by="local_test",
             pull_images=pull_images,
             build_images=build_images,
             timeout=300,
@@ -290,7 +294,7 @@ def deploy_local(
 
         print(f"\n{'=' * 50}")
         if deployment.status == Deployment.Status.SUCCESS:
-            print(f"DEPLOYMENT SUCCESSFUL!")
+            print("DEPLOYMENT SUCCESSFUL!")
             print(f"{'=' * 50}")
             print(f"  Deployment ID: {deployment.id}")
             print(f"  Status: {deployment.status}")
@@ -300,12 +304,12 @@ def deploy_local(
                 for cid in deployment.container_ids[:5]:
                     print(f"    - {cid[:12]}")
             if deployment.service_status:
-                print(f"\n  Service Status:")
+                print("\n  Service Status:")
                 for svc, status in deployment.service_status.items():
-                    state = status.get('state', 'unknown')
+                    state = status.get("state", "unknown")
                     print(f"    - {svc}: {state}")
         else:
-            print(f"DEPLOYMENT FAILED!")
+            print("DEPLOYMENT FAILED!")
             print(f"{'=' * 50}")
             print(f"  Status: {deployment.status}")
             print(f"  Error: {deployment.error_message}")
@@ -314,10 +318,11 @@ def deploy_local(
 
     except Exception as e:
         print(f"\n{'=' * 50}")
-        print(f"DEPLOYMENT ERROR!")
+        print("DEPLOYMENT ERROR!")
         print(f"{'=' * 50}")
         print(f"  Error: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -326,7 +331,7 @@ def deploy_local_direct(
     repo_path: str,
     compose_file: str = None,
     project_name: str = None,
-    version: str = '',
+    version: str = "",
     env_vars: dict = None,
     pull_images: bool = True,
     build_images: bool = False,
@@ -348,18 +353,18 @@ def deploy_local_direct(
         return None
 
     print(f"\nUsing: {compose_cmd}")
-    print(f"Starting deployment (direct mode)...")
+    print("Starting deployment (direct mode)...")
 
     # Build command
-    if compose_cmd == 'docker compose':
-        cmd = ['docker', 'compose', '-f', compose_path, '-p', project_name]
+    if compose_cmd == "docker compose":
+        cmd = ["docker", "compose", "-f", compose_path, "-p", project_name]
     else:
-        cmd = ['docker-compose', '-f', compose_path, '-p', project_name]
+        cmd = ["docker-compose", "-f", compose_path, "-p", project_name]
 
     # Pull images
     if pull_images:
         print("  Pulling images...")
-        pull_cmd = cmd + ['pull']
+        pull_cmd = cmd + ["pull"]
         result = subprocess.run(pull_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"  Warning: Pull failed: {result.stderr}")
@@ -367,14 +372,14 @@ def deploy_local_direct(
     # Build if requested
     if build_images:
         print("  Building images...")
-        build_cmd = cmd + ['build']
+        build_cmd = cmd + ["build"]
         result = subprocess.run(build_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"  Warning: Build failed: {result.stderr}")
 
     # Start containers
     print("  Starting containers...")
-    up_cmd = cmd + ['up', '-d']
+    up_cmd = cmd + ["up", "-d"]
 
     env = os.environ.copy()
     if env_vars:
@@ -384,18 +389,18 @@ def deploy_local_direct(
 
     print(f"\n{'=' * 50}")
     if result.returncode == 0:
-        print(f"DEPLOYMENT SUCCESSFUL!")
+        print("DEPLOYMENT SUCCESSFUL!")
         print(f"{'=' * 50}")
         print(result.stdout)
 
         # Get container status
-        ps_cmd = cmd + ['ps']
+        ps_cmd = cmd + ["ps"]
         ps_result = subprocess.run(ps_cmd, capture_output=True, text=True)
         if ps_result.returncode == 0:
             print("\nContainer Status:")
             print(ps_result.stdout)
     else:
-        print(f"DEPLOYMENT FAILED!")
+        print("DEPLOYMENT FAILED!")
         print(f"{'=' * 50}")
         print(f"Error: {result.stderr}")
 
@@ -408,10 +413,10 @@ def stop_deployment(project_name: str):
     if not compose_cmd:
         return
 
-    if compose_cmd == 'docker compose':
-        cmd = ['docker', 'compose', '-p', project_name, 'down']
+    if compose_cmd == "docker compose":
+        cmd = ["docker", "compose", "-p", project_name, "down"]
     else:
-        cmd = ['docker-compose', '-p', project_name, 'down']
+        cmd = ["docker-compose", "-p", project_name, "down"]
 
     print(f"\nStopping {project_name}...")
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -424,7 +429,7 @@ def stop_deployment(project_name: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Test remote-compose library with local docker-compose deployments',
+        description="Test remote-compose library with local docker-compose deployments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -445,57 +450,44 @@ Examples:
 
     # Stop a deployment
     python scripts/local_test.py --stop myproject
-        """
+        """,
     )
 
     parser.add_argument(
-        'repo_path',
-        nargs='?',
-        help='Path to the repository containing docker-compose.yml'
+        "repo_path",
+        nargs="?",
+        help="Path to the repository containing docker-compose.yml",
     )
     parser.add_argument(
-        '-f', '--compose-file',
-        help='Name of the docker-compose file (default: auto-detect)'
+        "-f",
+        "--compose-file",
+        help="Name of the docker-compose file (default: auto-detect)",
     )
     parser.add_argument(
-        '-p', '--project-name',
-        help='Docker Compose project name (default: directory name)'
+        "-p",
+        "--project-name",
+        help="Docker Compose project name (default: directory name)",
+    )
+    parser.add_argument("--version", default="", help="Version tag for this deployment")
+    parser.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        dest="env_vars",
+        help="Environment variables (KEY=VALUE)",
+    )
+    parser.add_argument("--no-pull", action="store_true", help="Skip pulling images")
+    parser.add_argument(
+        "--build", action="store_true", help="Build images before starting"
     )
     parser.add_argument(
-        '--version',
-        default='',
-        help='Version tag for this deployment'
+        "--direct",
+        action="store_true",
+        help="Use direct docker-compose commands (bypass library)",
     )
+    parser.add_argument("--stop", metavar="PROJECT", help="Stop a deployed project")
     parser.add_argument(
-        '-e', '--env',
-        action='append',
-        dest='env_vars',
-        help='Environment variables (KEY=VALUE)'
-    )
-    parser.add_argument(
-        '--no-pull',
-        action='store_true',
-        help='Skip pulling images'
-    )
-    parser.add_argument(
-        '--build',
-        action='store_true',
-        help='Build images before starting'
-    )
-    parser.add_argument(
-        '--direct',
-        action='store_true',
-        help='Use direct docker-compose commands (bypass library)'
-    )
-    parser.add_argument(
-        '--stop',
-        metavar='PROJECT',
-        help='Stop a deployed project'
-    )
-    parser.add_argument(
-        '--status',
-        action='store_true',
-        help='Show status of all deployments'
+        "--status", action="store_true", help="Show status of all deployments"
     )
 
     args = parser.parse_args()
@@ -532,11 +524,11 @@ Examples:
     env_vars = {}
     if args.env_vars:
         for env_var in args.env_vars:
-            if '=' not in env_var:
+            if "=" not in env_var:
                 print(f"Error: Invalid environment variable: {env_var}")
                 print("  Expected format: KEY=VALUE")
                 sys.exit(1)
-            key, value = env_var.split('=', 1)
+            key, value = env_var.split("=", 1)
             env_vars[key] = value
 
     if args.direct:
@@ -587,5 +579,5 @@ Examples:
             print(f"\nTest database preserved at: {temp_dir}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

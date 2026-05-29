@@ -47,13 +47,19 @@ class BuildAndPushImagesStep(PipelineStep):
     def _retag_and_push(self, source_uri: str, target_uri: str) -> None:
         """Tag and push an already-built image to a different ECR repo."""
         import subprocess
+
         subprocess.run(
             ["docker", "tag", source_uri, target_uri],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         subprocess.run(
             ["docker", "push", target_uri],
-            check=True, capture_output=True, text=True, timeout=600,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
 
     def _assign_per_service_uris(self, context, group, primary_uri, primary_name):
@@ -76,7 +82,7 @@ class BuildAndPushImagesStep(PipelineStep):
                 self._retag_and_push(primary_uri, svc_uri)
 
             svc.image_name = svc_uri
-            svc.config['image'] = svc_uri
+            svc.config["image"] = svc_uri
             service_uris[svc_name] = svc_uri
         return service_uris
 
@@ -129,9 +135,7 @@ class BuildAndPushImagesStep(PipelineStep):
                 dockerfile_path = None  # Let Docker find Dockerfile
 
             self.emit_event(
-                'image_build_started',
-                service=primary_name,
-                context=build_context
+                "image_build_started", service=primary_name, context=build_context
             )
 
             try:
@@ -154,9 +158,7 @@ class BuildAndPushImagesStep(PipelineStep):
                     )
 
                 # Retag and push to each service's own ECR repo
-                service_uris = self._assign_per_service_uris(
-                    context, group, primary_uri, primary_name
-                )
+                self._assign_per_service_uris(context, group, primary_uri, primary_name)
 
                 # Store primary URI for shared_images (backward compat)
                 context.shared_images[build_key] = primary_uri
@@ -166,16 +168,15 @@ class BuildAndPushImagesStep(PipelineStep):
                 shared_count += len(group) - 1
 
                 self.emit_event(
-                    'image_build_completed',
+                    "image_build_completed",
                     service=primary_name,
                     image_uri=primary_uri,
-                    shared_with=[name for name, _ in group[1:]]
+                    shared_with=[name for name, _ in group[1:]],
                 )
 
             except Exception as e:
                 return StepResult.fail(
-                    f"Image build failed for '{primary_name}': {e}",
-                    error=e
+                    f"Image build failed for '{primary_name}': {e}", error=e
                 )
 
         summary_parts = [f"built {built_count}"]
@@ -214,7 +215,7 @@ class BuildAndPushImagesStep(PipelineStep):
                     f":{context.image_tag}"
                 )
                 svc.image_name = svc_uri
-                svc.config['image'] = svc_uri
+                svc.config["image"] = svc_uri
 
         unique_builds = len(build_groups)
         total_services = sum(len(g) for g in build_groups.values())

@@ -38,11 +38,13 @@ class MigrationPlan:
         """Operator-facing migration plan summary."""
         cluster = (
             self.rc_v2_yml.get("provider_config", {})
-            .get("ecs", {}).get("cluster", "(unknown)")
+            .get("ecs", {})
+            .get("cluster", "(unknown)")
         )
         region = (
             self.rc_v2_yml.get("provider_config", {})
-            .get("ecs", {}).get("region", "(unknown)")
+            .get("ecs", {})
+            .get("region", "(unknown)")
         )
         lines: list[str] = []
         lines.append(f"# Migration Plan — {cluster} ({region})")
@@ -152,6 +154,7 @@ def _check_live_postgres_imported(
 # Phase descriptors
 # ---------------------------------------------------------------------
 
+
 def _build_phases() -> list[MigrationPhase]:
     return [
         MigrationPhase(
@@ -192,6 +195,7 @@ def _build_phases() -> list[MigrationPhase]:
 # build_plan
 # ---------------------------------------------------------------------
 
+
 def build_plan(stack: V1Stack, inv: ResourceInventory) -> MigrationPlan:
     rc_v2_yml, schema_warnings = _translate.translate_v1_to_v2_schema(stack)
 
@@ -231,16 +235,21 @@ def build_plan(stack: V1Stack, inv: ResourceInventory) -> MigrationPlan:
 
     # Aggregate imports (stable order: by id then to).
     all_imports = (
-        efs_imports + alb_imports + acm_imports
-        + vpc_imports + cluster_imports
+        efs_imports + alb_imports + acm_imports + vpc_imports + cluster_imports
     )
     all_imports = sorted(all_imports, key=lambda i: (i.id, i.to))
 
     # Aggregate warnings.
     all_warnings: list[TranslationWarning] = []
     for w in (
-        schema_warnings, efs_warnings, alb_warnings, acm_warnings,
-        secret_warnings, vpc_warnings, iam_warnings, ecr_warnings,
+        schema_warnings,
+        efs_warnings,
+        alb_warnings,
+        acm_warnings,
+        secret_warnings,
+        vpc_warnings,
+        iam_warnings,
+        ecr_warnings,
         cluster_warnings,
     ):
         all_warnings.extend(w)
@@ -252,8 +261,7 @@ def build_plan(stack: V1Stack, inv: ResourceInventory) -> MigrationPlan:
             inv.ecs_cluster.running_tasks_count if inv.ecs_cluster else 0
         ),
         "dns_managed_externally": (
-            inv.route53_zone.apex_managed_externally
-            if inv.route53_zone else False
+            inv.route53_zone.apex_managed_externally if inv.route53_zone else False
         ),
     }
 

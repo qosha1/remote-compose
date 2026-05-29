@@ -19,7 +19,7 @@ sense (provider_config sub-keys), strict on everything else.
 
 from __future__ import annotations
 
-from ._schema_parser import (
+from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-compat)
     _parse_backend,
     _parse_lifecycle,
     _parse_secret,
@@ -44,7 +44,6 @@ from ._schema_types import (
     TerraformBackend,
     TerraformConfig,
     TlsConfig,
-    _looks_like_fqdn,
 )
 
 __all__ = [

@@ -17,7 +17,6 @@ import yaml
 from click.testing import CliRunner
 
 from remote_compose.cli import cli
-from remote_compose.ephemeral import EphemeralRecord
 
 
 @pytest.fixture
@@ -50,12 +49,19 @@ def test_destroy_removes_ephemeral_registry_entry(runner, tmp_path):
     fake_v2 = MagicMock()
     fake_v2.project = "test-46-6"
 
-    with patch("remote_compose.cli_v2.load_rc_yml",
-               return_value=(2, {"provider_config": {"ecs": {"region": "us-west-1"}}},
-                             fake_v2)) as load_v2_dispatch, \
-         patch("remote_compose.cli_v2.build_deploy_context"), \
-         patch("remote_compose.cli_v2.resolve_provider") as rp, \
-         patch("remote_compose.ephemeral.remove_stack") as rm:
+    with (
+        patch(
+            "remote_compose.cli_v2.load_rc_yml",
+            return_value=(
+                2,
+                {"provider_config": {"ecs": {"region": "us-west-1"}}},
+                fake_v2,
+            ),
+        ),
+        patch("remote_compose.cli_v2.build_deploy_context"),
+        patch("remote_compose.cli_v2.resolve_provider") as rp,
+        patch("remote_compose.ephemeral.remove_stack") as rm,
+    ):
         rp.return_value = MagicMock()
         result = runner.invoke(cli, ["-c", str(rc_path), "destroy", "--yes"])
 
@@ -72,13 +78,22 @@ def test_destroy_unregister_failure_does_not_break_destroy(runner, tmp_path):
     fake_v2 = MagicMock()
     fake_v2.project = "test-46-6"
 
-    with patch("remote_compose.cli_v2.load_rc_yml",
-               return_value=(2, {"provider_config": {"ecs": {"region": "us-west-1"}}},
-                             fake_v2)), \
-         patch("remote_compose.cli_v2.build_deploy_context"), \
-         patch("remote_compose.cli_v2.resolve_provider") as rp, \
-         patch("remote_compose.ephemeral.remove_stack",
-               side_effect=RuntimeError("registry locked")):
+    with (
+        patch(
+            "remote_compose.cli_v2.load_rc_yml",
+            return_value=(
+                2,
+                {"provider_config": {"ecs": {"region": "us-west-1"}}},
+                fake_v2,
+            ),
+        ),
+        patch("remote_compose.cli_v2.build_deploy_context"),
+        patch("remote_compose.cli_v2.resolve_provider") as rp,
+        patch(
+            "remote_compose.ephemeral.remove_stack",
+            side_effect=RuntimeError("registry locked"),
+        ),
+    ):
         rp.return_value = MagicMock()
         result = runner.invoke(cli, ["-c", str(rc_path), "destroy", "--yes"])
 
@@ -94,13 +109,19 @@ def test_destroy_no_ephemeral_entry_is_a_noop(runner, tmp_path):
     fake_v2 = MagicMock()
     fake_v2.project = "non-ephemeral-app"
 
-    with patch("remote_compose.cli_v2.load_rc_yml",
-               return_value=(2, {"provider_config": {"ecs": {"region": "us-west-1"}}},
-                             fake_v2)), \
-         patch("remote_compose.cli_v2.build_deploy_context"), \
-         patch("remote_compose.cli_v2.resolve_provider") as rp, \
-         patch("remote_compose.ephemeral.remove_stack",
-               return_value=False) as rm:
+    with (
+        patch(
+            "remote_compose.cli_v2.load_rc_yml",
+            return_value=(
+                2,
+                {"provider_config": {"ecs": {"region": "us-west-1"}}},
+                fake_v2,
+            ),
+        ),
+        patch("remote_compose.cli_v2.build_deploy_context"),
+        patch("remote_compose.cli_v2.resolve_provider") as rp,
+        patch("remote_compose.ephemeral.remove_stack", return_value=False) as rm,
+    ):
         rp.return_value = MagicMock()
         result = runner.invoke(cli, ["-c", str(rc_path), "destroy", "--yes"])
 

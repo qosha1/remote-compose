@@ -14,9 +14,7 @@ commands need image-side detection, tracked separately).
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
 
-import pytest
 import yaml
 
 from remote_compose.compose_warnings import detect_dev_mode_command

@@ -38,7 +38,6 @@ from remote_compose.v1_migrate.plan import (
     build_plan,
 )
 
-
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "v1_migrate"
 V1_RC_YML = FIXTURES / "ss-debuggai-prod.rc.yml"
 INVENTORY_JSON = FIXTURES / "inventory.json"
@@ -58,6 +57,7 @@ def inv() -> ResourceInventory:
 # build_plan composes per-resource translators
 # ---------------------------------------------------------------------
 
+
 class TestBuildPlanShape:
     def test_returns_migration_plan(self, stack, inv):
         plan = build_plan(stack, inv)
@@ -72,12 +72,12 @@ class TestBuildPlanShape:
         plan = build_plan(stack, inv)
         ids = {i.id for i in plan.terraform_imports}
         # Critical resources must all appear.
-        assert "fs-0e8a2f9d1e006af95" in ids        # EFS
-        assert "fsap-004097e867c7bb755" in ids       # live postgres mount
-        assert inv.alb.arn in ids                    # ALB
-        assert inv.acm_cert.arn in ids               # ACM
-        assert "vpc-053d0dfca255b6219" in ids        # VPC
-        assert inv.ecs_cluster.arn in ids            # ECS cluster
+        assert "fs-0e8a2f9d1e006af95" in ids  # EFS
+        assert "fsap-004097e867c7bb755" in ids  # live postgres mount
+        assert inv.alb.arn in ids  # ALB
+        assert inv.acm_cert.arn in ids  # ACM
+        assert "vpc-053d0dfca255b6219" in ids  # VPC
+        assert inv.ecs_cluster.arn in ids  # ECS cluster
 
     def test_secret_arn_map_populated(self, stack, inv):
         plan = build_plan(stack, inv)
@@ -100,6 +100,7 @@ class TestBuildPlanShape:
 # Idempotence — dry-run trustworthiness
 # ---------------------------------------------------------------------
 
+
 class TestBuildPlanIdempotence:
     def test_two_builds_equal(self, stack, inv):
         a = build_plan(stack, inv)
@@ -120,6 +121,7 @@ class TestBuildPlanIdempotence:
 # Phase descriptors with undo
 # ---------------------------------------------------------------------
 
+
 class TestPlanPhases:
     def test_phases_in_safe_order(self, stack, inv):
         plan = build_plan(stack, inv)
@@ -136,14 +138,15 @@ class TestPlanPhases:
         for phase in plan.phases:
             if phase.name == "validate":
                 continue  # validate is read-only, no undo
-            assert phase.undo is not None and phase.undo.strip(), (
-                f"phase {phase.name} missing undo runbook"
-            )
+            assert (
+                phase.undo is not None and phase.undo.strip()
+            ), f"phase {phase.name} missing undo runbook"
 
 
 # ---------------------------------------------------------------------
 # Safety: plan rejects destructive translator output
 # ---------------------------------------------------------------------
+
 
 class TestPlanSafety:
     def test_rejects_destroy_on_stateful_resource(self, stack, inv, monkeypatch):
@@ -166,12 +169,15 @@ class TestPlanSafety:
 
         def _missing_live_ap(_inv):
             from remote_compose.v1_migrate.translate import TerraformImportBlock
+
             return (
                 {},
-                [TerraformImportBlock(
-                    id="fs-0e8a2f9d1e006af95",
-                    to="module.efs.aws_efs_file_system.this",
-                )],
+                [
+                    TerraformImportBlock(
+                        id="fs-0e8a2f9d1e006af95",
+                        to="module.efs.aws_efs_file_system.this",
+                    )
+                ],
                 [],
             )
 
@@ -184,11 +190,12 @@ class TestPlanSafety:
 # Blast radius summary (operator-facing)
 # ---------------------------------------------------------------------
 
+
 class TestBlastRadius:
     def test_blast_radius_summarizes_resources(self, stack, inv):
         plan = build_plan(stack, inv)
         br = plan.blast_radius
-        assert br["efs_size_gb"] >= 100        # 133 GB
-        assert br["secrets_count"] >= 15        # at least the 15 in fixture
+        assert br["efs_size_gb"] >= 100  # 133 GB
+        assert br["secrets_count"] >= 15  # at least the 15 in fixture
         assert br["running_tasks"] == 7
         assert br["dns_managed_externally"] is True

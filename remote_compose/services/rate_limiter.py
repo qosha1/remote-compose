@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 from django.core.cache import cache
-from django.utils import timezone
 
 from ..conf import get_setting
 from ..exceptions import ValidationError
@@ -28,6 +27,7 @@ class RateLimitExceeded(ValidationError):
 @dataclass
 class RateLimitInfo:
     """Rate limit status information."""
+
     allowed: bool
     remaining: int
     limit: int
@@ -36,11 +36,11 @@ class RateLimitInfo:
 
     def to_dict(self) -> dict:
         return {
-            'allowed': self.allowed,
-            'remaining': self.remaining,
-            'limit': self.limit,
-            'reset_at': self.reset_at,
-            'retry_after': self.retry_after,
+            "allowed": self.allowed,
+            "remaining": self.remaining,
+            "limit": self.limit,
+            "reset_at": self.reset_at,
+            "retry_after": self.retry_after,
         }
 
 
@@ -73,7 +73,7 @@ class RateLimiter:
         self,
         default_limit: int = 10,
         default_window: int = 60,
-        cache_prefix: str = 'remote_compose:ratelimit',
+        cache_prefix: str = "remote_compose:ratelimit",
     ):
         """
         Initialize rate limiter.
@@ -242,36 +242,36 @@ class DeploymentRateLimiter:
 
     def __init__(self):
         self.limiter = RateLimiter(
-            default_limit=get_setting('RATE_LIMIT_DEPLOYMENTS_PER_MINUTE', 10),
+            default_limit=get_setting("RATE_LIMIT_DEPLOYMENTS_PER_MINUTE", 10),
             default_window=60,
-            cache_prefix='remote_compose:deploy_ratelimit',
+            cache_prefix="remote_compose:deploy_ratelimit",
         )
 
         # Different limits for different operations
         self.limits = {
-            'deploy': {
-                'limit': get_setting('RATE_LIMIT_DEPLOYMENTS_PER_MINUTE', 10),
-                'window': 60,
+            "deploy": {
+                "limit": get_setting("RATE_LIMIT_DEPLOYMENTS_PER_MINUTE", 10),
+                "window": 60,
             },
-            'deploy_per_target': {
-                'limit': get_setting('RATE_LIMIT_DEPLOYMENTS_PER_TARGET', 5),
-                'window': 60,
+            "deploy_per_target": {
+                "limit": get_setting("RATE_LIMIT_DEPLOYMENTS_PER_TARGET", 5),
+                "window": 60,
             },
-            'deploy_per_user': {
-                'limit': get_setting('RATE_LIMIT_DEPLOYMENTS_PER_USER', 20),
-                'window': 300,  # 5 minutes
+            "deploy_per_user": {
+                "limit": get_setting("RATE_LIMIT_DEPLOYMENTS_PER_USER", 20),
+                "window": 300,  # 5 minutes
             },
-            'rollback': {
-                'limit': get_setting('RATE_LIMIT_ROLLBACKS_PER_MINUTE', 5),
-                'window': 60,
+            "rollback": {
+                "limit": get_setting("RATE_LIMIT_ROLLBACKS_PER_MINUTE", 5),
+                "window": 60,
             },
         }
 
     def check_deploy_allowed(
         self,
         target_id: int,
-        user: str = '',
-        project_name: str = '',
+        user: str = "",
+        project_name: str = "",
     ) -> Dict[str, RateLimitInfo]:
         """
         Check if deployment is allowed under all rate limits.
@@ -287,31 +287,31 @@ class DeploymentRateLimiter:
         results = {}
 
         # Check per-target limit
-        target_limit = self.limits['deploy_per_target']
-        results['per_target'] = self.limiter.check_rate_limit(
-            key_type='target',
+        target_limit = self.limits["deploy_per_target"]
+        results["per_target"] = self.limiter.check_rate_limit(
+            key_type="target",
             identifier=str(target_id),
-            limit=target_limit['limit'],
-            window=target_limit['window'],
+            limit=target_limit["limit"],
+            window=target_limit["window"],
         )
 
         # Check per-user limit
         if user:
-            user_limit = self.limits['deploy_per_user']
-            results['per_user'] = self.limiter.check_rate_limit(
-                key_type='user',
+            user_limit = self.limits["deploy_per_user"]
+            results["per_user"] = self.limiter.check_rate_limit(
+                key_type="user",
                 identifier=user,
-                limit=user_limit['limit'],
-                window=user_limit['window'],
+                limit=user_limit["limit"],
+                window=user_limit["window"],
             )
 
         # Check global limit
-        global_limit = self.limits['deploy']
-        results['global'] = self.limiter.check_rate_limit(
-            key_type='global',
-            identifier='deployments',
-            limit=global_limit['limit'],
-            window=global_limit['window'],
+        global_limit = self.limits["deploy"]
+        results["global"] = self.limiter.check_rate_limit(
+            key_type="global",
+            identifier="deployments",
+            limit=global_limit["limit"],
+            window=global_limit["window"],
         )
 
         return results
@@ -319,8 +319,8 @@ class DeploymentRateLimiter:
     def consume_deploy(
         self,
         target_id: int,
-        user: str = '',
-        project_name: str = '',
+        user: str = "",
+        project_name: str = "",
     ) -> Dict[str, RateLimitInfo]:
         """
         Consume rate limit tokens for a deployment.
@@ -339,38 +339,40 @@ class DeploymentRateLimiter:
         results = {}
 
         # Consume per-target limit
-        target_limit = self.limits['deploy_per_target']
-        results['per_target'] = self.limiter.consume(
-            key_type='target',
+        target_limit = self.limits["deploy_per_target"]
+        results["per_target"] = self.limiter.consume(
+            key_type="target",
             identifier=str(target_id),
-            limit=target_limit['limit'],
-            window=target_limit['window'],
+            limit=target_limit["limit"],
+            window=target_limit["window"],
         )
 
         # Consume per-user limit
         if user:
-            user_limit = self.limits['deploy_per_user']
-            results['per_user'] = self.limiter.consume(
-                key_type='user',
+            user_limit = self.limits["deploy_per_user"]
+            results["per_user"] = self.limiter.consume(
+                key_type="user",
                 identifier=user,
-                limit=user_limit['limit'],
-                window=user_limit['window'],
+                limit=user_limit["limit"],
+                window=user_limit["window"],
             )
 
         # Consume global limit
-        global_limit = self.limits['deploy']
-        results['global'] = self.limiter.consume(
-            key_type='global',
-            identifier='deployments',
-            limit=global_limit['limit'],
-            window=global_limit['window'],
+        global_limit = self.limits["deploy"]
+        results["global"] = self.limiter.consume(
+            key_type="global",
+            identifier="deployments",
+            limit=global_limit["limit"],
+            window=global_limit["window"],
         )
 
-        logger.info(f"Rate limit consumed for deployment to target {target_id} by {user}")
+        logger.info(
+            f"Rate limit consumed for deployment to target {target_id} by {user}"
+        )
 
         return results
 
-    def consume_rollback(self, target_id: int, user: str = '') -> RateLimitInfo:
+    def consume_rollback(self, target_id: int, user: str = "") -> RateLimitInfo:
         """
         Consume rate limit token for a rollback.
 
@@ -384,12 +386,12 @@ class DeploymentRateLimiter:
         Raises:
             RateLimitExceeded: If rate limit is exceeded
         """
-        rollback_limit = self.limits['rollback']
+        rollback_limit = self.limits["rollback"]
         return self.limiter.consume(
-            key_type='rollback',
+            key_type="rollback",
             identifier=str(target_id),
-            limit=rollback_limit['limit'],
-            window=rollback_limit['window'],
+            limit=rollback_limit["limit"],
+            window=rollback_limit["window"],
         )
 
     def get_status(
@@ -410,29 +412,29 @@ class DeploymentRateLimiter:
         status = {}
 
         if target_id:
-            target_limit = self.limits['deploy_per_target']
-            status['target'] = self.limiter.check_rate_limit(
-                key_type='target',
+            target_limit = self.limits["deploy_per_target"]
+            status["target"] = self.limiter.check_rate_limit(
+                key_type="target",
                 identifier=str(target_id),
-                limit=target_limit['limit'],
-                window=target_limit['window'],
+                limit=target_limit["limit"],
+                window=target_limit["window"],
             ).to_dict()
 
         if user:
-            user_limit = self.limits['deploy_per_user']
-            status['user'] = self.limiter.check_rate_limit(
-                key_type='user',
+            user_limit = self.limits["deploy_per_user"]
+            status["user"] = self.limiter.check_rate_limit(
+                key_type="user",
                 identifier=user,
-                limit=user_limit['limit'],
-                window=user_limit['window'],
+                limit=user_limit["limit"],
+                window=user_limit["window"],
             ).to_dict()
 
-        global_limit = self.limits['deploy']
-        status['global'] = self.limiter.check_rate_limit(
-            key_type='global',
-            identifier='deployments',
-            limit=global_limit['limit'],
-            window=global_limit['window'],
+        global_limit = self.limits["deploy"]
+        status["global"] = self.limiter.check_rate_limit(
+            key_type="global",
+            identifier="deployments",
+            limit=global_limit["limit"],
+            window=global_limit["window"],
         ).to_dict()
 
         return status

@@ -8,7 +8,7 @@ Provides functionality for:
 - Parallel build support using ThreadPoolExecutor
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
 import subprocess
 import shutil
@@ -16,7 +16,7 @@ import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..exceptions import DockerError, AWSError
+from ..exceptions import DockerError
 from ..conf import get_setting
 from .base import BaseService
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 @dataclass
 class ImageBuildResult:
     """Result of a Docker image build operation."""
+
     success: bool
     image_id: Optional[str] = None
     image_tag: Optional[str] = None
@@ -39,6 +40,7 @@ class ImageBuildResult:
 @dataclass
 class ImagePushResult:
     """Result of a Docker image push operation."""
+
     success: bool
     digest: Optional[str] = None
     push_log: str = ""
@@ -49,6 +51,7 @@ class ImagePushResult:
 @dataclass
 class BuildAndPushResult:
     """Combined result of build and push operations."""
+
     service_name: str
     build_result: Optional[ImageBuildResult] = None
     push_result: Optional[ImagePushResult] = None
@@ -61,7 +64,7 @@ class ImageBuildError(DockerError):
 
     def __init__(self, message: str, build_log: str = "", **kwargs):
         super().__init__(message, **kwargs)
-        self.details['build_log'] = build_log
+        self.details["build_log"] = build_log
 
 
 class ImagePushError(DockerError):
@@ -69,7 +72,7 @@ class ImagePushError(DockerError):
 
     def __init__(self, message: str, push_log: str = "", **kwargs):
         super().__init__(message, **kwargs)
-        self.details['push_log'] = push_log
+        self.details["push_log"] = push_log
 
 
 class ImageBuildService(BaseService):
@@ -84,7 +87,7 @@ class ImageBuildService(BaseService):
         self,
         ecr_service: Optional["ECRService"] = None,
         default_platform: str = "linux/amd64",
-        **kwargs
+        **kwargs,
     ):
         """
         Initialize the image build service.
@@ -103,6 +106,7 @@ class ImageBuildService(BaseService):
         """Get the ECR service, creating it if necessary."""
         if self._ecr_service is None:
             from .ecr_service import ECRService
+
             self._ecr_service = ECRService()
         return self._ecr_service
 
@@ -172,9 +176,12 @@ class ImageBuildService(BaseService):
         platform = platform or self.default_platform
 
         cmd = [
-            "docker", "build",
-            "--platform", platform,
-            "-t", image_tag,
+            "docker",
+            "build",
+            "--platform",
+            platform,
+            "-t",
+            image_tag,
         ]
 
         if dockerfile:
@@ -205,7 +212,7 @@ class ImageBuildService(BaseService):
                     bufsize=1,
                 )
 
-                for line in iter(process.stdout.readline, ''):
+                for line in iter(process.stdout.readline, ""):
                     line = line.rstrip()
                     if line:
                         build_log.append(line)
@@ -253,7 +260,7 @@ class ImageBuildService(BaseService):
 
             self.log_info(f"Successfully built image: {image_tag} ({image_id})")
             self.notify_observers(
-                'image_built',
+                "image_built",
                 image_tag=image_tag,
                 image_id=image_id,
                 duration=duration,
@@ -328,7 +335,7 @@ class ImageBuildService(BaseService):
                     bufsize=1,
                 )
 
-                for line in iter(process.stdout.readline, ''):
+                for line in iter(process.stdout.readline, ""):
                     line = line.rstrip()
                     if line:
                         push_log.append(line)
@@ -376,7 +383,7 @@ class ImageBuildService(BaseService):
 
             self.log_info(f"Successfully pushed image: {image_tag}")
             self.notify_observers(
-                'image_pushed',
+                "image_pushed",
                 image_tag=image_tag,
                 digest=digest,
                 duration=duration,
@@ -585,7 +592,7 @@ class ImageBuildService(BaseService):
             result.success = True
             self.log_info(f"Successfully built and pushed {service_name} to {ecr_uri}")
             self.notify_observers(
-                'build_and_push_complete',
+                "build_and_push_complete",
                 service_name=service_name,
                 ecr_uri=ecr_uri,
                 build_duration=build_result.duration,
@@ -629,26 +636,29 @@ class ImageBuildService(BaseService):
         results = []
 
         def build_service(service: Dict[str, Any]) -> BuildAndPushResult:
-            service_name = service['name']
+            service_name = service["name"]
             ecr_uri = f"{ecr_prefix}/{project_name}-{service_name}:latest"
 
-            callback = None
-            if output_callback:
-                callback = lambda line: output_callback(service_name, line)
+            def _line_callback(line):
+                return output_callback(service_name, line)
+
+            callback = _line_callback if output_callback else None
 
             return self.build_and_push(
                 service_name=service_name,
-                context=service['context'],
-                dockerfile=service.get('dockerfile'),
+                context=service["context"],
+                dockerfile=service.get("dockerfile"),
                 ecr_uri=ecr_uri,
-                build_args=service.get('build_args'),
-                target=service.get('target'),
+                build_args=service.get("build_args"),
+                target=service.get("target"),
                 stream_output=stream_output,
                 output_callback=callback,
             )
 
         if parallel and len(services) > 1:
-            self.log_info(f"Building {len(services)} services in parallel (max {max_workers} workers)")
+            self.log_info(
+                f"Building {len(services)} services in parallel (max {max_workers} workers)"
+            )
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_service = {
@@ -663,14 +673,16 @@ class ImageBuildService(BaseService):
                         results.append(result)
                     except Exception as e:
                         self.log_error(f"Build failed for {service['name']}: {e}")
-                        results.append(BuildAndPushResult(
-                            service_name=service['name'],
-                            success=False,
-                            build_result=ImageBuildResult(
+                        results.append(
+                            BuildAndPushResult(
+                                service_name=service["name"],
                                 success=False,
-                                error=str(e),
-                            ),
-                        ))
+                                build_result=ImageBuildResult(
+                                    success=False,
+                                    error=str(e),
+                                ),
+                            )
+                        )
         else:
             self.log_info(f"Building {len(services)} services sequentially")
             for service in services:
@@ -678,10 +690,12 @@ class ImageBuildService(BaseService):
                 results.append(result)
 
         successful = sum(1 for r in results if r.success)
-        self.log_info(f"Build complete: {successful}/{len(services)} services succeeded")
+        self.log_info(
+            f"Build complete: {successful}/{len(services)} services succeeded"
+        )
 
         self.notify_observers(
-            'batch_build_complete',
+            "batch_build_complete",
             project_name=project_name,
             total=len(services),
             successful=successful,
@@ -711,7 +725,7 @@ class ImageBuildService(BaseService):
         """
         self._ensure_docker_available()
 
-        region = region or get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        region = region or get_setting("AWS_DEFAULT_REGION", "us-east-1")
         self.log_info(f"Authenticating with ECR in {region}")
 
         if not use_cli:
@@ -731,8 +745,11 @@ class ImageBuildService(BaseService):
     def _authenticate_ecr_cli(self, region: str) -> bool:
         """Fallback ECR authentication using AWS CLI."""
         cmd = [
-            "aws", "ecr", "get-login-password",
-            "--region", region,
+            "aws",
+            "ecr",
+            "get-login-password",
+            "--region",
+            region,
         ]
 
         try:
@@ -744,12 +761,22 @@ class ImageBuildService(BaseService):
             )
 
             if password_result.returncode != 0:
-                self.log_error(f"Failed to get ECR login password: {password_result.stderr}")
+                self.log_error(
+                    f"Failed to get ECR login password: {password_result.stderr}"
+                )
                 return False
 
             password = password_result.stdout.strip()
 
-            sts_cmd = ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"]
+            sts_cmd = [
+                "aws",
+                "sts",
+                "get-caller-identity",
+                "--query",
+                "Account",
+                "--output",
+                "text",
+            ]
             sts_result = subprocess.run(
                 sts_cmd,
                 capture_output=True,
@@ -765,8 +792,10 @@ class ImageBuildService(BaseService):
             registry = f"{account_id}.dkr.ecr.{region}.amazonaws.com"
 
             login_cmd = [
-                "docker", "login",
-                "--username", "AWS",
+                "docker",
+                "login",
+                "--username",
+                "AWS",
                 "--password-stdin",
                 registry,
             ]
@@ -812,7 +841,7 @@ class ImageBuildService(BaseService):
         Returns:
             Repository URI or None if creation failed
         """
-        region = region or get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        region = region or get_setting("AWS_DEFAULT_REGION", "us-east-1")
 
         if not use_cli:
             try:
@@ -821,11 +850,13 @@ class ImageBuildService(BaseService):
                     region=region,
                     credential=credential,
                 )
-                uri = repo.get('repository_uri')
+                uri = repo.get("repository_uri")
                 self.log_info(f"ECR repository ready: {uri}")
                 return uri
             except Exception as e:
-                self.log_warning(f"Boto3 ECR operation failed, falling back to CLI: {e}")
+                self.log_warning(
+                    f"Boto3 ECR operation failed, falling back to CLI: {e}"
+                )
 
         return self._ensure_ecr_repository_cli(repository_name, region)
 
@@ -836,9 +867,13 @@ class ImageBuildService(BaseService):
     ) -> Optional[str]:
         """Fallback ECR repository management using AWS CLI."""
         describe_cmd = [
-            "aws", "ecr", "describe-repositories",
-            "--repository-names", repository_name,
-            "--region", region,
+            "aws",
+            "ecr",
+            "describe-repositories",
+            "--repository-names",
+            repository_name,
+            "--region",
+            region,
         ]
 
         try:
@@ -851,18 +886,22 @@ class ImageBuildService(BaseService):
 
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                repos = data.get('repositories', [])
+                repos = data.get("repositories", [])
                 if repos:
-                    uri = repos[0].get('repositoryUri')
+                    uri = repos[0].get("repositoryUri")
                     self.log_debug(f"ECR repository exists: {uri}")
                     return uri
 
             self.log_info(f"Creating ECR repository: {repository_name}")
 
             create_cmd = [
-                "aws", "ecr", "create-repository",
-                "--repository-name", repository_name,
-                "--region", region,
+                "aws",
+                "ecr",
+                "create-repository",
+                "--repository-name",
+                repository_name,
+                "--region",
+                region,
             ]
 
             create_result = subprocess.run(
@@ -873,11 +912,13 @@ class ImageBuildService(BaseService):
             )
 
             if create_result.returncode != 0:
-                self.log_error(f"Failed to create ECR repository: {create_result.stderr}")
+                self.log_error(
+                    f"Failed to create ECR repository: {create_result.stderr}"
+                )
                 return None
 
             data = json.loads(create_result.stdout)
-            uri = data.get('repository', {}).get('repositoryUri')
+            uri = data.get("repository", {}).get("repositoryUri")
             self.log_info(f"Created ECR repository: {uri}")
             return uri
 

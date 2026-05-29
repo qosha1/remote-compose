@@ -35,10 +35,7 @@ class PreprocessComposeStep(PipelineStep):
             )
             context.account_id = account_id
         except Exception as e:
-            return StepResult.fail(
-                f"Failed to get AWS account ID: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Failed to get AWS account ID: {e}", error=e)
 
         # Configure and run preprocessor
         preprocessor = ComposePreprocessor(
@@ -54,10 +51,7 @@ class PreprocessComposeStep(PipelineStep):
                 image_tag=context.image_tag,
             )
         except Exception as e:
-            return StepResult.fail(
-                f"Failed to preprocess compose file: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Failed to preprocess compose file: {e}", error=e)
 
         # Check for preprocessing errors
         if preprocessed.errors:
@@ -94,6 +88,4 @@ class PreprocessComposeStep(PipelineStep):
         if volume_count > 0:
             summary_parts.append(f"{volume_count} named volumes")
 
-        return StepResult.ok(
-            f"Preprocessed compose: {', '.join(summary_parts)}"
-        )
+        return StepResult.ok(f"Preprocessed compose: {', '.join(summary_parts)}")

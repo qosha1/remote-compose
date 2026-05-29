@@ -49,9 +49,14 @@ class TestInferAssignPublicIp:
         assert svc._infer_assign_public_ip(cluster) is True
 
     def test_describe_subnets_all_public_returns_true(self, svc):
-        cluster = MagicMock(spec=[
-            "aws_region", "aws_credential", "name", "subnet_ids",
-        ])
+        cluster = MagicMock(
+            spec=[
+                "aws_region",
+                "aws_credential",
+                "name",
+                "subnet_ids",
+            ]
+        )
         cluster.subnet_ids = ["subnet-1", "subnet-2"]
         ec2 = MagicMock()
         ec2.describe_subnets.return_value = {
@@ -64,9 +69,14 @@ class TestInferAssignPublicIp:
         assert svc._infer_assign_public_ip(cluster) is True
 
     def test_describe_subnets_any_private_returns_false(self, svc):
-        cluster = MagicMock(spec=[
-            "aws_region", "aws_credential", "name", "subnet_ids",
-        ])
+        cluster = MagicMock(
+            spec=[
+                "aws_region",
+                "aws_credential",
+                "name",
+                "subnet_ids",
+            ]
+        )
         cluster.subnet_ids = ["subnet-pub", "subnet-priv"]
         ec2 = MagicMock()
         ec2.describe_subnets.return_value = {
@@ -81,9 +91,14 @@ class TestInferAssignPublicIp:
         assert svc._infer_assign_public_ip(cluster) is False
 
     def test_describe_subnets_failure_falls_back_to_true(self, svc):
-        cluster = MagicMock(spec=[
-            "aws_region", "aws_credential", "name", "subnet_ids",
-        ])
+        cluster = MagicMock(
+            spec=[
+                "aws_region",
+                "aws_credential",
+                "name",
+                "subnet_ids",
+            ]
+        )
         cluster.subnet_ids = ["subnet-1"]
         ec2 = MagicMock()
         ec2.describe_subnets.side_effect = RuntimeError("AccessDenied")
@@ -97,6 +112,7 @@ class TestInferAssignPublicIp:
 class TestRunTaskRespectsAssignPublicIp:
     def test_explicit_kwarg_false_emits_disabled(self, svc):
         from remote_compose.models import ECSCluster
+
         cluster = MagicMock(
             launch_type=ECSCluster.LaunchType.FARGATE,
             aws_region="us-west-1",
@@ -124,6 +140,7 @@ class TestRunTaskRespectsAssignPublicIp:
 
     def test_default_None_infers_from_cluster_flag_disabled(self, svc):
         from remote_compose.models import ECSCluster
+
         cluster = MagicMock(
             launch_type=ECSCluster.LaunchType.FARGATE,
             aws_region="us-west-1",
@@ -145,7 +162,7 @@ class TestRunTaskRespectsAssignPublicIp:
 
         svc.run_task(cluster, task_def)  # no explicit kwarg
 
-        nc = ecs.run_task.call_args.kwargs[
-            "networkConfiguration"
-        ]["awsvpcConfiguration"]
+        nc = ecs.run_task.call_args.kwargs["networkConfiguration"][
+            "awsvpcConfiguration"
+        ]
         assert nc["assignPublicIp"] == "DISABLED"

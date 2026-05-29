@@ -32,13 +32,14 @@ rc-j08.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 # Idempotency marker — re-runs detect this line and skip unless --force.
-_RC_J08_MARKER = "# rc-j08: TLS / CSRF / proxy settings auto-appended by rc fix django-tls"
+_RC_J08_MARKER = (
+    "# rc-j08: TLS / CSRF / proxy settings auto-appended by rc fix django-tls"
+)
 
 
 @dataclass
@@ -81,7 +82,9 @@ def has_rc_j08_marker(
     return path if _RC_J08_MARKER in text else None
 
 
-def _resolve_settings_path(project_dir: Path, settings_module: Optional[str]) -> Optional[Path]:
+def _resolve_settings_path(
+    project_dir: Path, settings_module: Optional[str]
+) -> Optional[Path]:
     """Resolve a Django settings module to a settings.py path.
 
     Accepts:

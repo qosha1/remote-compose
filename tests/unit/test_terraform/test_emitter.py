@@ -15,7 +15,7 @@ def template_dir(tmp_path):
         'resource "aws_vpc" "main" {\n'
         '  cidr_block = "{{ vpc_cidr }}"\n'
         '  tags = { Name = "{{ project }}" }\n'
-        '}\n'
+        "}\n"
     )
     (d / "variables.tf.j2").write_text(
         'variable "region" { default = "{{ region }}" }\n'
@@ -28,11 +28,14 @@ class TestRender:
     def test_renders_templates_into_out_dir(self, template_dir, tmp_path):
         out = tmp_path / "out"
         em = TerraformEmitter(template_dir)
-        written = em.render({
-            "vpc_cidr": "10.0.0.0/16",
-            "project": "myapp",
-            "region": "us-west-2",
-        }, out)
+        written = em.render(
+            {
+                "vpc_cidr": "10.0.0.0/16",
+                "project": "myapp",
+                "region": "us-west-2",
+            },
+            out,
+        )
 
         assert (out / "main.tf").exists()
         assert (out / "variables.tf").exists()
@@ -58,7 +61,9 @@ class TestRender:
         em.render(ctx, tmp_path / "a")
         em.render(ctx, tmp_path / "b")
         for name in ["main.tf", "variables.tf", "README.md"]:
-            assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+            assert (tmp_path / "a" / name).read_bytes() == (
+                tmp_path / "b" / name
+            ).read_bytes()
 
     def test_strict_undefined_raises(self, template_dir, tmp_path):
         em = TerraformEmitter(template_dir, strict_undefined=True)

@@ -20,7 +20,6 @@ from __future__ import annotations
 from .ec2_instance_types import Arch
 from ..exceptions import ValidationError
 
-
 # Snapshot taken 2026-05-03 from SSM /aws/service/ami-amazon-linux-latest/.
 # Refresh quarterly.
 AMI_CATALOG: dict[str, dict[Arch, str]] = {

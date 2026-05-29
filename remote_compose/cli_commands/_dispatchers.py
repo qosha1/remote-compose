@@ -17,12 +17,12 @@ from typing import Any, Optional
 
 import click
 
-
-_RC_CONFIG_FILE = 'rc.yml'
+_RC_CONFIG_FILE = "rc.yml"
 
 
 def _load_v2_if_present(
-    config_path: Optional[str], strict: bool = True,
+    config_path: Optional[str],
+    strict: bool = True,
 ) -> Optional[tuple[Path, dict, Any]]:
     """Resolve config_path → (path, raw_dict, RcConfigV2) when rc.yml is v2.
 
@@ -43,6 +43,7 @@ def _load_v2_if_present(
     if not path.exists():
         return None
     from remote_compose.cli_v2 import load_rc_yml
+
     try:
         version, raw, v2 = load_rc_yml(path)
     except Exception as exc:
@@ -56,7 +57,10 @@ def _load_v2_if_present(
 
 
 def _detect_empty_file_secrets(
-    v2, region: str, aws_profile: Optional[str], file_secrets: list,
+    v2,
+    region: str,
+    aws_profile: Optional[str],
+    file_secrets: list,
 ) -> list[str]:
     """Return SM secret names that exist but have empty / zero-key blobs.
 
@@ -104,12 +108,14 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     This matches the ECS JSON-key syntax the provider emits in task defs.
     """
     import json
+
     loaded = _load_v2_if_present(config_path, strict=True)
     if loaded is None:
         return False
     path, raw, v2 = loaded
 
     from remote_compose.envfile import EnvFileError, parse as parse_env
+
     ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
     region = ecs_cfg.get("region")
     aws_profile = ecs_cfg.get("aws_profile")
@@ -118,12 +124,17 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
         raise click.exceptions.Exit(1)
 
     from remote_compose.cli_v2 import _expand_env_file_auto, _parse_compose_services
+
     compose_path = Path(v2.compose_file)
     if not compose_path.is_absolute():
         compose_path = (path.parent / compose_path).resolve()
-    compose_services = _parse_compose_services(compose_path) if compose_path.exists() else {}
+    compose_services = (
+        _parse_compose_services(compose_path) if compose_path.exists() else {}
+    )
     expanded_secrets, _, _ = _expand_env_file_auto(
-        list(v2.secrets or []), compose_services, compose_path,
+        list(v2.secrets or []),
+        compose_services,
+        compose_path,
     )
     file_secrets = [s for s in expanded_secrets if s.source == "file"]
     if not file_secrets:
@@ -131,6 +142,7 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
         return True
 
     import boto3
+
     session = boto3.Session(region_name=region, profile_name=aws_profile)
     sm = session.client("secretsmanager")
 
@@ -165,7 +177,11 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
     cluster = ecs_cfg.get("cluster") or f"{v2.project}-cluster"
     ecs = session.client("ecs")
     orphan_keys = _detect_orphan_secret_keys_v2(
-        ecs, cluster, v2, file_secrets, project_dir,
+        ecs,
+        cluster,
+        v2,
+        file_secrets,
+        project_dir,
     )
     if orphan_keys:
         click.echo(
@@ -220,7 +236,8 @@ def _detect_orphan_secret_keys_v2(
     for svc_name in sorted(v2.services.keys()):
         try:
             desc = ecs_client.describe_services(
-                cluster=cluster, services=[svc_name],
+                cluster=cluster,
+                services=[svc_name],
             )
             any_query_succeeded = True
         except Exception:  # noqa: BLE001
@@ -262,9 +279,7 @@ def _detect_orphan_secret_keys_v2(
                     secret_arn = parts[0]
                     key = parts[1]
                     sm_simple_name = secret_arn.split(":")[-1]
-                    referenced_by_task_defs.setdefault(
-                        sm_simple_name, set()
-                    ).add(key)
+                    referenced_by_task_defs.setdefault(sm_simple_name, set()).add(key)
 
     # If every describe_services failed, we can't tell what's orphaned.
     # Skip the diagnostic rather than flagging every key as orphan (which
@@ -296,7 +311,10 @@ def _detect_orphan_secret_keys_v2(
 
 
 def _db_push_v2(
-    config_path: Optional[str], local_file: str, service: Optional[str], yes: bool,
+    config_path: Optional[str],
+    local_file: str,
+    service: Optional[str],
+    yes: bool,
 ) -> bool:
     """rc db push for v2 stacks: upload local dump → S3 → exec restore.
 
@@ -304,13 +322,15 @@ def _db_push_v2(
     caller can decide what to do (currently: exit with error).
     """
     from datetime import datetime, timezone
+
     loaded = _load_v2_if_present(config_path, strict=True)
     if loaded is None:
         return False
     path, raw, v2 = loaded
 
     from remote_compose.cli_v2 import (
-        build_deploy_context, resolve_provider,
+        build_deploy_context,
+        resolve_provider,
     )
 
     backup_cfg = v2.backup
@@ -332,7 +352,8 @@ def _db_push_v2(
         raise click.exceptions.Exit(1)
     if target_service not in v2.services:
         click.echo(
-            f"rc db push: service {target_service!r} not in rc.yml.", err=True,
+            f"rc db push: service {target_service!r} not in rc.yml.",
+            err=True,
         )
         raise click.exceptions.Exit(1)
 
@@ -353,16 +374,19 @@ def _db_push_v2(
     click.echo(f"  upload:  {s3_uri}")
     click.echo(f"  target:  {target_service} container in us-west-1")
     click.echo(f"  format:  {fmt}")
-    if not yes and not click.confirm("\n  This will overwrite existing data. Continue?"):
+    if not yes and not click.confirm(
+        "\n  This will overwrite existing data. Continue?"
+    ):
         click.echo("  Aborted.")
         return True
 
     import boto3
+
     session = boto3.Session(region_name=region, profile_name=aws_profile)
     s3 = session.client("s3")
     click.echo(f"\n  [1/3] Uploading {local.name} to {s3_uri}...")
     s3.upload_file(str(local), bucket, s3_key)
-    click.echo(f"        upload complete")
+    click.echo("        upload complete")
 
     presigned = s3.generate_presigned_url(
         "get_object",
@@ -374,10 +398,13 @@ def _db_push_v2(
     provider = resolve_provider(v2)
 
     restore_script = _build_restore_script(local.name, presigned, fmt)
-    click.echo(f"\n  [2/3] Connecting to {target_service} container, "
-               f"restoring (this may take a while for large dumps)...\n")
+    click.echo(
+        f"\n  [2/3] Connecting to {target_service} container, "
+        f"restoring (this may take a while for large dumps)...\n"
+    )
     result = provider.exec(
-        deploy_ctx, target_service,
+        deploy_ctx,
+        target_service,
         ["sh", "-c", restore_script],
         timeout=3600,
     )
@@ -401,7 +428,8 @@ def _db_push_v2(
     # is missing tables. Sentinal repro lost workflows_pagecapture this way.
     pg_errors = _count_pg_restore_errors(result.stdout or "", result.stderr or "")
     pg_ignored = _pg_restore_ignored_count(
-        result.stdout or "", result.stderr or "",
+        result.stdout or "",
+        result.stderr or "",
     )
     # rc-ln1: pg_restore exits 1 when individual operations fail BUT the
     # restore continued past them (e.g. extension already exists, role
@@ -455,6 +483,7 @@ def _pg_restore_ignored_count(stdout: str, stderr: str) -> Optional[int]:
     complete, so this is the signal that exit-1 means warnings, not
     a fatal error."""
     import re
+
     pattern = re.compile(r"errors ignored on restore:\s*(\d+)", re.IGNORECASE)
     for stream in (stdout, stderr):
         for line in (stream or "").splitlines():
@@ -535,7 +564,7 @@ def _build_restore_script(filename: str, presigned_url: str, fmt: str) -> str:
             "DUMP_DIR=$(find /tmp/_rcpush -maxdepth 1 -type d "
             "! -path /tmp/_rcpush | head -1); "
             f"PGPASSWORD=$POSTGRES_PASSWORD pg_restore -Fd -v "
-            f"{pg_common} --no-owner --clean --if-exists \"$DUMP_DIR\""
+            f'{pg_common} --no-owner --clean --if-exists "$DUMP_DIR"'
         )
     elif fmt == "pg_restore":
         download = (
@@ -566,7 +595,8 @@ def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
     path, raw, v2 = loaded
 
     from remote_compose.cli_v2 import (
-        build_deploy_context, resolve_provider,
+        build_deploy_context,
+        resolve_provider,
     )
 
     if service not in v2.services:

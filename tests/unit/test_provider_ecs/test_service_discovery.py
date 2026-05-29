@@ -13,9 +13,13 @@ def _ctx(tmp_path: Path, services: dict) -> DeployContext:
         project="disco",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1", "cluster": "c", "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "c",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -32,9 +36,7 @@ class TestSingleService:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(_ctx(tmp_path, {"web": _svc("web")}), out)
         sd = (out / "service_discovery.tf").read_text()
-        assert sd.strip() == "", (
-            "single-service compose doesn't need service discovery"
-        )
+        assert sd.strip() == "", "single-service compose doesn't need service discovery"
 
     def test_service_has_no_service_registries_block(self, tmp_path):
         out = tmp_path / "tf"
@@ -57,9 +59,14 @@ class TestMultiService:
     def test_discovery_service_per_compose_service(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, {
-                "api": _svc("api"), "db": _svc("db"), "cache": _svc("cache"),
-            }),
+            _ctx(
+                tmp_path,
+                {
+                    "api": _svc("api"),
+                    "db": _svc("db"),
+                    "cache": _svc("cache"),
+                },
+            ),
             out,
         )
         sd = (out / "service_discovery.tf").read_text()
@@ -81,10 +88,13 @@ class TestMultiService:
     def test_service_name_with_dash_sanitized_for_tf_reference(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            _ctx(tmp_path, {
-                "api": _svc("api"),
-                "celery-worker": _svc("celery-worker"),
-            }),
+            _ctx(
+                tmp_path,
+                {
+                    "api": _svc("api"),
+                    "celery-worker": _svc("celery-worker"),
+                },
+            ),
             out,
         )
         services = (out / "services.tf").read_text()

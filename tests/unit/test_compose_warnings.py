@@ -64,7 +64,10 @@ class TestBindMountDetector:
     def test_named_volume_does_not_trigger_bind_warning(self):
         compose = {
             "services": {
-                "db": {"image": "postgres", "volumes": ["pgdata:/var/lib/postgresql/data"]},
+                "db": {
+                    "image": "postgres",
+                    "volumes": ["pgdata:/var/lib/postgresql/data"],
+                },
             },
             "volumes": {"pgdata": {}},
         }
@@ -100,7 +103,10 @@ class TestExternalVolumeDetector:
     def test_external_volume_mounted_without_rc_coverage_warns(self):
         compose = {
             "services": {
-                "db": {"image": "postgres", "volumes": ["foo:/var/lib/postgresql/data"]},
+                "db": {
+                    "image": "postgres",
+                    "volumes": ["foo:/var/lib/postgresql/data"],
+                },
             },
             "volumes": {"foo": {"external": True}},
         }
@@ -116,7 +122,10 @@ class TestExternalVolumeDetector:
     def test_rc_yml_volumes_suppresses_warning(self):
         compose = {
             "services": {
-                "db": {"image": "postgres", "volumes": ["foo:/var/lib/postgresql/data"]},
+                "db": {
+                    "image": "postgres",
+                    "volumes": ["foo:/var/lib/postgresql/data"],
+                },
             },
             "volumes": {"foo": {"external": True}},
         }
@@ -124,8 +133,11 @@ class TestExternalVolumeDetector:
         rc_v2 = {
             "services": {
                 "db": {
-                    "cpu": 256, "memory": 512,
-                    "volumes": [{"name": "foo", "container_path": "/var/lib/postgresql/data"}],
+                    "cpu": 256,
+                    "memory": 512,
+                    "volumes": [
+                        {"name": "foo", "container_path": "/var/lib/postgresql/data"}
+                    ],
                 },
             },
         }
@@ -156,11 +168,14 @@ class TestBadHostDetector:
             "upstream landing { server host.docker.internal:3000; }\n"
         )
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "nginx": {"build": {"context": "./nginx"}, "image": "nginx"},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "nginx": {"build": {"context": "./nginx"}, "image": "nginx"},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_bad_hosts(compose, compose_path)
         assert len(warns) == 1
@@ -177,21 +192,27 @@ class TestBadHostDetector:
             "upstream loop2 { server 127.0.0.1:3000; }\n"
         )
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "nginx": {"build": {"context": "./nginx"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "nginx": {"build": {"context": "./nginx"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_bad_hosts(compose, compose_path) == []
 
     def test_no_build_context_skips_scan(self, tmp_path):
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "api": {"image": "busybox"},  # no build:
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "api": {"image": "busybox"},  # no build:
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_bad_hosts(compose, compose_path) == []
 
@@ -202,11 +223,14 @@ class TestBadHostDetector:
             "upstream { server host.docker.internal:5000; }\n"
         )
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "app": {"build": {"context": "./build"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "app": {"build": {"context": "./build"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_bad_hosts(compose, compose_path)
         assert any("host.docker.internal" in w and "service.conf" in w for w in warns)
@@ -288,7 +312,9 @@ class TestNginxUpstreamResolverDetector:
         return compose_path
 
     def test_warns_when_upstream_uses_compose_service_no_resolver(self, tmp_path):
-        compose_path = self._setup(tmp_path, """\
+        compose_path = self._setup(
+            tmp_path,
+            """\
 http {
   upstream django {
     server django:8000;
@@ -298,7 +324,8 @@ http {
     location / { proxy_pass http://django; }
   }
 }
-""")
+""",
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_nginx_upstream_resolver(compose, compose_path)
         assert len(warns) == 1
@@ -313,28 +340,37 @@ http {
         assert "proxy_pass http://$u" in w
 
     def test_suppressed_when_resolver_directive_present(self, tmp_path):
-        compose_path = self._setup(tmp_path, """\
+        compose_path = self._setup(
+            tmp_path,
+            """\
 http {
   resolver 169.254.169.253 valid=10s;
   upstream django { server django:8000; }
 }
-""")
+""",
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_nginx_upstream_resolver(compose, compose_path) == []
 
     def test_external_hostname_not_flagged(self, tmp_path):
         # api.example.com is NOT a compose service — out of scope.
-        compose_path = self._setup(tmp_path, """\
+        compose_path = self._setup(
+            tmp_path,
+            """\
 upstream api { server api.example.com:443; }
-""")
+""",
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_nginx_upstream_resolver(compose, compose_path) == []
 
     def test_localhost_and_127_not_flagged(self, tmp_path):
-        compose_path = self._setup(tmp_path, """\
+        compose_path = self._setup(
+            tmp_path,
+            """\
 upstream local1 { server localhost:8080; }
 upstream local2 { server 127.0.0.1:9090; }
-""")
+""",
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_nginx_upstream_resolver(compose, compose_path) == []
 
@@ -362,7 +398,10 @@ upstream worker { server celery:5555; }
         # vpc_cidr 10.42.0.0/16 → resolver 10.42.0.2 (network base + 2).
         compose_path = self._setup(tmp_path, "upstream django { server django:8000; }")
         compose = yaml.safe_load(compose_path.read_text())
-        rc = {"project": "myapp", "provider_config": {"ecs": {"vpc_cidr": "10.42.0.0/16"}}}
+        rc = {
+            "project": "myapp",
+            "provider_config": {"ecs": {"vpc_cidr": "10.42.0.0/16"}},
+        }
         warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
         assert len(warns) == 1
         assert "resolver 10.42.0.2" in warns[0]
@@ -405,12 +444,15 @@ upstream worker { server celery:5555; }
         )
         (ctx / "nginx.conf").write_text("upstream django { server django:8000; }")
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "nginx": {"build": {"context": "./build"}},
-                "django": {"build": {"context": "./djbuild"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "nginx": {"build": {"context": "./build"}},
+                    "django": {"build": {"context": "./djbuild"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         rc = {"project": "myapp", "provider_config": {"ecs": {}}}
         warns = detect_nginx_upstream_resolver(compose, compose_path, rc)
@@ -418,7 +460,7 @@ upstream worker { server celery:5555; }
         w = warns[0]
         assert "Django" in w
         assert "ALLOWED_HOSTS" in w
-        assert 'proxy_set_header Host localhost' in w
+        assert "proxy_set_header Host localhost" in w
 
     def test_non_django_upstream_no_django_hint(self, tmp_path):
         # nginx in front of a stock redis / postgres / non-Python upstream
@@ -441,10 +483,13 @@ upstream worker { server celery:5555; }
     def test_dedupe_when_same_pattern_appears_twice(self, tmp_path):
         # Same `server django:8000;` line twice in different upstream blocks
         # but identical (svc, file, upstream:host:port) triple — dedupes.
-        compose_path = self._setup(tmp_path, """\
+        compose_path = self._setup(
+            tmp_path,
+            """\
 upstream a { server django:8000; }
 upstream b { server django:8000; }
-""")
+""",
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_nginx_upstream_resolver(compose, compose_path)
         # Two distinct upstream names → two warnings.
@@ -456,12 +501,15 @@ upstream b { server django:8000; }
     def test_no_build_context_no_warning(self, tmp_path):
         # nginx uses an image: ref (no build context) — nothing to scan.
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "nginx": {"image": "nginx:alpine"},
-                "django": {"image": "django:latest"},
-            }
-        })
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "nginx": {"image": "nginx:alpine"},
+                    "django": {"image": "django:latest"},
+                }
+            },
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_nginx_upstream_resolver(compose, compose_path) == []
 
@@ -493,11 +541,14 @@ class TestDjangoAllowedHostsDetector:
         ctx = tmp_path / "djbuild"
         self._write_django_dockerfile(ctx)
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {"build": {"context": "./djbuild"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {"build": {"context": "./djbuild"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_django_allowed_hosts(compose, compose_path, {})
         assert len(warns) == 1
@@ -518,11 +569,14 @@ class TestDjangoAllowedHostsDetector:
             "CMD uvicorn app:app --host 0.0.0.0\n"
         )
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "api": {"build": {"context": "./fastbuild"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "api": {"build": {"context": "./fastbuild"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_django_allowed_hosts(compose, compose_path, {}) == []
 
@@ -538,12 +592,15 @@ class TestDjangoAllowedHostsDetector:
             "upstream b { server django:8000; }\n"
         )
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {"build": {"context": "./djbuild"}},
-                "nginx": {"build": {"context": "./nginx"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {"build": {"context": "./djbuild"}},
+                    "nginx": {"build": {"context": "./nginx"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_django_allowed_hosts(compose, compose_path, {})
         assert len(warns) == 1
@@ -553,11 +610,14 @@ class TestDjangoAllowedHostsDetector:
         # — heuristic rightly skips it (we'd produce a false positive on
         # any tagged 'django' image otherwise).
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {"image": "django:latest"},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {"image": "django:latest"},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_django_allowed_hosts(compose, compose_path, {}) == []
 
@@ -566,14 +626,17 @@ class TestDjangoAllowedHostsDetector:
         ctx = tmp_path / "djbuild"
         self._write_django_dockerfile(ctx)
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {
-                    "build": {"context": "./djbuild"},
-                    "environment": {"DJANGO_ALLOWED_HOSTS": "*"},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {
+                        "build": {"context": "./djbuild"},
+                        "environment": {"DJANGO_ALLOWED_HOSTS": "*"},
+                    },
                 },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_django_allowed_hosts(compose, compose_path, {}) == []
 
@@ -582,14 +645,17 @@ class TestDjangoAllowedHostsDetector:
         ctx = tmp_path / "djbuild"
         self._write_django_dockerfile(ctx)
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {
-                    "build": {"context": "./djbuild"},
-                    "environment": ["DJANGO_ALLOWED_HOSTS=mydomain.com"],
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {
+                        "build": {"context": "./djbuild"},
+                        "environment": ["DJANGO_ALLOWED_HOSTS=mydomain.com"],
+                    },
                 },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         assert detect_django_allowed_hosts(compose, compose_path, {}) == []
 
@@ -598,11 +664,14 @@ class TestDjangoAllowedHostsDetector:
         ctx = tmp_path / "djbuild"
         self._write_django_dockerfile(ctx)
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "django": {"build": {"context": "./djbuild"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "django": {"build": {"context": "./djbuild"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         rc = {"services": {"django": {"env": {"DJANGO_ALLOWED_HOSTS": "*"}}}}
         assert detect_django_allowed_hosts(compose, compose_path, rc) == []
@@ -613,12 +682,15 @@ class TestDjangoAllowedHostsDetector:
         self._write_django_dockerfile(ctx1)
         self._write_django_dockerfile(ctx2)
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "web": {"build": {"context": "./dj1"}},
-                "celery": {"build": {"context": "./dj2"}},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "web": {"build": {"context": "./dj1"}},
+                    "celery": {"build": {"context": "./dj2"}},
+                },
             },
-        })
+        )
         compose = yaml.safe_load(compose_path.read_text())
         warns = detect_django_allowed_hosts(compose, compose_path, {})
         assert len(warns) == 2
@@ -636,27 +708,28 @@ class TestCollectComposeWarnings:
     def test_aggregates_all_four_detectors(self, tmp_path):
         ctx_dir = tmp_path / "build"
         ctx_dir.mkdir()
-        (ctx_dir / "nginx.conf").write_text(
-            "server host.docker.internal:3000;\n"
-        )
+        (ctx_dir / "nginx.conf").write_text("server host.docker.internal:3000;\n")
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "api": {
-                    "image": "busybox",
-                    "volumes": ["./src:/app"],
-                    "ports": ["3000:3000", "6080:6080"],
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "api": {
+                        "image": "busybox",
+                        "volumes": ["./src:/app"],
+                        "ports": ["3000:3000", "6080:6080"],
+                    },
+                    "nginx": {
+                        "build": {"context": "./build"},
+                    },
+                    "db": {
+                        "image": "postgres",
+                        "volumes": ["pgdata:/data"],
+                    },
                 },
-                "nginx": {
-                    "build": {"context": "./build"},
-                },
-                "db": {
-                    "image": "postgres",
-                    "volumes": ["pgdata:/data"],
-                },
+                "volumes": {"pgdata": {"external": True}},
             },
-            "volumes": {"pgdata": {"external": True}},
-        })
+        )
         rc_v2 = {"services": {"db": {"cpu": 256, "memory": 512}}}
         warns = collect_compose_warnings(compose_path, rc_v2)
         # All four should fire on this fixture.
@@ -667,11 +740,14 @@ class TestCollectComposeWarnings:
 
     def test_clean_compose_emits_no_warnings(self, tmp_path):
         compose_path = tmp_path / "docker-compose.yml"
-        _write_compose(compose_path, {
-            "services": {
-                "api": {"image": "busybox", "ports": ["3000:3000"]},
+        _write_compose(
+            compose_path,
+            {
+                "services": {
+                    "api": {"image": "busybox", "ports": ["3000:3000"]},
+                },
             },
-        })
+        )
         assert collect_compose_warnings(compose_path, {}) == []
 
     def test_missing_compose_file_returns_empty(self, tmp_path):
@@ -686,22 +762,31 @@ class TestRcPlanRendersWarnings:
         compose = tmp_path / "docker-compose.yml"
         _write_compose(compose, compose_doc)
         rc = tmp_path / "rc.yml"
-        rc.write_text(yaml.safe_dump({
-            "version": 2, "project": "p",
-            "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {},
-            "terraform": {"backend": {"type": "local"}},
-        }))
+        rc.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "p",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "fake",
+                    "services": {},
+                    "terraform": {"backend": {"type": "local"}},
+                }
+            )
+        )
         return rc
 
     def test_bind_mount_warning_appears_in_plan_output(self, tmp_path, capsys):
         from remote_compose.cli_v2 import dispatch_if_v2
-        rc = self._setup(tmp_path, {
-            "services": {
-                "api": {"image": "busybox", "volumes": ["./src:/app"]},
+
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {
+                    "api": {"image": "busybox", "volumes": ["./src:/app"]},
+                },
             },
-        })
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out
@@ -711,9 +796,13 @@ class TestRcPlanRendersWarnings:
 
     def test_no_warnings_section_when_clean(self, tmp_path, capsys):
         from remote_compose.cli_v2 import dispatch_if_v2
-        rc = self._setup(tmp_path, {
-            "services": {"api": {"image": "busybox"}},
-        })
+
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {"api": {"image": "busybox"}},
+            },
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out
@@ -721,16 +810,20 @@ class TestRcPlanRendersWarnings:
 
     def test_host_docker_internal_warning_appears_in_plan(self, tmp_path, capsys):
         from remote_compose.cli_v2 import dispatch_if_v2
+
         ctx_dir = tmp_path / "nginx"
         ctx_dir.mkdir()
         (ctx_dir / "nginx.conf").write_text(
             "upstream { server host.docker.internal:3000; }\n"
         )
-        rc = self._setup(tmp_path, {
-            "services": {
-                "nginx": {"build": {"context": "./nginx"}},
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {
+                    "nginx": {"build": {"context": "./nginx"}},
+                },
             },
-        })
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out
@@ -739,11 +832,15 @@ class TestRcPlanRendersWarnings:
 
     def test_multi_port_warning_appears_in_plan(self, tmp_path, capsys):
         from remote_compose.cli_v2 import dispatch_if_v2
-        rc = self._setup(tmp_path, {
-            "services": {
-                "app": {"image": "busybox", "ports": ["3000:3000", "6080:6080"]},
+
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {
+                    "app": {"image": "busybox", "ports": ["3000:3000", "6080:6080"]},
+                },
             },
-        })
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out
@@ -753,12 +850,16 @@ class TestRcPlanRendersWarnings:
 
     def test_external_volume_warning_appears_in_plan(self, tmp_path, capsys):
         from remote_compose.cli_v2 import dispatch_if_v2
-        rc = self._setup(tmp_path, {
-            "services": {
-                "db": {"image": "postgres", "volumes": ["foo:/data"]},
+
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {
+                    "db": {"image": "postgres", "volumes": ["foo:/data"]},
+                },
+                "volumes": {"foo": {"external": True}},
             },
-            "volumes": {"foo": {"external": True}},
-        })
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out
@@ -771,16 +872,20 @@ class TestRcPlanRendersWarnings:
         # rc-e5u.44.23: even without an nginx front, a Django-shaped service
         # gets a proactive ALLOWED_HOSTS heads-up during `rc plan`.
         from remote_compose.cli_v2 import dispatch_if_v2
+
         ctx_dir = tmp_path / "djbuild"
         ctx_dir.mkdir()
         (ctx_dir / "Dockerfile").write_text(
             "FROM python:3.12\nCOPY manage.py /app/\nRUN pip install django\n"
         )
-        rc = self._setup(tmp_path, {
-            "services": {
-                "django": {"build": {"context": "./djbuild"}},
+        rc = self._setup(
+            tmp_path,
+            {
+                "services": {
+                    "django": {"build": {"context": "./djbuild"}},
+                },
             },
-        })
+        )
         ok = dispatch_if_v2(rc, "plan")
         assert ok is True
         out = capsys.readouterr().out

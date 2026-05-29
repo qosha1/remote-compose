@@ -185,6 +185,7 @@ class StatusReport:
         'degraded'). Read by `rc status` for the summary line.
     ingress_url: public-facing URL when one exists (ECS: ALB DNS name).
     """
+
     services: list[ServiceStatus]
     cluster_health: str
     ingress_url: Optional[str] = None
@@ -205,6 +206,7 @@ class DeployResult:
     terraform_outputs: provider-specific blob exposed by `terraform output
         -json`. ECS surfaces alb_dns_name + ecr_repositories + efs_*.
     """
+
     revision_id: str
     services: list[str]
     duration_s: float
@@ -221,6 +223,7 @@ class PlanResult:
     compose-level lint findings (rc.yml schema warnings, unsupported
     compose features) — see compose_warnings.collect_compose_warnings.
     """
+
     create: int
     update: int
     destroy: int
@@ -238,6 +241,7 @@ class ExecResult:
     surface it natively). stdout/stderr are captured strings; trailing
     newline preserved as-is.
     """
+
     exit_code: int
     stdout: str
     stderr: str
@@ -367,7 +371,9 @@ class Provider(ABC):
         """
 
     @abstractmethod
-    def redeploy(self, ctx: DeployContext, services: Optional[list[str]] = None) -> DeployResult:
+    def redeploy(
+        self, ctx: DeployContext, services: Optional[list[str]] = None
+    ) -> DeployResult:
         """Force a new task revision without changing config or rebuilding images.
 
         Args:

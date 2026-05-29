@@ -9,9 +9,6 @@ makes the choice explicit.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
 
 from remote_compose.cli import _warn_on_rc_yml_ambiguity
 
@@ -48,7 +45,9 @@ class TestWarnOnRcYmlAmbiguity:
         for name in ("rc.yml", "rc.dev.yml", "rc.prod.yml"):
             assert name in err
 
-    def test_no_warning_when_only_dot_variant_no_main(self, tmp_path, monkeypatch, capsys):
+    def test_no_warning_when_only_dot_variant_no_main(
+        self, tmp_path, monkeypatch, capsys
+    ):
         # Only rc.core.yml, no rc.yml — single candidate → no ambiguity.
         (tmp_path / "rc.core.yml").write_text("version: 2\n")
         monkeypatch.chdir(tmp_path)

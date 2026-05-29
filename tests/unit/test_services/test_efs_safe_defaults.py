@@ -15,7 +15,6 @@ needs them.
 
 from __future__ import annotations
 
-import pytest
 
 from remote_compose.services.efs_service import EFSService
 
@@ -54,6 +53,7 @@ class TestCreateAccessPointSignatureMatchesDefaults:
 
     def test_create_access_point_uses_default_uid_kwarg(self):
         import inspect
+
         sig = inspect.signature(EFSService.create_access_point)
         assert sig.parameters["uid"].default == EFSService.DEFAULT_UID
         assert sig.parameters["gid"].default == EFSService.DEFAULT_GID

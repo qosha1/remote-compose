@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 from typing import Union
 
-
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -47,7 +46,7 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
             if not line or line.startswith("#"):
                 continue
             if line.startswith("export "):
-                line = line[len("export "):].lstrip()
+                line = line[len("export ") :].lstrip()
             if "=" not in line:
                 raise EnvFileError(
                     f"{path}:{line_num}: expected KEY=value, got {raw.rstrip()!r}"
@@ -60,9 +59,7 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
                     f"(must match [A-Za-z_][A-Za-z0-9_]*)"
                 )
             if key in out:
-                raise EnvFileError(
-                    f"{path}:{line_num}: duplicate key {key!r}"
-                )
+                raise EnvFileError(f"{path}:{line_num}: duplicate key {key!r}")
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]

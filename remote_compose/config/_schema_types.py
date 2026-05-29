@@ -58,6 +58,7 @@ class LifecycleHookV2:
     Examples: 'migrate' (django manage.py migrate), 'createsuperuser',
     'seed' (rails db:seed), 'shell' (interactive REPL).
     """
+
     name: str
     command: list[str]
     auto_on_deploy: bool = False
@@ -80,7 +81,8 @@ class LifecycleHookV2:
                 f"(returns nonzero = 'not yet run')"
             )
         if self.probe is not None and (
-            not isinstance(self.probe, list) or not self.probe
+            not isinstance(self.probe, list)
+            or not self.probe
             or not all(isinstance(c, str) for c in self.probe)
         ):
             raise ConfigError(
@@ -167,9 +169,7 @@ class ServiceV2:
                 f"{sorted(VALID_LAUNCH_TYPES)}, got {self.launch_type!r}"
             )
         if self.public and self.port is None:
-            raise ConfigError(
-                f"service {self.name!r}: public=true requires a port"
-            )
+            raise ConfigError(f"service {self.name!r}: public=true requires a port")
         if self.domain is not None:
             if not self.public:
                 raise ConfigError(
@@ -291,7 +291,9 @@ class SecretRefV2:
         if self.source == "aws_sm" and not self.arn:
             raise ConfigError(f"secret {self.name!r}: source=aws_sm requires arn")
         if self.source in {"k8s_secret", "gcp_sm"} and not self.ref:
-            raise ConfigError(f"secret {self.name!r}: source={self.source} requires ref")
+            raise ConfigError(
+                f"secret {self.name!r}: source={self.source} requires ref"
+            )
 
 
 @dataclass
@@ -315,15 +317,12 @@ class TerraformBackend:
         """
         if self.type == "s3":
             if not self.bucket:
-                raise ConfigError(
-                    "terraform.backend type=s3 requires bucket"
-                )
+                raise ConfigError("terraform.backend type=s3 requires bucket")
             if not self.key:
-                raise ConfigError(
-                    "terraform.backend type=s3 requires key"
-                )
+                raise ConfigError("terraform.backend type=s3 requires key")
             if not self.dynamodb_table:
                 import sys
+
                 sys.stderr.write(
                     "warning: terraform.backend type=s3 without "
                     "dynamodb_table — concurrent rc deploys can corrupt "
@@ -345,6 +344,7 @@ class ComposeConfig:
     rc.yml services. include narrows to a whitelist; exclude removes a
     blacklist. Mutually exclusive.
     """
+
     include: Optional[list[str]] = None
     exclude: Optional[list[str]] = None
 

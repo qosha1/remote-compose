@@ -4,9 +4,8 @@ Service for orchestrating deployments.
 
 import os
 import uuid
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
-from django.db import transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
@@ -19,7 +18,6 @@ from ..models import (
 from ..conf import get_setting
 from ..exceptions import (
     DeploymentError,
-    DeploymentTimeoutError,
     DeploymentInProgressError,
     RollbackError,
     ValidationError,
@@ -42,7 +40,7 @@ class DeploymentService(BaseService):
         context_service: Optional[ContextService] = None,
         compose_service: Optional[ComposeService] = None,
         credential_service: Optional[CredentialService] = None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
@@ -63,8 +61,8 @@ class DeploymentService(BaseService):
         project_name: Optional[str] = None,
         environment: Optional[Dict[str, str]] = None,
         env_file_path: Optional[str] = None,
-        version: str = '',
-        deployed_by: str = '',
+        version: str = "",
+        deployed_by: str = "",
         context: Optional[DockerContext] = None,
         timeout: Optional[int] = None,
         pull_images: bool = True,
@@ -91,11 +89,11 @@ class DeploymentService(BaseService):
         Returns:
             Deployment instance
         """
-        timeout = timeout or get_setting('DEPLOYMENT_TIMEOUT', 600)
+        timeout = timeout or get_setting("DEPLOYMENT_TIMEOUT", 600)
 
         # Validate compose file
         validation = self.compose_service.validate_compose_file(compose_file_path)
-        compose_content = validation['content']
+        compose_content = validation["content"]
 
         # Get or create context
         if not context:
@@ -104,7 +102,7 @@ class DeploymentService(BaseService):
         # Generate project name if not provided
         if not project_name:
             project_name = os.path.basename(os.path.dirname(compose_file_path))
-            if not project_name or project_name == '.':
+            if not project_name or project_name == ".":
                 project_name = f"deploy-{uuid.uuid4().hex[:8]}"
 
         # Check for in-progress deployments to same target/project
@@ -125,8 +123,8 @@ class DeploymentService(BaseService):
             metadata=metadata or {},
         )
 
-        self._log(deployment, 'info', f"Deployment {deployment.id} created")
-        self.notify_observers('deployment_created', deployment=deployment)
+        self._log(deployment, "info", f"Deployment {deployment.id} created")
+        self.notify_observers("deployment_created", deployment=deployment)
 
         # Execute deployment
         try:
@@ -140,8 +138,8 @@ class DeploymentService(BaseService):
         except Exception as e:
             self.log_error(f"Deployment {deployment.id} failed: {e}", exc_info=True)
             deployment.fail(str(e))
-            self._log(deployment, 'error', f"Deployment failed: {e}")
-            self.notify_observers('deployment_failed', deployment=deployment, error=e)
+            self._log(deployment, "error", f"Deployment failed: {e}")
+            self.notify_observers("deployment_failed", deployment=deployment, error=e)
             raise
 
         return deployment
@@ -149,7 +147,7 @@ class DeploymentService(BaseService):
     def rollback(
         self,
         deployment: Deployment,
-        deployed_by: str = '',
+        deployed_by: str = "",
         timeout: Optional[int] = None,
     ) -> Deployment:
         """
@@ -168,7 +166,7 @@ class DeploymentService(BaseService):
                 f"Cannot rollback to deployment {deployment.id}: status is {deployment.status}"
             )
 
-        timeout = timeout or get_setting('DEPLOYMENT_TIMEOUT', 600)
+        timeout = timeout or get_setting("DEPLOYMENT_TIMEOUT", 600)
 
         # Create rollback deployment
         rollback_deployment = Deployment.objects.create(
@@ -183,11 +181,13 @@ class DeploymentService(BaseService):
             version=f"rollback-{deployment.version}",
             deployed_by=deployed_by,
             parent_deployment=deployment,
-            metadata={'rollback_from': deployment.id},
+            metadata={"rollback_from": deployment.id},
         )
 
-        self._log(rollback_deployment, 'info', f"Rolling back to deployment {deployment.id}")
-        self.notify_observers('rollback_started', deployment=rollback_deployment)
+        self._log(
+            rollback_deployment, "info", f"Rolling back to deployment {deployment.id}"
+        )
+        self.notify_observers("rollback_started", deployment=rollback_deployment)
 
         try:
             self._execute_deployment(
@@ -200,12 +200,14 @@ class DeploymentService(BaseService):
             # Mark original deployment as rolled back
             deployment.mark_rolled_back()
 
-            self.notify_observers('rollback_completed', deployment=rollback_deployment)
+            self.notify_observers("rollback_completed", deployment=rollback_deployment)
 
         except Exception as e:
             rollback_deployment.fail(str(e))
-            self._log(rollback_deployment, 'error', f"Rollback failed: {e}")
-            self.notify_observers('rollback_failed', deployment=rollback_deployment, error=e)
+            self._log(rollback_deployment, "error", f"Rollback failed: {e}")
+            self.notify_observers(
+                "rollback_failed", deployment=rollback_deployment, error=e
+            )
             raise RollbackError(f"Rollback failed: {e}")
 
         return rollback_deployment
@@ -213,7 +215,9 @@ class DeploymentService(BaseService):
     def get_deployment(self, deployment_id: int) -> Deployment:
         """Get a deployment by ID."""
         try:
-            return Deployment.objects.select_related('context', 'target').get(id=deployment_id)
+            return Deployment.objects.select_related("context", "target").get(
+                id=deployment_id
+            )
         except Deployment.DoesNotExist:
             raise ValidationError(f"Deployment not found: {deployment_id}")
 
@@ -238,7 +242,7 @@ class DeploymentService(BaseService):
         Returns:
             QuerySet of Deployment instances
         """
-        qs = Deployment.objects.select_related('context', 'target').all()
+        qs = Deployment.objects.select_related("context", "target").all()
 
         if target:
             qs = qs.filter(target=target)
@@ -262,16 +266,16 @@ class DeploymentService(BaseService):
             Dict with status information
         """
         result = {
-            'id': deployment.id,
-            'status': deployment.status,
-            'project_name': deployment.project_name,
-            'version': deployment.version,
-            'started_at': deployment.started_at,
-            'completed_at': deployment.completed_at,
-            'duration': deployment.duration,
-            'error_message': deployment.error_message,
-            'container_ids': deployment.container_ids,
-            'service_status': deployment.service_status,
+            "id": deployment.id,
+            "status": deployment.status,
+            "project_name": deployment.project_name,
+            "version": deployment.version,
+            "started_at": deployment.started_at,
+            "completed_at": deployment.completed_at,
+            "duration": deployment.duration,
+            "error_message": deployment.error_message,
+            "container_ids": deployment.container_ids,
+            "service_status": deployment.service_status,
         }
 
         # Get live status if deployment is successful
@@ -281,12 +285,12 @@ class DeploymentService(BaseService):
                 with ssh_client:
                     service_status = self.compose_service.get_service_status(
                         ssh_client=ssh_client,
-                        compose_path=f'/tmp/remote-compose/{deployment.project_name}/docker-compose.yml',
+                        compose_path=f"/tmp/remote-compose/{deployment.project_name}/docker-compose.yml",
                         project_name=deployment.project_name,
                     )
-                    result['live_service_status'] = service_status
+                    result["live_service_status"] = service_status
             except Exception as e:
-                result['live_status_error'] = str(e)
+                result["live_status_error"] = str(e)
 
         return result
 
@@ -307,7 +311,10 @@ class DeploymentService(BaseService):
         Returns:
             Log output string
         """
-        if deployment.status not in [Deployment.Status.SUCCESS, Deployment.Status.RUNNING]:
+        if deployment.status not in [
+            Deployment.Status.SUCCESS,
+            Deployment.Status.RUNNING,
+        ]:
             raise DeploymentError(
                 f"Cannot get logs: deployment status is {deployment.status}"
             )
@@ -316,7 +323,7 @@ class DeploymentService(BaseService):
         with ssh_client:
             result = self.compose_service.logs(
                 ssh_client=ssh_client,
-                compose_path=f'/tmp/remote-compose/{deployment.project_name}/docker-compose.yml',
+                compose_path=f"/tmp/remote-compose/{deployment.project_name}/docker-compose.yml",
                 project_name=deployment.project_name,
                 service=service,
                 tail=tail,
@@ -338,13 +345,13 @@ class DeploymentService(BaseService):
         with ssh_client:
             result = self.compose_service.down(
                 ssh_client=ssh_client,
-                compose_path=f'/tmp/remote-compose/{deployment.project_name}/docker-compose.yml',
+                compose_path=f"/tmp/remote-compose/{deployment.project_name}/docker-compose.yml",
                 project_name=deployment.project_name,
             )
 
             if result.success:
-                self._log(deployment, 'info', 'Deployment stopped')
-                self.notify_observers('deployment_stopped', deployment=deployment)
+                self._log(deployment, "info", "Deployment stopped")
+                self.notify_observers("deployment_stopped", deployment=deployment)
                 return True
             else:
                 raise DeploymentError(f"Failed to stop deployment: {result.stderr}")
@@ -365,8 +372,8 @@ class DeploymentService(BaseService):
             )
 
         deployment.cancel()
-        self._log(deployment, 'warning', 'Deployment cancelled')
-        self.notify_observers('deployment_cancelled', deployment=deployment)
+        self._log(deployment, "warning", "Deployment cancelled")
+        self.notify_observers("deployment_cancelled", deployment=deployment)
 
         return deployment
 
@@ -389,7 +396,7 @@ class DeploymentService(BaseService):
                 Deployment.Status.FAILED,
                 Deployment.Status.ROLLED_BACK,
                 Deployment.Status.CANCELLED,
-            ]
+            ],
         )
 
         count = old_deployments.count()
@@ -409,21 +416,24 @@ class DeploymentService(BaseService):
     ):
         """Execute the actual deployment."""
         deployment.start()
-        self._log(deployment, 'info', 'Deployment started')
-        self.notify_observers('deployment_started', deployment=deployment)
+        self._log(deployment, "info", "Deployment started")
+        self.notify_observers("deployment_started", deployment=deployment)
 
         ssh_client = self.target_service.get_ssh_client(deployment.target)
 
         with ssh_client:
             # Create remote directory for this project
-            remote_dir = f'/tmp/remote-compose/{deployment.project_name}'
+            remote_dir = f"/tmp/remote-compose/{deployment.project_name}"
 
             # Upload compose file
-            self._log(deployment, 'info', 'Uploading compose files')
+            self._log(deployment, "info", "Uploading compose files")
 
             # Write compose content to temp file for upload
             import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yml", delete=False
+            ) as f:
                 f.write(deployment.compose_content)
                 temp_compose_path = f.name
 
@@ -437,11 +447,11 @@ class DeploymentService(BaseService):
             finally:
                 os.unlink(temp_compose_path)
 
-            remote_compose_path = upload_result['compose_path']
+            remote_compose_path = upload_result["compose_path"]
 
             # Pull images if requested
             if pull_images:
-                self._log(deployment, 'info', 'Pulling images')
+                self._log(deployment, "info", "Pulling images")
                 pull_result = self.compose_service.pull(
                     ssh_client=ssh_client,
                     compose_path=remote_compose_path,
@@ -449,10 +459,14 @@ class DeploymentService(BaseService):
                     timeout=timeout,
                 )
                 if not pull_result.success:
-                    self._log(deployment, 'warning', f'Image pull warning: {pull_result.stderr}')
+                    self._log(
+                        deployment,
+                        "warning",
+                        f"Image pull warning: {pull_result.stderr}",
+                    )
 
             # Run compose up
-            self._log(deployment, 'info', 'Starting containers')
+            self._log(deployment, "info", "Starting containers")
             up_result = self.compose_service.up(
                 ssh_client=ssh_client,
                 compose_path=remote_compose_path,
@@ -464,14 +478,12 @@ class DeploymentService(BaseService):
             )
 
             if not up_result.success:
-                raise DeploymentError(
-                    f"Docker compose up failed: {up_result.stderr}"
-                )
+                raise DeploymentError(f"Docker compose up failed: {up_result.stderr}")
 
             self._log(
                 deployment,
-                'info',
-                'Containers started',
+                "info",
+                "Containers started",
                 command=up_result.command,
                 output=up_result.stdout,
             )
@@ -495,8 +507,8 @@ class DeploymentService(BaseService):
                 service_status=service_status,
             )
 
-            self._log(deployment, 'info', 'Deployment completed successfully')
-            self.notify_observers('deployment_completed', deployment=deployment)
+            self._log(deployment, "info", "Deployment completed successfully")
+            self.notify_observers("deployment_completed", deployment=deployment)
 
     def _check_deployment_lock(self, target: DeploymentTarget, project_name: str):
         """Check for in-progress deployments to the same target/project."""
@@ -516,9 +528,9 @@ class DeploymentService(BaseService):
         deployment: Deployment,
         level: str,
         message: str,
-        command: str = '',
-        output: str = '',
-        service_name: str = '',
+        command: str = "",
+        output: str = "",
+        service_name: str = "",
     ):
         """Create a deployment log entry."""
         DeploymentLog.log(

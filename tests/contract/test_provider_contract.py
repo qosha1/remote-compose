@@ -23,7 +23,6 @@ from remote_compose.provider import (
     PlanResult,
     Provider,
     SecretRef,
-    ServiceSpec,
     StatusReport,
 )
 
@@ -45,7 +44,10 @@ def _terraform_available() -> bool:
 # Deploy semantics
 # ---------------------------------------------------------------------------
 
-def test_deploy_returns_deploy_result(provider: Provider, minimal_ctx: DeployContext) -> None:
+
+def test_deploy_returns_deploy_result(
+    provider: Provider, minimal_ctx: DeployContext
+) -> None:
     result = provider.deploy(minimal_ctx)
     assert isinstance(result, DeployResult)
     assert result.revision_id
@@ -56,9 +58,9 @@ def test_deploy_idempotent(provider: Provider, minimal_ctx: DeployContext) -> No
     """A second deploy with the same context must be a no-op."""
     first = provider.deploy(minimal_ctx)
     second = provider.deploy(minimal_ctx)
-    assert first.revision_id == second.revision_id, (
-        "deploy must be idempotent — same input must yield same revision id"
-    )
+    assert (
+        first.revision_id == second.revision_id
+    ), "deploy must be idempotent — same input must yield same revision id"
 
 
 def test_deploy_reconciles_after_partial_failure(
@@ -71,9 +73,9 @@ def test_deploy_reconciles_after_partial_failure(
         provider.deploy(minimal_ctx)
     result = provider.deploy(minimal_ctx)
     status = provider.status(minimal_ctx)
-    assert all(s.running == s.desired for s in status.services), (
-        "deploy must reconcile partial failure — every service should reach desired replicas"
-    )
+    assert all(
+        s.running == s.desired for s in status.services
+    ), "deploy must reconcile partial failure — every service should reach desired replicas"
     assert result.revision_id
 
 
@@ -88,6 +90,7 @@ def test_redeploy_forces_new_revision(
 # ---------------------------------------------------------------------------
 # Status, logs, exec
 # ---------------------------------------------------------------------------
+
 
 def test_status_reflects_live_state(
     provider: Provider, minimal_ctx: DeployContext
@@ -123,10 +126,11 @@ def test_exec_runs_and_returns_exit_code(
 # Rollback, destroy
 # ---------------------------------------------------------------------------
 
+
 def test_rollback_reverts_to_previous_revision(
     provider: Provider, minimal_ctx: DeployContext
 ) -> None:
-    first = provider.deploy(minimal_ctx)
+    provider.deploy(minimal_ctx)
     # mutate: remove a service
     ctx_changed = DeployContext(
         project=minimal_ctx.project,
@@ -158,6 +162,7 @@ def test_destroy_removes_all_created_resources(
 # ---------------------------------------------------------------------------
 # Terraform portability (FR-7)
 # ---------------------------------------------------------------------------
+
 
 def test_emit_terraform_writes_module(
     provider: Provider, minimal_ctx: DeployContext, tmp_path: Path
@@ -200,12 +205,16 @@ def test_emit_terraform_is_standalone(
     provider.emit_terraform(minimal_ctx, out_dir)
     init = subprocess.run(
         ["terraform", "init", "-backend=false", "-input=false"],
-        cwd=out_dir, capture_output=True, text=True,
+        cwd=out_dir,
+        capture_output=True,
+        text=True,
     )
     assert init.returncode == 0, f"terraform init failed:\n{init.stderr}"
     validate = subprocess.run(
         ["terraform", "validate"],
-        cwd=out_dir, capture_output=True, text=True,
+        cwd=out_dir,
+        capture_output=True,
+        text=True,
     )
     assert validate.returncode == 0, f"terraform validate failed:\n{validate.stderr}"
 
@@ -213,6 +222,7 @@ def test_emit_terraform_is_standalone(
 # ---------------------------------------------------------------------------
 # Secret handling
 # ---------------------------------------------------------------------------
+
 
 def test_secret_value_never_leaks_to_terraform(
     provider: Provider, minimal_ctx: DeployContext, tmp_path: Path
@@ -232,14 +242,13 @@ def test_secret_value_never_leaks_to_terraform(
     out_dir = tmp_path / "tf_secret"
     provider.emit_terraform(ctx, out_dir)
     for tf in out_dir.rglob("*.tf"):
-        assert sentinel not in tf.read_text(), (
-            f"secret sentinel leaked into {tf}"
-        )
+        assert sentinel not in tf.read_text(), f"secret sentinel leaked into {tf}"
 
 
 # ---------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------
+
 
 def test_plan_returns_structured_result(
     provider: Provider, minimal_ctx: DeployContext
@@ -254,6 +263,7 @@ def test_plan_returns_structured_result(
 # ---------------------------------------------------------------------------
 # Network behaviors — real providers only
 # ---------------------------------------------------------------------------
+
 
 def test_public_service_receives_traffic(
     provider: Provider, minimal_ctx: DeployContext

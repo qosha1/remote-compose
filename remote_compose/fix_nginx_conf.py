@@ -224,16 +224,20 @@ def render_nginx_conf(
     parts = [_NGINX_HEADER_TEMPLATE.format(resolver_ip=resolver_ip)]
 
     primary = upstreams[0]
-    parts.append(_NGINX_DEFAULT_SERVER_TEMPLATE.format(
-        fqdn=f"{primary.name}.{namespace}:{primary.port}",
-        django_host=_django_host_line(primary.django),
-    ))
+    parts.append(
+        _NGINX_DEFAULT_SERVER_TEMPLATE.format(
+            fqdn=f"{primary.name}.{namespace}:{primary.port}",
+            django_host=_django_host_line(primary.django),
+        )
+    )
     for u in upstreams[1:]:
-        parts.append(_NGINX_NAMED_SERVER_TEMPLATE.format(
-            name=u.name,
-            fqdn=f"{u.name}.{namespace}:{u.port}",
-            django_host=_django_host_line(u.django),
-        ))
+        parts.append(
+            _NGINX_NAMED_SERVER_TEMPLATE.format(
+                name=u.name,
+                fqdn=f"{u.name}.{namespace}:{u.port}",
+                django_host=_django_host_line(u.django),
+            )
+        )
     parts.append(_NGINX_FOOTER)
     return "".join(parts)
 

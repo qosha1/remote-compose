@@ -32,7 +32,6 @@ from remote_compose.init_from_compose import (
     detect_nginx_auto_fix_target,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixture builders
 # ---------------------------------------------------------------------------
@@ -56,8 +55,9 @@ def _write_nginx_dockerfile(path: Path) -> None:
     """))
 
 
-def _write_nginx_conf_with_upstream(path: Path, upstream_host: str = "django",
-                                    upstream_port: int = 8000) -> None:
+def _write_nginx_conf_with_upstream(
+    path: Path, upstream_host: str = "django", upstream_port: int = 8000
+) -> None:
     """nginx.conf that trips .44.18: upstream block without resolver."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(f"""\
@@ -108,8 +108,12 @@ def _make_django_stack(tmp_path: Path, upstream_host: str = "django") -> Path:
     return compose_path
 
 
-def _make_rc_yml(tmp_path: Path, compose_rel: str = "docker-compose.yml",
-                 project: str = "myapp", vpc_cidr: str = "10.42.0.0/16") -> Path:
+def _make_rc_yml(
+    tmp_path: Path,
+    compose_rel: str = "docker-compose.yml",
+    project: str = "myapp",
+    vpc_cidr: str = "10.42.0.0/16",
+) -> Path:
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text(textwrap.dedent(f"""\
         # rc.yml — generated header
@@ -175,7 +179,7 @@ class TestDetectNginxAutoFixTarget:
         # No manage.py / wsgi / django markers in the upstream Dockerfile.
         (proj / "compose" / "api").mkdir(parents=True)
         (proj / "compose" / "api" / "Dockerfile").write_text(
-            "FROM node:18\nCMD [\"node\", \"server.js\"]\n"
+            'FROM node:18\nCMD ["node", "server.js"]\n'
         )
         _write_nginx_dockerfile(proj / "compose" / "local" / "nginx" / "Dockerfile")
         _write_nginx_conf_with_upstream(
@@ -296,8 +300,9 @@ class TestAutoFixNginxIfNeeded:
         rc_yml = _make_rc_yml(tmp_path)
         auto_fix_nginx_if_needed(rc_yml, compose)
         raw = yaml.safe_load(rc_yml.read_text())
-        assert raw["services"]["nginx"]["dockerfile"] == \
-            "./compose/ecs/nginx/Dockerfile"
+        assert (
+            raw["services"]["nginx"]["dockerfile"] == "./compose/ecs/nginx/Dockerfile"
+        )
         # Other fields preserved.
         assert raw["services"]["nginx"]["public"] is True
         assert raw["services"]["nginx"]["port"] == 80
@@ -328,7 +333,7 @@ class TestAutoFixNginxIfNeeded:
         proj = tmp_path
         (proj / "compose" / "api").mkdir(parents=True)
         (proj / "compose" / "api" / "Dockerfile").write_text(
-            "FROM node:18\nCMD [\"node\", \"server.js\"]\n"
+            'FROM node:18\nCMD ["node", "server.js"]\n'
         )
         _write_nginx_dockerfile(proj / "compose" / "local" / "nginx" / "Dockerfile")
         _write_nginx_conf_with_upstream(
@@ -363,8 +368,9 @@ class TestAutoFixNginxIfNeeded:
         assert second is not None
         # rc.yml dockerfile entry only present once.
         raw = yaml.safe_load(rc_yml.read_text())
-        assert raw["services"]["nginx"]["dockerfile"] == \
-            "./compose/ecs/nginx/Dockerfile"
+        assert (
+            raw["services"]["nginx"]["dockerfile"] == "./compose/ecs/nginx/Dockerfile"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -381,12 +387,21 @@ def test_rc_up_from_compose_auto_fixes_nginx_for_django(runner, tmp_path):
     """End-to-end via Click: rc up scaffolds, detects, auto-fixes, deploys."""
     compose = _make_django_stack(tmp_path)
     rc_yml = tmp_path / "rc.yml"
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(
             cli,
-            ["-c", str(rc_yml), "up", "--from-compose", str(compose),
-             "--region", "us-west-1"],
+            [
+                "-c",
+                str(rc_yml),
+                "up",
+                "--from-compose",
+                str(compose),
+                "--region",
+                "us-west-1",
+            ],
         )
     assert result.exit_code == 0, result.output
     # The auto-fix notice fired.
@@ -398,15 +413,14 @@ def test_rc_up_from_compose_auto_fixes_nginx_for_django(runner, tmp_path):
     assert (ecs_dir / "nginx.conf").is_file()
     # rc.yml has the dockerfile override.
     raw = yaml.safe_load(rc_yml.read_text())
-    assert raw["services"]["nginx"]["dockerfile"] == \
-        "./compose/ecs/nginx/Dockerfile"
+    assert raw["services"]["nginx"]["dockerfile"] == "./compose/ecs/nginx/Dockerfile"
 
 
 def test_rc_up_from_compose_skips_auto_fix_when_no_django(runner, tmp_path):
     proj = tmp_path
     (proj / "compose" / "api").mkdir(parents=True)
     (proj / "compose" / "api" / "Dockerfile").write_text(
-        "FROM node:18\nCMD [\"node\", \"server.js\"]\n"
+        'FROM node:18\nCMD ["node", "server.js"]\n'
     )
     _write_nginx_dockerfile(proj / "compose" / "local" / "nginx" / "Dockerfile")
     _write_nginx_conf_with_upstream(
@@ -424,8 +438,10 @@ def test_rc_up_from_compose_skips_auto_fix_when_no_django(runner, tmp_path):
             ports: ["80:80"]
     """))
     rc_yml = tmp_path / "rc.yml"
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(
             cli,
             ["-c", str(rc_yml), "up", "--from-compose", str(compose)],
@@ -443,8 +459,10 @@ def test_rc_up_from_compose_skips_auto_fix_when_resolver_present(runner, tmp_pat
         "  upstream backend { server django:8000; }\n}\n"
     )
     rc_yml = tmp_path / "rc.yml"
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(
             cli,
             ["-c", str(rc_yml), "up", "--from-compose", str(compose)],
@@ -458,16 +476,17 @@ def test_rc_up_existing_rcyml_resolves_compose_from_rc_yml(runner, tmp_path):
     runs by resolving compose_file from the rc.yml. Self-healing on a
     re-run after the user edits their nginx.conf.
     """
-    compose = _make_django_stack(tmp_path)
+    _make_django_stack(tmp_path)
     rc_yml = _make_rc_yml(tmp_path, compose_rel="docker-compose.yml")
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     assert "auto-fixed nginx config" in result.output
     raw = yaml.safe_load(rc_yml.read_text())
-    assert raw["services"]["nginx"]["dockerfile"] == \
-        "./compose/ecs/nginx/Dockerfile"
+    assert raw["services"]["nginx"]["dockerfile"] == "./compose/ecs/nginx/Dockerfile"
 
 
 def test_rc_up_auto_fix_failure_does_not_abort_deploy(runner, tmp_path):
@@ -478,14 +497,19 @@ def test_rc_up_auto_fix_failure_does_not_abort_deploy(runner, tmp_path):
     """
     compose = _make_django_stack(tmp_path)
     rc_yml = tmp_path / "rc.yml"
-    with patch("remote_compose.init_from_compose.auto_fix_nginx_if_needed",
-               side_effect=RuntimeError("disk full")), \
-         patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli._secrets_push_v2", return_value=True):
+    with (
+        patch(
+            "remote_compose.init_from_compose.auto_fix_nginx_if_needed",
+            side_effect=RuntimeError("disk full"),
+        ),
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(
             cli,
             ["-c", str(rc_yml), "up", "--from-compose", str(compose)],
         )
     assert result.exit_code == 0, result.output
-    assert "auto-fix skipped" in result.output.lower() or \
-        "warn" in result.output.lower()
+    assert (
+        "auto-fix skipped" in result.output.lower() or "warn" in result.output.lower()
+    )

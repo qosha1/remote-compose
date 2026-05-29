@@ -26,7 +26,6 @@ import time
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional
 
-
 _DEFAULT_INTERVAL_S = 30
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from remote_compose.cli_v2 import (
@@ -25,7 +24,6 @@ from remote_compose.cli_v2 import (
     build_deploy_context,
     load_rc_yml,
 )
-
 
 # ---------------------------------------------------------------------------
 # _compose_named_volume_mounts
@@ -63,28 +61,44 @@ class TestComposeNamedVolumeMounts:
         assert out == []
 
     def test_long_form_volume(self):
-        out = _compose_named_volume_mounts({"volumes": [
-            {"type": "volume", "source": "data", "target": "/var/lib/data"},
-        ]})
+        out = _compose_named_volume_mounts(
+            {
+                "volumes": [
+                    {"type": "volume", "source": "data", "target": "/var/lib/data"},
+                ]
+            }
+        )
         assert out == [{"name": "data", "mount": "/var/lib/data"}]
 
     def test_long_form_default_type_treated_as_volume(self):
         # docker-compose treats missing 'type' as 'volume'.
-        out = _compose_named_volume_mounts({"volumes": [
-            {"source": "data", "target": "/var/lib/data"},
-        ]})
+        out = _compose_named_volume_mounts(
+            {
+                "volumes": [
+                    {"source": "data", "target": "/var/lib/data"},
+                ]
+            }
+        )
         assert out == [{"name": "data", "mount": "/var/lib/data"}]
 
     def test_long_form_bind_skipped(self):
-        out = _compose_named_volume_mounts({"volumes": [
-            {"type": "bind", "source": "./local", "target": "/app"},
-        ]})
+        out = _compose_named_volume_mounts(
+            {
+                "volumes": [
+                    {"type": "bind", "source": "./local", "target": "/app"},
+                ]
+            }
+        )
         assert out == []
 
     def test_long_form_tmpfs_skipped(self):
-        out = _compose_named_volume_mounts({"volumes": [
-            {"type": "tmpfs", "target": "/tmp"},
-        ]})
+        out = _compose_named_volume_mounts(
+            {
+                "volumes": [
+                    {"type": "tmpfs", "target": "/tmp"},
+                ]
+            }
+        )
         assert out == []
 
     def test_no_volumes_key(self):
@@ -94,11 +108,15 @@ class TestComposeNamedVolumeMounts:
         assert _compose_named_volume_mounts({"volumes": None}) == []
 
     def test_mixed_named_and_bind(self):
-        out = _compose_named_volume_mounts({"volumes": [
-            "./local:/app",
-            "data:/var/lib/data",
-            "/host:/etc/host",
-        ]})
+        out = _compose_named_volume_mounts(
+            {
+                "volumes": [
+                    "./local:/app",
+                    "data:/var/lib/data",
+                    "/host:/etc/host",
+                ]
+            }
+        )
         assert out == [{"name": "data", "mount": "/var/lib/data"}]
 
 
@@ -110,10 +128,14 @@ class TestComposeNamedVolumeMounts:
 def _write_rc_yml_v2(tmp_path: Path, services: dict, **overrides) -> Path:
     """Helper: write a minimal v2 rc.yml + matching compose.yml. Returns rc.yml path."""
     compose_path = tmp_path / "docker-compose.yml"
-    compose_path.write_text(yaml.safe_dump({
-        "version": "3.9",
-        "services": services,
-    }))
+    compose_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "3.9",
+                "services": services,
+            }
+        )
+    )
     rc = {
         "version": 2,
         "project": "test-46-11",
@@ -130,13 +152,16 @@ def _write_rc_yml_v2(tmp_path: Path, services: dict, **overrides) -> Path:
 
 class TestSingletonAutoEFSPromotion:
     def test_celery_beat_named_mount_auto_promoted(self, tmp_path):
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-beat": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "beat"],
-                "volumes": ["celery-beat-schedule:/celery-beat"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-beat": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "beat"],
+                    "volumes": ["celery-beat-schedule:/celery-beat"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -146,12 +171,15 @@ class TestSingletonAutoEFSPromotion:
         ]
 
     def test_dash_scheduler_suffix_triggers_promotion(self, tmp_path):
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "nightly-scheduler": {
-                "image": "scheduler:1",
-                "volumes": ["sched-state:/state"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "nightly-scheduler": {
+                    "image": "scheduler:1",
+                    "volumes": ["sched-state:/state"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -163,13 +191,16 @@ class TestSingletonAutoEFSPromotion:
         # The corollary: a non-singleton (celery WORKER) does NOT get
         # named-volume auto-promotion. Workers are multi-instance; EFS
         # would be wrong by default.
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-worker": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "worker"],
-                "volumes": ["worker-cache:/var/cache/celery"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-worker": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "worker"],
+                    "volumes": ["worker-cache:/var/cache/celery"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -177,13 +208,16 @@ class TestSingletonAutoEFSPromotion:
         assert ctx.services["celery-worker"].volumes == []
 
     def test_bind_mounts_never_promoted(self, tmp_path):
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-beat": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "beat"],
-                "volumes": ["./backend:/app"],  # bind mount
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-beat": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "beat"],
+                    "volumes": ["./backend:/app"],  # bind mount
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -223,13 +257,16 @@ class TestSingletonAutoEFSPromotion:
     def test_compose_only_service_singleton_promoted(self, tmp_path):
         # Service NOT in rc.yml services{} → uses the compose-only fallback
         # branch. Same behavior: singleton + named mount → auto-promote.
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-beat": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "beat"],
-                "volumes": ["beat-state:/celery-beat"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-beat": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "beat"],
+                    "volumes": ["beat-state:/celery-beat"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -238,12 +275,15 @@ class TestSingletonAutoEFSPromotion:
 
     def test_singleton_with_no_volumes_unchanged(self, tmp_path):
         # Singleton without any compose volumes → no spurious volume.
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-beat": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "beat"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-beat": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "beat"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
@@ -257,17 +297,21 @@ class TestProviderEmitsEFSForAutoPromotedVolume:
     if the user had hand-declared services.celery-beat.volumes in rc.yml."""
 
     def test_celery_beat_named_volume_lands_in_terraform(self, tmp_path):
-        rc_path = _write_rc_yml_v2(tmp_path, services={
-            "celery-beat": {
-                "image": "myapp:latest",
-                "command": ["celery", "-A", "config", "beat"],
-                "volumes": ["celery-beat-schedule:/celery-beat"],
+        rc_path = _write_rc_yml_v2(
+            tmp_path,
+            services={
+                "celery-beat": {
+                    "image": "myapp:latest",
+                    "command": ["celery", "-A", "config", "beat"],
+                    "volumes": ["celery-beat-schedule:/celery-beat"],
+                },
             },
-        })
+        )
         version, raw, v2 = load_rc_yml(rc_path)
         ctx = build_deploy_context(v2, raw, rc_path)
 
         from remote_compose.provider.ecs.provider import ECSProvider
+
         out_dir = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out_dir)
         efs_tf = (out_dir / "efs.tf").read_text()

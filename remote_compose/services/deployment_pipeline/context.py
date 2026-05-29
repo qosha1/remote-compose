@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 # Sub-context dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class DeploymentConfig:
     """
@@ -52,9 +53,9 @@ class DeploymentConfig:
     """
 
     # Image configuration
-    image_tag: str = 'latest'
-    version: str = ''
-    deployed_by: str = 'system'
+    image_tag: str = "latest"
+    version: str = ""
+    deployed_by: str = "system"
 
     # Resource configuration
     desired_count: int = 1
@@ -82,7 +83,7 @@ class DeploymentConfig:
     certificate_arn: Optional[str] = None
 
     # VPC CIDR override
-    vpc_cidr: str = '10.0.0.0/16'
+    vpc_cidr: str = "10.0.0.0/16"
 
     # Secrets/env files
     secrets_files: List[str] = field(default_factory=list)
@@ -107,15 +108,15 @@ class InfrastructureState:
     """
 
     # VPC
-    vpc_infrastructure: Optional['VPCInfrastructure'] = None
+    vpc_infrastructure: Optional["VPCInfrastructure"] = None
     security_groups: Dict[str, str] = field(default_factory=dict)
 
     # Load balancer
-    load_balancer: Optional['LoadBalancerConfig'] = None
+    load_balancer: Optional["LoadBalancerConfig"] = None
     target_groups: Dict[str, Any] = field(default_factory=dict)
 
     # Service Connect
-    service_connect_namespace: Optional['ServiceConnectNamespace'] = None
+    service_connect_namespace: Optional["ServiceConnectNamespace"] = None
 
     # Secrets Manager ARNs: {env_var_name: secret_arn}
     secrets_arns: Dict[str, str] = field(default_factory=dict)
@@ -153,7 +154,7 @@ class EFSState:
     """
 
     # EFS file system model
-    efs_file_system: Optional['EFSFileSystem'] = None
+    efs_file_system: Optional["EFSFileSystem"] = None
 
     # Per-volume EFS config: {volume_name: {file_system_id, access_point_id}}
     efs_config: Dict[str, Dict[str, str]] = field(default_factory=dict)
@@ -162,6 +163,7 @@ class EFSState:
 # ---------------------------------------------------------------------------
 # Service registry for dependency injection
 # ---------------------------------------------------------------------------
+
 
 class ServiceRegistry:
     """
@@ -187,69 +189,88 @@ class ServiceRegistry:
     def ecs(self):
         def factory():
             from ..ecs_service import ECSService
+
             return ECSService()
-        return self._get_or_create('ecs', factory)
+
+        return self._get_or_create("ecs", factory)
 
     @property
     def ecr(self):
         def factory():
             from ..ecr_service import ECRService
+
             return ECRService()
-        return self._get_or_create('ecr', factory)
+
+        return self._get_or_create("ecr", factory)
 
     @property
     def efs(self):
         def factory():
             from ..efs_service import EFSService
+
             return EFSService()
-        return self._get_or_create('efs', factory)
+
+        return self._get_or_create("efs", factory)
 
     @property
     def vpc(self):
         def factory():
             from ..vpc_service import VPCService
+
             return VPCService()
-        return self._get_or_create('vpc', factory)
+
+        return self._get_or_create("vpc", factory)
 
     @property
     def alb(self):
         def factory():
             from ..alb_service import ALBService
+
             return ALBService()
-        return self._get_or_create('alb', factory)
+
+        return self._get_or_create("alb", factory)
 
     @property
     def security_group(self):
         def factory():
             from ..security_group_service import SecurityGroupService
+
             return SecurityGroupService()
-        return self._get_or_create('security_group', factory)
+
+        return self._get_or_create("security_group", factory)
 
     @property
     def service_connect(self):
         def factory():
             from ..service_connect_service import ServiceConnectService
+
             return ServiceConnectService()
-        return self._get_or_create('service_connect', factory)
+
+        return self._get_or_create("service_connect", factory)
 
     @property
     def secrets(self):
         def factory():
             from ..secrets_service import SecretsService
+
             return SecretsService()
-        return self._get_or_create('secrets', factory)
+
+        return self._get_or_create("secrets", factory)
 
     @property
     def image_build(self):
         def factory():
             from ..image_build_service import ImageBuildService
+
             return ImageBuildService(ecr_service=self.ecr)
-        return self._get_or_create('image_build', factory)
+
+        return self._get_or_create("image_build", factory)
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline context
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PipelineContext:
@@ -274,7 +295,7 @@ class PipelineContext:
     # Required Inputs (set at pipeline start)
     # -------------------------------------------------------------------------
 
-    cluster: 'ECSCluster'
+    cluster: "ECSCluster"
     compose_file_path: Path
     project_name: str
 
@@ -292,21 +313,21 @@ class PipelineContext:
     # Optional Input
     # -------------------------------------------------------------------------
 
-    target: Optional['DeploymentTarget'] = None
+    target: Optional["DeploymentTarget"] = None
 
     # -------------------------------------------------------------------------
     # State Accumulated During Pipeline Execution
     # -------------------------------------------------------------------------
 
     # Deployment tracking
-    deployment: Optional['Deployment'] = None
+    deployment: Optional["Deployment"] = None
 
     # Preprocessing results
-    preprocessed: Optional['PreprocessedCompose'] = None
+    preprocessed: Optional["PreprocessedCompose"] = None
 
     # ECS state (single-service)
-    task_definition: Optional['ECSTaskDefinition'] = None
-    ecs_service: Optional['ECSService'] = None
+    task_definition: Optional["ECSTaskDefinition"] = None
+    ecs_service: Optional["ECSService"] = None
 
     # -------------------------------------------------------------------------
     # Multi-Service State
@@ -537,11 +558,11 @@ class PipelineContext:
     # =========================================================================
 
     @property
-    def vpc_infrastructure(self) -> Optional['VPCInfrastructure']:
+    def vpc_infrastructure(self) -> Optional["VPCInfrastructure"]:
         return self.infrastructure.vpc_infrastructure
 
     @vpc_infrastructure.setter
-    def vpc_infrastructure(self, value: Optional['VPCInfrastructure']) -> None:
+    def vpc_infrastructure(self, value: Optional["VPCInfrastructure"]) -> None:
         self.infrastructure.vpc_infrastructure = value
 
     @property
@@ -553,11 +574,11 @@ class PipelineContext:
         self.infrastructure.security_groups = value
 
     @property
-    def load_balancer(self) -> Optional['LoadBalancerConfig']:
+    def load_balancer(self) -> Optional["LoadBalancerConfig"]:
         return self.infrastructure.load_balancer
 
     @load_balancer.setter
-    def load_balancer(self, value: Optional['LoadBalancerConfig']) -> None:
+    def load_balancer(self, value: Optional["LoadBalancerConfig"]) -> None:
         self.infrastructure.load_balancer = value
 
     @property
@@ -569,11 +590,13 @@ class PipelineContext:
         self.infrastructure.target_groups = value
 
     @property
-    def service_connect_namespace(self) -> Optional['ServiceConnectNamespace']:
+    def service_connect_namespace(self) -> Optional["ServiceConnectNamespace"]:
         return self.infrastructure.service_connect_namespace
 
     @service_connect_namespace.setter
-    def service_connect_namespace(self, value: Optional['ServiceConnectNamespace']) -> None:
+    def service_connect_namespace(
+        self, value: Optional["ServiceConnectNamespace"]
+    ) -> None:
         self.infrastructure.service_connect_namespace = value
 
     @property
@@ -625,11 +648,11 @@ class PipelineContext:
     # =========================================================================
 
     @property
-    def efs_file_system(self) -> Optional['EFSFileSystem']:
+    def efs_file_system(self) -> Optional["EFSFileSystem"]:
         return self.efs.efs_file_system
 
     @efs_file_system.setter
-    def efs_file_system(self, value: Optional['EFSFileSystem']) -> None:
+    def efs_file_system(self, value: Optional["EFSFileSystem"]) -> None:
         self.efs.efs_file_system = value
 
     @property
@@ -646,13 +669,13 @@ class PipelineContext:
 
     def __init__(
         self,
-        cluster: 'ECSCluster',
+        cluster: "ECSCluster",
         compose_file_path: Path,
         project_name: str,
         # DeploymentConfig fields (accepted at top level for backwards compat)
-        image_tag: str = 'latest',
-        version: str = '',
-        deployed_by: str = 'system',
+        image_tag: str = "latest",
+        version: str = "",
+        deployed_by: str = "system",
         desired_count: int = 1,
         cpu: Optional[str] = None,
         memory: Optional[str] = None,
@@ -668,17 +691,17 @@ class PipelineContext:
         environment: Optional[Dict[str, str]] = None,
         service_config_path: Optional[str] = None,
         certificate_arn: Optional[str] = None,
-        vpc_cidr: str = '10.0.0.0/16',
+        vpc_cidr: str = "10.0.0.0/16",
         secrets_files: Optional[List[str]] = None,
         domain: Optional[str] = None,
         code_only: bool = False,
         selected_services: Optional[List[str]] = None,
         # InfrastructureState fields (accepted at top level for backwards compat)
-        vpc_infrastructure: Optional['VPCInfrastructure'] = None,
+        vpc_infrastructure: Optional["VPCInfrastructure"] = None,
         security_groups: Optional[Dict[str, str]] = None,
-        load_balancer: Optional['LoadBalancerConfig'] = None,
+        load_balancer: Optional["LoadBalancerConfig"] = None,
         target_groups: Optional[Dict[str, Any]] = None,
-        service_connect_namespace: Optional['ServiceConnectNamespace'] = None,
+        service_connect_namespace: Optional["ServiceConnectNamespace"] = None,
         secrets_arns: Optional[Dict[str, str]] = None,
         # ImageState fields (accepted at top level for backwards compat)
         account_id: Optional[str] = None,
@@ -686,7 +709,7 @@ class PipelineContext:
         built_images: Optional[List[str]] = None,
         shared_images: Optional[Dict[str, str]] = None,
         # EFSState fields (accepted at top level for backwards compat)
-        efs_file_system: Optional['EFSFileSystem'] = None,
+        efs_file_system: Optional["EFSFileSystem"] = None,
         efs_config: Optional[Dict[str, Dict[str, str]]] = None,
         # Sub-context objects (for new-style construction)
         config: Optional[DeploymentConfig] = None,
@@ -695,11 +718,11 @@ class PipelineContext:
         efs: Optional[EFSState] = None,
         services: Optional[ServiceRegistry] = None,
         # Top-level fields
-        target: Optional['DeploymentTarget'] = None,
-        deployment: Optional['Deployment'] = None,
-        preprocessed: Optional['PreprocessedCompose'] = None,
-        task_definition: Optional['ECSTaskDefinition'] = None,
-        ecs_service: Optional['ECSService'] = None,
+        target: Optional["DeploymentTarget"] = None,
+        deployment: Optional["Deployment"] = None,
+        preprocessed: Optional["PreprocessedCompose"] = None,
+        task_definition: Optional["ECSTaskDefinition"] = None,
+        ecs_service: Optional["ECSService"] = None,
         task_definitions: Optional[Dict[str, Any]] = None,
         ecs_services: Optional[Dict[str, Any]] = None,
         service_order: Optional[List[str]] = None,
@@ -780,14 +803,20 @@ class PipelineContext:
         self.task_definitions = task_definitions if task_definitions is not None else {}
         self.ecs_services = ecs_services if ecs_services is not None else {}
         self.service_order = service_order if service_order is not None else []
-        self.service_resources = service_resources if service_resources is not None else {}
+        self.service_resources = (
+            service_resources if service_resources is not None else {}
+        )
         self.service_counts = service_counts if service_counts is not None else {}
         self.public_services = public_services if public_services is not None else {}
-        self.infrastructure_env = infrastructure_env if infrastructure_env is not None else {}
+        self.infrastructure_env = (
+            infrastructure_env if infrastructure_env is not None else {}
+        )
         self.warnings = warnings if warnings is not None else []
         self.errors = errors if errors is not None else []
         self.metadata = metadata if metadata is not None else {}
-        self.created_resources = created_resources if created_resources is not None else []
+        self.created_resources = (
+            created_resources if created_resources is not None else []
+        )
 
     # =========================================================================
     # Methods
@@ -806,7 +835,7 @@ class PipelineContext:
         resource_type: str,
         resource_id: str,
         cleanup_action: Optional[str] = None,
-        **extra
+        **extra,
     ) -> None:
         """
         Track a created resource for potential cleanup.
@@ -817,16 +846,18 @@ class PipelineContext:
             cleanup_action: Optional action to take during cleanup
             **extra: Additional metadata about the resource
         """
-        self.created_resources.append({
-            'type': resource_type,
-            'id': resource_id,
-            'cleanup_action': cleanup_action,
-            **extra
-        })
+        self.created_resources.append(
+            {
+                "type": resource_type,
+                "id": resource_id,
+                "cleanup_action": cleanup_action,
+                **extra,
+            }
+        )
 
     def get_resources_of_type(self, resource_type: str) -> List[Dict[str, Any]]:
         """Get all tracked resources of a specific type."""
-        return [r for r in self.created_resources if r['type'] == resource_type]
+        return [r for r in self.created_resources if r["type"] == resource_type]
 
     @property
     def compose_dir(self) -> Path:
@@ -850,16 +881,22 @@ class PipelineContext:
     def to_summary(self) -> Dict[str, Any]:
         """Generate a summary of the context state for logging/debugging."""
         return {
-            'project_name': self.project_name,
-            'cluster': self.cluster.name if self.cluster else None,
-            'image_tag': self.image_tag,
-            'dry_run': self.dry_run,
-            'build_images': self.build_images,
-            'services_count': len(self.preprocessed.services) if self.preprocessed else 0,
-            'build_services_count': len(self.preprocessed.get_build_services()) if self.preprocessed else 0,
-            'volumes_count': len(self.preprocessed.named_volumes) if self.preprocessed else 0,
-            'built_images_count': len(self.built_images),
-            'efs_access_points': len(self.efs_config),
-            'warnings_count': len(self.warnings),
-            'created_resources_count': len(self.created_resources),
+            "project_name": self.project_name,
+            "cluster": self.cluster.name if self.cluster else None,
+            "image_tag": self.image_tag,
+            "dry_run": self.dry_run,
+            "build_images": self.build_images,
+            "services_count": (
+                len(self.preprocessed.services) if self.preprocessed else 0
+            ),
+            "build_services_count": (
+                len(self.preprocessed.get_build_services()) if self.preprocessed else 0
+            ),
+            "volumes_count": (
+                len(self.preprocessed.named_volumes) if self.preprocessed else 0
+            ),
+            "built_images_count": len(self.built_images),
+            "efs_access_points": len(self.efs_config),
+            "warnings_count": len(self.warnings),
+            "created_resources_count": len(self.created_resources),
         }

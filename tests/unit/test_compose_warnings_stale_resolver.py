@@ -10,7 +10,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from remote_compose.compose_warnings import detect_stale_nginx_resolver_ip
 
@@ -24,7 +23,9 @@ def _scaffold(
     nginx_dir = tmp_path / nginx_path
     nginx_dir.mkdir(parents=True)
     (nginx_dir / "nginx.conf").write_text(nginx_conf_content)
-    (nginx_dir / "Dockerfile").write_text("FROM nginx:alpine\nCOPY nginx.conf /etc/nginx/nginx.conf\n")
+    (nginx_dir / "Dockerfile").write_text(
+        "FROM nginx:alpine\nCOPY nginx.conf /etc/nginx/nginx.conf\n"
+    )
     compose = tmp_path / "docker-compose.yml"
     compose.write_text(compose_yaml or textwrap.dedent(f"""
         services:
@@ -56,6 +57,7 @@ class TestStaleResolverDetection:
         # nginx.conf has 10.42.0.2 (old VPC), rc.yml says vpc_cidr=10.43.0.0/16.
         compose = _scaffold(tmp_path, _GOOD_CONF_TPL.format(ip="10.42.0.2"))
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         rc_raw = {"provider_config": {"ecs": {"vpc_cidr": "10.43.0.0/16"}}}
         warnings = detect_stale_nginx_resolver_ip(compose_obj, compose, rc_raw)
@@ -68,6 +70,7 @@ class TestStaleResolverDetection:
     def test_no_warning_when_resolver_matches(self, tmp_path):
         compose = _scaffold(tmp_path, _GOOD_CONF_TPL.format(ip="10.43.0.2"))
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         rc_raw = {"provider_config": {"ecs": {"vpc_cidr": "10.43.0.0/16"}}}
         warnings = detect_stale_nginx_resolver_ip(compose_obj, compose, rc_raw)
@@ -80,6 +83,7 @@ class TestStaleResolverDetection:
             "events { worker_connections 1024; }\nhttp { server { listen 80; } }\n",
         )
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         rc_raw = {"provider_config": {"ecs": {"vpc_cidr": "10.43.0.0/16"}}}
         warnings = detect_stale_nginx_resolver_ip(compose_obj, compose, rc_raw)
@@ -89,10 +93,14 @@ class TestStaleResolverDetection:
         # No vpc_cidr in rc.yml → expects the default's resolver IP.
         from remote_compose.defaults import VPC_CIDR_DEFAULT
         import ipaddress
-        default_ip = str(ipaddress.ip_network(VPC_CIDR_DEFAULT, strict=False).network_address + 2)
+
+        default_ip = str(
+            ipaddress.ip_network(VPC_CIDR_DEFAULT, strict=False).network_address + 2
+        )
         # Use a CLEARLY wrong IP (not the default and not a typical octet).
         compose = _scaffold(tmp_path, _GOOD_CONF_TPL.format(ip="172.31.0.2"))
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         rc_raw = {}  # no vpc_cidr → uses default
         warnings = detect_stale_nginx_resolver_ip(compose_obj, compose, rc_raw)
@@ -119,6 +127,7 @@ class TestStaleResolverDetection:
         """)
         compose = _scaffold(tmp_path, conf)
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         rc_raw = {"provider_config": {"ecs": {"vpc_cidr": "10.43.0.0/16"}}}
         warnings = detect_stale_nginx_resolver_ip(compose_obj, compose, rc_raw)

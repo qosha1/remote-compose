@@ -22,20 +22,28 @@ def _ctx(tmp_path: Path, *, skip_build: bool = False) -> DeployContext:
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "myapp-prod",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "myapp-prod",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
+                name="django",
+                cpu=512,
+                memory=1024,
+                type="application",
                 image="x:latest",
             ),
             "postgres": ServiceSpec(
-                name="postgres", cpu=256, memory=512, type="infrastructure",
+                name="postgres",
+                cpu=256,
+                memory=512,
+                type="infrastructure",
                 image="postgres:16",
             ),
         },
@@ -71,7 +79,8 @@ class TestSkipBuild:
         holder = {"runner": None}
         provider = _provider(holder, mock_session)
         with mock.patch.object(
-            ECSProvider, "_build_and_push_images",
+            ECSProvider,
+            "_build_and_push_images",
         ) as build_mock:
             provider.deploy(_ctx(tmp_path, skip_build=True))
         build_mock.assert_not_called()
@@ -82,7 +91,8 @@ class TestSkipBuild:
         holder = {"runner": None}
         provider = _provider(holder, mock_session)
         with mock.patch.object(
-            ECSProvider, "_force_new_deployments",
+            ECSProvider,
+            "_force_new_deployments",
         ) as roll_mock:
             provider.deploy(_ctx(tmp_path, skip_build=True))
         roll_mock.assert_called_once()
@@ -91,12 +101,15 @@ class TestSkipBuild:
         assert sorted(targets) == ["django", "postgres"]
 
     def test_skip_build_with_services_filter_rolls_only_filtered(
-        self, tmp_path, mock_session,
+        self,
+        tmp_path,
+        mock_session,
     ):
         holder = {"runner": None}
         provider = _provider(holder, mock_session)
         with mock.patch.object(
-            ECSProvider, "_force_new_deployments",
+            ECSProvider,
+            "_force_new_deployments",
         ) as roll_mock:
             provider.deploy(
                 _ctx(tmp_path, skip_build=True),
@@ -117,7 +130,9 @@ class TestSkipBuild:
         holder = {"runner": None}
         provider = _provider(holder, mock_session)
         with mock.patch.object(
-            ECSProvider, "_build_and_push_images", return_value=[],
+            ECSProvider,
+            "_build_and_push_images",
+            return_value=[],
         ) as build_mock:
             provider.deploy(_ctx(tmp_path, skip_build=False))
         build_mock.assert_called_once()

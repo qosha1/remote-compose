@@ -25,14 +25,14 @@ def _get_fernet_key():
     Raises:
         EncryptionError: If ENCRYPTION_KEY is not configured.
     """
-    remote_compose_settings = getattr(settings, 'REMOTE_COMPOSE', {})
-    encryption_key = remote_compose_settings.get('ENCRYPTION_KEY')
+    remote_compose_settings = getattr(settings, "REMOTE_COMPOSE", {})
+    encryption_key = remote_compose_settings.get("ENCRYPTION_KEY")
 
     if not encryption_key:
         raise EncryptionError(
             "REMOTE_COMPOSE['ENCRYPTION_KEY'] is required for credential encryption. "
             "Generate a key using: "
-            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
 
     if isinstance(encryption_key, str):
@@ -61,7 +61,7 @@ def encrypt_value(plaintext):
         Base64-encoded encrypted string
     """
     if not plaintext:
-        return ''
+        return ""
 
     try:
         fernet = _get_fernet()
@@ -85,7 +85,7 @@ def decrypt_value(ciphertext):
         Decrypted plaintext string
     """
     if not ciphertext:
-        return ''
+        return ""
 
     try:
         fernet = _get_fernet()
@@ -130,7 +130,7 @@ def rotate_encryption_key(old_key, new_key, encrypted_values):
     re_encrypted = []
     for ciphertext in encrypted_values:
         if not ciphertext:
-            re_encrypted.append('')
+            re_encrypted.append("")
             continue
 
         try:

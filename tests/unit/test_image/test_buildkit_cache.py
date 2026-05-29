@@ -38,6 +38,7 @@ def _run(spec):
     don't care which path the builder picks.
     """
     captured: dict = {}
+
     def _fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = cmd
         proc = mock.Mock()
@@ -51,8 +52,11 @@ def _run(spec):
         proc.wait.return_value = 0
         proc.kill = mock.Mock()
         return proc
-    with mock.patch("subprocess.run") as run, \
-         mock.patch("subprocess.Popen", side_effect=_fake_popen):
+
+    with (
+        mock.patch("subprocess.run") as run,
+        mock.patch("subprocess.Popen", side_effect=_fake_popen),
+    ):
         run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         ImageBuilder(docker_bin="docker").build(spec)
     if "cmd" in captured:
@@ -93,9 +97,7 @@ class TestCacheFromSwitchesToBuildx:
             "2.example.com/c:b",
         ]
         cmd = _run(spec)
-        cf_args = [
-            cmd[i + 1] for i, c in enumerate(cmd) if c == "--cache-from"
-        ]
+        cf_args = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--cache-from"]
         assert cf_args == [
             "type=registry,ref=1.example.com/c:a",
             "type=registry,ref=2.example.com/c:b",

@@ -26,7 +26,6 @@ from .base import (
     StatusReport,
 )
 
-
 _id_counter = itertools.count(1)
 
 
@@ -128,7 +127,8 @@ class FakeProvider(Provider):
             # Even on a config-unchanged deploy, surface that the user asked
             # for a single-service rebuild — caller may still want to record it.
             services_returned = (
-                sorted(services_filter) if services_filter
+                sorted(services_filter)
+                if services_filter
                 else list(state.active.services.keys())
             )
             return DeployResult(
@@ -147,7 +147,8 @@ class FakeProvider(Provider):
         return DeployResult(
             revision_id=revision.revision_id,
             services=(
-                sorted(services_filter) if services_filter
+                sorted(services_filter)
+                if services_filter
                 else list(revision.services.keys())
             ),
             duration_s=0.01,
@@ -178,7 +179,9 @@ class FakeProvider(Provider):
         state = self._state(ctx)
         if state.active is None:
             return PlanResult(
-                create=len(ctx.services), update=0, destroy=0,
+                create=len(ctx.services),
+                update=0,
+                destroy=0,
                 raw_plan="fake plan: initial",
             )
         if _config_hash(ctx) == state.active.config_hash:
@@ -279,7 +282,7 @@ class FakeProvider(Provider):
         ]
         for name, spec in sorted(ctx.services.items()):
             lines.append(
-                f'# service: {name} cpu={spec.cpu} mem={spec.memory} replicas={spec.replicas}'
+                f"# service: {name} cpu={spec.cpu} mem={spec.memory} replicas={spec.replicas}"
             )
         (out_dir / "main.tf").write_text("\n".join(lines) + "\n")
         return out_dir

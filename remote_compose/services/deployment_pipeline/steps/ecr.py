@@ -22,9 +22,7 @@ class AuthenticateECRStep(PipelineStep):
     def should_run(self, context: PipelineContext) -> bool:
         """Only run if we need to build and push images."""
         return (
-            context.build_images and
-            context.push_images and
-            context.has_build_services
+            context.build_images and context.push_images and context.has_build_services
         )
 
     def execute(self, context: PipelineContext) -> StepResult:
@@ -40,14 +38,9 @@ class AuthenticateECRStep(PipelineStep):
                 credential=context.cluster.aws_credential,
             )
         except Exception as e:
-            return StepResult.fail(
-                f"ECR authentication failed: {e}",
-                error=e
-            )
+            return StepResult.fail(f"ECR authentication failed: {e}", error=e)
 
-        return StepResult.ok(
-            f"Authenticated with ECR in {context.cluster.aws_region}"
-        )
+        return StepResult.ok(f"Authenticated with ECR in {context.cluster.aws_region}")
 
 
 class CreateECRRepositoriesStep(PipelineStep):
@@ -89,22 +82,19 @@ class CreateECRRepositoriesStep(PipelineStep):
 
                 context.ecr_repositories[service_name] = repo
                 context.track_resource(
-                    resource_type='ecr_repository',
-                    resource_id=repo.get('repository_arn', repo_name),
+                    resource_type="ecr_repository",
+                    resource_id=repo.get("repository_arn", repo_name),
                     name=repo_name,
-                    uri=repo.get('repository_uri'),
+                    uri=repo.get("repository_uri"),
                 )
                 created_count += 1
 
             except Exception as e:
                 return StepResult.fail(
-                    f"Failed to create ECR repository '{repo_name}': {e}",
-                    error=e
+                    f"Failed to create ECR repository '{repo_name}': {e}", error=e
                 )
 
-        return StepResult.ok(
-            f"Created/verified {created_count} ECR repositories"
-        )
+        return StepResult.ok(f"Created/verified {created_count} ECR repositories")
 
     def cleanup(self, context: PipelineContext) -> None:
         """

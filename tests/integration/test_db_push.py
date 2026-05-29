@@ -11,7 +11,6 @@ Three formats covered: .dump (pg_restore), .sql (psql), .tar.gz
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 from unittest import mock
 
@@ -24,7 +23,6 @@ from moto import mock_aws
 from remote_compose.cli import cli as rc_cli
 from remote_compose.provider.base import ExecResult
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -33,21 +31,25 @@ _REGION = "us-west-2"
 
 
 def _write_v2_project(tmp_path: Path, *, with_backup_service: bool = True) -> Path:
-    compose = {"services": {
-        "django": {"image": "busybox"},
-        "postgres": {"image": "postgres:16-alpine"},
-    }}
+    compose = {
+        "services": {
+            "django": {"image": "busybox"},
+            "postgres": {"image": "postgres:16-alpine"},
+        }
+    }
     (tmp_path / "docker-compose.yml").write_text(yaml.safe_dump(compose))
     rc = {
         "version": 2,
         "project": "itest-rcpush",
         "compose_file": "docker-compose.yml",
         "provider": "fake",
-        "provider_config": {"ecs": {
-            "region": _REGION,
-            "cluster": "itest-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        "provider_config": {
+            "ecs": {
+                "region": _REGION,
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         "backup": {"bucket": _BUCKET},
         "services": {
             "django": {"cpu": 256, "memory": 512},
@@ -61,7 +63,9 @@ def _write_v2_project(tmp_path: Path, *, with_backup_service: bool = True) -> Pa
     return p
 
 
-def _write_dump(tmp_path: Path, name: str, body: bytes = b"binary-pg-dump-bytes") -> Path:
+def _write_dump(
+    tmp_path: Path, name: str, body: bytes = b"binary-pg-dump-bytes"
+) -> Path:
     p = tmp_path / name
     p.write_bytes(body)
     return p
@@ -70,6 +74,7 @@ def _write_dump(tmp_path: Path, name: str, body: bytes = b"binary-pg-dump-bytes"
 @pytest.fixture(autouse=True)
 def _reset_fake_provider():
     from remote_compose.provider.fake import FakeProvider
+
     FakeProvider.reset()
     yield
     FakeProvider.reset()
@@ -90,17 +95,22 @@ def s3_bucket():
 # Round-trip per dump format
 # ---------------------------------------------------------------------
 
+
 class TestDbPushS3RoundTrip:
     @pytest.mark.parametrize(
         "filename,expected_restore_token",
         [
-            ("seed.dump", "pg_restore"),       # custom format
-            ("seed.sql", "psql"),               # plain SQL
-            ("seed.tar.gz", "tar -xzf"),       # tar + pg_restore -Fd
+            ("seed.dump", "pg_restore"),  # custom format
+            ("seed.sql", "psql"),  # plain SQL
+            ("seed.tar.gz", "tar -xzf"),  # tar + pg_restore -Fd
         ],
     )
     def test_full_round_trip(
-        self, filename, expected_restore_token, tmp_path, s3_bucket,
+        self,
+        filename,
+        expected_restore_token,
+        tmp_path,
+        s3_bucket,
     ):
         rc_path = _write_v2_project(tmp_path)
         dump_path = _write_dump(tmp_path, filename)
@@ -122,9 +132,9 @@ class TestDbPushS3RoundTrip:
                 ["--config", str(rc_path), "db", "push", str(dump_path), "--yes"],
             )
 
-        assert result.exit_code == 0, (
-            f"db push failed: stdout={result.output} exc={result.exception}"
-        )
+        assert (
+            result.exit_code == 0
+        ), f"db push failed: stdout={result.output} exc={result.exception}"
 
         # 1. S3 has the upload deleted post-restore (cleanup happened).
         listed = s3_bucket.list_objects_v2(Bucket=_BUCKET).get("Contents") or []
@@ -141,9 +151,9 @@ class TestDbPushS3RoundTrip:
         script = captured["command"][2]
 
         # 4. Script downloads via curl/wget bootstrap...
-        assert "curl" in script and "wget" in script, (
-            "expected curl+wget bootstrap in restore script"
-        )
+        assert (
+            "curl" in script and "wget" in script
+        ), "expected curl+wget bootstrap in restore script"
 
         # 5. ...uses the right restore tool for this format...
         assert expected_restore_token in script, (
@@ -152,9 +162,9 @@ class TestDbPushS3RoundTrip:
         )
 
         # 6. ...and contains the presigned URL (must include the S3 host).
-        assert ".s3" in script and "amazonaws.com" in script, (
-            f"presigned URL not embedded in script:\n{script[:500]}"
-        )
+        assert (
+            ".s3" in script and "amazonaws.com" in script
+        ), f"presigned URL not embedded in script:\n{script[:500]}"
 
         # 7. The presigned URL refers to the project + filename.
         assert "itest-rcpush/pushed/" in script
@@ -175,7 +185,9 @@ class TestDbPushS3RoundTrip:
         assert listed == []
 
     def test_restore_failure_propagates_exit_code_but_still_cleans_s3(
-        self, tmp_path, s3_bucket,
+        self,
+        tmp_path,
+        s3_bucket,
     ):
         """Restore exits non-zero — CLI must surface the exit code AND still
         delete the S3 object so storage doesn't accumulate."""
@@ -198,33 +210,44 @@ class TestDbPushS3RoundTrip:
         assert result.exit_code == 42, f"expected exit 42, got {result.exit_code}"
         listed = s3_bucket.list_objects_v2(Bucket=_BUCKET).get("Contents") or []
         assert listed == [], (
-            f"S3 not cleaned up after restore failure: "
-            f"{[o['Key'] for o in listed]}"
+            f"S3 not cleaned up after restore failure: " f"{[o['Key'] for o in listed]}"
         )
 
     def test_missing_backup_bucket_errors(self, tmp_path):
         """rc.yml without backup.bucket must error before any boto3 call."""
         compose = {"services": {"django": {"image": "busybox"}}}
         (tmp_path / "docker-compose.yml").write_text(yaml.safe_dump(compose))
-        (tmp_path / "rc.yml").write_text(yaml.safe_dump({
-            "version": 2,
-            "project": "itest",
-            "compose_file": "docker-compose.yml",
-            "provider": "fake",
-            "services": {"django": {"cpu": 256, "memory": 512}},
-        }))
+        (tmp_path / "rc.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "itest",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "fake",
+                    "services": {"django": {"cpu": 256, "memory": 512}},
+                }
+            )
+        )
         dump_path = _write_dump(tmp_path, "seed.dump")
         runner = CliRunner()
         result = runner.invoke(
             rc_cli,
-            ["--config", str(tmp_path / "rc.yml"), "db", "push",
-             str(dump_path), "--yes"],
+            [
+                "--config",
+                str(tmp_path / "rc.yml"),
+                "db",
+                "push",
+                str(dump_path),
+                "--yes",
+            ],
         )
         assert result.exit_code != 0
         assert "backup.bucket" in result.output
 
     def test_missing_backup_service_errors_when_no_flag(
-        self, tmp_path, s3_bucket,
+        self,
+        tmp_path,
+        s3_bucket,
     ):
         """No backup.service in rc.yml AND no --service flag → error."""
         rc_path = _write_v2_project(tmp_path, with_backup_service=False)

@@ -42,20 +42,25 @@ def _scaffold(tmp_path: Path, addons: dict[str, str]) -> Path:
 
 class TestAddonResourceTypes:
     def test_extracts_single_type(self, tmp_path):
-        _scaffold(tmp_path, {"db": (
-            "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n"
-        )})
+        _scaffold(
+            tmp_path, {"db": ("Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n")}
+        )
         app = discover(tmp_path)
         addon = app.services[0].addons[0]
         assert _addon_resource_types(addon) == ["AWS::RDS::DBInstance"]
 
     def test_extracts_multiple_types(self, tmp_path):
-        _scaffold(tmp_path, {"mixed": (
-            "Resources:\n"
-            "  DB:\n    Type: AWS::RDS::DBInstance\n"
-            "  Bucket:\n    Type: AWS::S3::Bucket\n"
-            "  Policy:\n    Type: AWS::IAM::ManagedPolicy\n"
-        )})
+        _scaffold(
+            tmp_path,
+            {
+                "mixed": (
+                    "Resources:\n"
+                    "  DB:\n    Type: AWS::RDS::DBInstance\n"
+                    "  Bucket:\n    Type: AWS::S3::Bucket\n"
+                    "  Policy:\n    Type: AWS::IAM::ManagedPolicy\n"
+                )
+            },
+        )
         app = discover(tmp_path)
         addon = app.services[0].addons[0]
         types = _addon_resource_types(addon)
@@ -77,18 +82,21 @@ class TestAddonResourceTypes:
 
 class TestAddonSummary:
     def test_summary_lists_addon_section(self, tmp_path):
-        _scaffold(tmp_path, {"db": (
-            "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n"
-        )})
+        _scaffold(
+            tmp_path, {"db": ("Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n")}
+        )
         result = compose_app(discover(tmp_path))
         assert "Addon templates detected: 1" in result.summary
         assert "manual translation required" in result.summary
 
     def test_summary_groups_by_aws_resource_type(self, tmp_path):
-        _scaffold(tmp_path, {
-            "db": "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n",
-            "media": "Resources:\n  B:\n    Type: AWS::S3::Bucket\n",
-        })
+        _scaffold(
+            tmp_path,
+            {
+                "db": "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n",
+                "media": "Resources:\n  B:\n    Type: AWS::S3::Bucket\n",
+            },
+        )
         result = compose_app(discover(tmp_path))
         assert "AWS::RDS::DBInstance" in result.summary
         assert "AWS::S3::Bucket" in result.summary
@@ -97,17 +105,23 @@ class TestAddonSummary:
         assert "api/media.yml" in result.summary
 
     def test_summary_includes_guidance_for_known_types(self, tmp_path):
-        _scaffold(tmp_path, {
-            "db": "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n",
-        })
+        _scaffold(
+            tmp_path,
+            {
+                "db": "Resources:\n  DB:\n    Type: AWS::RDS::DBInstance\n",
+            },
+        )
         result = compose_app(discover(tmp_path))
         # The RDS guidance string from _ADDON_RESOURCE_GUIDANCE shows up.
         assert _ADDON_RESOURCE_GUIDANCE["AWS::RDS::DBInstance"] in result.summary
 
     def test_summary_falls_back_to_generic_for_unknown_types(self, tmp_path):
-        _scaffold(tmp_path, {
-            "weird": "Resources:\n  X:\n    Type: AWS::WeirdNew::Thing\n",
-        })
+        _scaffold(
+            tmp_path,
+            {
+                "weird": "Resources:\n  X:\n    Type: AWS::WeirdNew::Thing\n",
+            },
+        )
         result = compose_app(discover(tmp_path))
         assert "AWS::WeirdNew::Thing" in result.summary
         assert "not yet auto-handled" in result.summary
@@ -120,9 +134,12 @@ class TestAddonSummary:
     def test_summary_handles_addons_with_no_resources_block(self, tmp_path):
         # CFN templates that are pure Parameters/Outputs (no Resources)
         # land in the 'with no parseable Resources' bucket.
-        _scaffold(tmp_path, {
-            "wat": "Parameters:\n  X:\n    Type: String\n",
-        })
+        _scaffold(
+            tmp_path,
+            {
+                "wat": "Parameters:\n  X:\n    Type: String\n",
+            },
+        )
         result = compose_app(discover(tmp_path))
         assert "Addon templates detected: 1" in result.summary
         assert "no parseable Resources block" in result.summary
@@ -135,18 +152,21 @@ class TestAddonSummary:
 
 
 class TestGuidanceMapShape:
-    @pytest.mark.parametrize("rt", [
-        "AWS::RDS::DBInstance",
-        "AWS::RDS::DBCluster",
-        "AWS::S3::Bucket",
-        "AWS::DynamoDB::Table",
-        "AWS::ElastiCache::CacheCluster",
-        "AWS::ElastiCache::ReplicationGroup",
-        "AWS::SQS::Queue",
-        "AWS::SNS::Topic",
-        "AWS::SecretsManager::Secret",
-        "AWS::IAM::Role",
-    ])
+    @pytest.mark.parametrize(
+        "rt",
+        [
+            "AWS::RDS::DBInstance",
+            "AWS::RDS::DBCluster",
+            "AWS::S3::Bucket",
+            "AWS::DynamoDB::Table",
+            "AWS::ElastiCache::CacheCluster",
+            "AWS::ElastiCache::ReplicationGroup",
+            "AWS::SQS::Queue",
+            "AWS::SNS::Topic",
+            "AWS::SecretsManager::Secret",
+            "AWS::IAM::Role",
+        ],
+    )
     def test_common_resource_types_have_guidance(self, rt):
         assert rt in _ADDON_RESOURCE_GUIDANCE
         assert _ADDON_RESOURCE_GUIDANCE[rt]

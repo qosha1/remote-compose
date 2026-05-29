@@ -33,6 +33,34 @@ from .cli_commands._legacy import (  # noqa: F401, E402
 from .cli_commands.destroy import _teardown_infrastructure  # noqa: F401, E402
 from .cli_commands.list_stacks import _format_relative_time  # noqa: F401, E402
 
+# Command modules. cli.py owns registration (cli.add_command below); each
+# module owns its command body.
+from .cli_commands.adopt import adopt_cmd as _adopt_cmd
+from .cli_commands.audit import audit_cmd as _audit_cmd
+from .cli_commands.compose import compose_group as _compose_group
+from .cli_commands.copilot import copilot_group as _copilot_group
+from .cli_commands.db import db_group as _db_group
+from .cli_commands.deploy import deploy_cmd as _deploy_cmd
+from .cli_commands.destroy import destroy_cmd as _destroy_cmd
+from .cli_commands.destroy import reap_cmd as _reap_cmd
+from .cli_commands.dev import dev_group as _dev_group
+from .cli_commands.doctor import doctor_cmd as _doctor_cmd
+from .cli_commands.doctor import install_cmd as _install_cmd
+from .cli_commands.exec import exec_cmd as _exec_cmd
+from .cli_commands.fix import fix_group as _fix_group
+from .cli_commands.init import init_cmd as _init_cmd
+from .cli_commands.lifecycle import lifecycle_cmd as _lifecycle_cmd
+from .cli_commands.list_stacks import list_cmd as _list_cmd
+from .cli_commands.migrate import migrate_cmd as _migrate_cmd
+from .cli_commands.plan import plan_cmd as _plan_cmd
+from .cli_commands.provision import provision_cmd as _provision_cmd
+from .cli_commands.secrets import secrets_group as _secrets_group
+from .cli_commands.service_ops import logs_cmd as _logs_cmd
+from .cli_commands.service_ops import restart_cmd as _restart_cmd
+from .cli_commands.service_ops import status_cmd as _status_cmd
+from .cli_commands.up import up_cmd as _up_cmd
+from .cli_commands.v1_migrate import v1_group as _v1_group
+
 
 def _warn_on_rc_yml_ambiguity() -> None:
     """rc-td9: when multiple rc*.yml configs exist in cwd and no -c was
@@ -45,9 +73,11 @@ def _warn_on_rc_yml_ambiguity() -> None:
     want the rc.yml default.
     """
     from pathlib import Path
+
     cwd = Path.cwd()
-    candidates = sorted({p.name for p in cwd.glob("rc.yml")} |
-                        {p.name for p in cwd.glob("rc.*.yml")})
+    candidates = sorted(
+        {p.name for p in cwd.glob("rc.yml")} | {p.name for p in cwd.glob("rc.*.yml")}
+    )
     if len(candidates) <= 1:
         return
     click.echo(
@@ -59,12 +89,12 @@ def _warn_on_rc_yml_ambiguity() -> None:
 
 
 @click.group()
-@click.option('-c', '--config', 'config_path', default=None, help='Path to rc.yml')
+@click.option("-c", "--config", "config_path", default=None, help="Path to rc.yml")
 @click.pass_context
 def cli(ctx, config_path):
     """rc — Simple Remote Compose CLI for ECS deployments."""
     ctx.ensure_object(dict)
-    ctx.obj['config_path'] = config_path
+    ctx.obj["config_path"] = config_path
     if config_path is None:
         _warn_on_rc_yml_ambiguity()
 
@@ -72,32 +102,6 @@ def cli(ctx, config_path):
 # =============================================================================
 # Register every command module. cli.py owns the registration; module owns body.
 # =============================================================================
-
-from .cli_commands.adopt import adopt_cmd as _adopt_cmd
-from .cli_commands.audit import audit_cmd as _audit_cmd
-from .cli_commands.compose import compose_group as _compose_group
-from .cli_commands.copilot import copilot_group as _copilot_group
-from .cli_commands.db import db_group as _db_group
-from .cli_commands.deploy import deploy_cmd as _deploy_cmd
-from .cli_commands.destroy import destroy_cmd as _destroy_cmd, reap_cmd as _reap_cmd
-from .cli_commands.dev import dev_group as _dev_group
-from .cli_commands.doctor import doctor_cmd as _doctor_cmd, install_cmd as _install_cmd
-from .cli_commands.exec import exec_cmd as _exec_cmd
-from .cli_commands.fix import fix_group as _fix_group
-from .cli_commands.init import init_cmd as _init_cmd
-from .cli_commands.lifecycle import lifecycle_cmd as _lifecycle_cmd
-from .cli_commands.list_stacks import list_cmd as _list_cmd
-from .cli_commands.migrate import migrate_cmd as _migrate_cmd
-from .cli_commands.plan import plan_cmd as _plan_cmd
-from .cli_commands.provision import provision_cmd as _provision_cmd
-from .cli_commands.secrets import secrets_group as _secrets_group
-from .cli_commands.service_ops import (
-    logs_cmd as _logs_cmd,
-    restart_cmd as _restart_cmd,
-    status_cmd as _status_cmd,
-)
-from .cli_commands.up import up_cmd as _up_cmd
-from .cli_commands.v1_migrate import v1_group as _v1_group
 
 cli.add_command(_adopt_cmd)
 cli.add_command(_audit_cmd)
@@ -126,5 +130,5 @@ cli.add_command(_up_cmd)
 cli.add_command(_v1_group)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()

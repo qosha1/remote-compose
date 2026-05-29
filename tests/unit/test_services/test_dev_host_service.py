@@ -12,11 +12,9 @@ DevHostService is responsible for:
   - Tagging all AWS resources for orphan detection
 """
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 
 pytestmark = pytest.mark.unit
 
@@ -111,12 +109,17 @@ class TestCreateHost:
         self, service, git_source, mock_terraform_runner
     ):
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         call_kwargs = mock_terraform_runner.apply.call_args.kwargs
         # the tf apply must include tags identifying the dev host
-        tags = call_kwargs.get("tags") or call_kwargs.get("variables", {}).get("tags", {})
+        tags = call_kwargs.get("tags") or call_kwargs.get("variables", {}).get(
+            "tags", {}
+        )
         assert tags.get("DevHost") == "alice"
         assert tags.get("ManagedBy") == "rc-dev"
 
@@ -124,7 +127,10 @@ class TestCreateHost:
         self, service, git_source, mock_credential_service
     ):
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         mock_credential_service.store_ssh_keypair.assert_called_once()
@@ -133,7 +139,10 @@ class TestCreateHost:
         import yaml
 
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         state_file = tmp_path / "dev-hosts.yml"
@@ -145,7 +154,10 @@ class TestCreateHost:
         from remote_compose.exceptions import ValidationError
 
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
         with pytest.raises(ValidationError):
             service.create_host(
@@ -184,8 +196,10 @@ class TestCreateHost:
 
         with pytest.raises(TerraformError) as exc_info:
             service.create_host(
-                name="alice", source=git_source,
-                instance_type="t4g.medium", region="us-west-1",
+                name="alice",
+                source=git_source,
+                instance_type="t4g.medium",
+                region="us-west-1",
             )
 
         # Original exception is re-raised, not wrapped
@@ -208,18 +222,24 @@ class TestCreateHost:
         from remote_compose.terraform.runner import TerraformError
 
         mock_terraform_runner.apply.side_effect = TerraformError(
-            cmd=["terraform", "apply"], returncode=1,
-            stdout="", stderr="apply fail",
+            cmd=["terraform", "apply"],
+            returncode=1,
+            stdout="",
+            stderr="apply fail",
         )
         mock_terraform_runner.destroy.side_effect = TerraformError(
-            cmd=["terraform", "destroy"], returncode=1,
-            stdout="", stderr="destroy fail too",
+            cmd=["terraform", "destroy"],
+            returncode=1,
+            stdout="",
+            stderr="destroy fail too",
         )
 
         with pytest.raises(TerraformError):
             service.create_host(
-                name="alice", source=git_source,
-                instance_type="t4g.medium", region="us-west-1",
+                name="alice",
+                source=git_source,
+                instance_type="t4g.medium",
+                region="us-west-1",
             )
 
         state_file = tmp_path / "dev-hosts.yml"
@@ -237,10 +257,16 @@ class TestListHosts:
 
     def test_list_after_create(self, service, git_source):
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
         service.create_host(
-            name="bob", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="bob",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         hosts = service.list_hosts()
@@ -251,7 +277,10 @@ class TestListHosts:
 class TestGetHost:
     def test_get_existing(self, service, git_source):
         created = service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         fetched = service.get_host("alice")
@@ -270,7 +299,10 @@ class TestDestroyHost:
         self, service, git_source, mock_terraform_runner
     ):
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
         service.destroy_host("alice")
 
@@ -280,7 +312,10 @@ class TestDestroyHost:
         import yaml
 
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
         service.destroy_host("alice")
 
@@ -301,7 +336,10 @@ class TestDestroyHost:
 class TestSshCommand:
     def test_get_ssh_command_uses_stored_key(self, service, git_source):
         service.create_host(
-            name="alice", source=git_source, instance_type="t4g.medium", region="us-west-1"
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
         )
 
         cmd = service.get_ssh_command("alice")

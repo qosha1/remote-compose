@@ -39,10 +39,7 @@ class ConvertToTaskDefinitionStep(PipelineStep):
             )
             task_definition.save()
         except Exception as e:
-            return StepResult.fail(
-                f"Task definition conversion failed: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Task definition conversion failed: {e}", error=e)
 
         # Collect converter warnings
         for warning in converter.warnings:
@@ -73,9 +70,7 @@ class RegisterTaskDefinitionStep(PipelineStep):
     def execute(self, context: PipelineContext) -> StepResult:
         """Register task definition."""
         if context.dry_run:
-            return StepResult.ok(
-                "[DRY RUN] Would register task definition"
-            )
+            return StepResult.ok("[DRY RUN] Would register task definition")
 
         ecs_service = context.services.ecs
 
@@ -86,21 +81,16 @@ class RegisterTaskDefinitionStep(PipelineStep):
             context.task_definition = task_definition
 
             context.track_resource(
-                resource_type='ecs_task_definition',
+                resource_type="ecs_task_definition",
                 resource_id=task_definition.aws_task_definition_arn,
                 family=task_definition.name,
                 revision=task_definition.revision,
             )
 
         except Exception as e:
-            return StepResult.fail(
-                f"Task definition registration failed: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Task definition registration failed: {e}", error=e)
 
-        return StepResult.ok(
-            f"Registered: {task_definition.aws_task_definition_arn}"
-        )
+        return StepResult.ok(f"Registered: {task_definition.aws_task_definition_arn}")
 
 
 class CreateOrUpdateServiceStep(PipelineStep):
@@ -119,11 +109,7 @@ class CreateOrUpdateServiceStep(PipelineStep):
         """Create or update ECS service."""
         self._created_new_service = False
         if context.dry_run:
-            return StepResult.ok(
-                "[DRY RUN] Would create/update ECS service"
-            )
-
-        from ....models import ECSService as ECSServiceModel
+            return StepResult.ok("[DRY RUN] Would create/update ECS service")
 
         ecs_service = context.services.ecs
 
@@ -149,7 +135,7 @@ class CreateOrUpdateServiceStep(PipelineStep):
             context.ecs_service = service_model
 
             context.track_resource(
-                resource_type='ecs_service',
+                resource_type="ecs_service",
                 resource_id=service_model.aws_service_arn,
                 name=service_model.name,
             )
@@ -160,10 +146,7 @@ class CreateOrUpdateServiceStep(PipelineStep):
             )
 
         except Exception as e:
-            return StepResult.fail(
-                f"Service create/update failed: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Service create/update failed: {e}", error=e)
 
     def _get_or_create_service_model(self, context):
         """Get existing service model or create new one."""
@@ -192,15 +175,17 @@ class CreateOrUpdateServiceStep(PipelineStep):
             )
 
             # Check if service is active (not INACTIVE)
-            if aws_service.get('status') == 'ACTIVE':
+            if aws_service.get("status") == "ACTIVE":
                 return ECSServiceModel.objects.create(
                     name=context.project_name,
                     cluster=context.cluster,
                     task_definition=context.task_definition,
-                    aws_service_arn=aws_service['serviceArn'],
-                    desired_count=aws_service.get('desiredCount', context.desired_count),
-                    running_count=aws_service.get('runningCount', 0),
-                    pending_count=aws_service.get('pendingCount', 0),
+                    aws_service_arn=aws_service["serviceArn"],
+                    desired_count=aws_service.get(
+                        "desiredCount", context.desired_count
+                    ),
+                    running_count=aws_service.get("runningCount", 0),
+                    pending_count=aws_service.get("pendingCount", 0),
                     status=ECSServiceModel.ServiceStatus.ACTIVE,
                 )
         except Exception:
@@ -272,9 +257,9 @@ class WaitForStabilityStep(PipelineStep):
         ecs_service = context.services.ecs
 
         self.emit_event(
-            'waiting_for_stability',
+            "waiting_for_stability",
             service=context.ecs_service.name,
-            timeout=context.timeout
+            timeout=context.timeout,
         )
 
         try:
@@ -293,12 +278,8 @@ class WaitForStabilityStep(PipelineStep):
         except Exception as e:
             # Check if it's a timeout
             error_msg = str(e)
-            if 'timeout' in error_msg.lower():
+            if "timeout" in error_msg.lower():
                 return StepResult.fail(
-                    f"Service did not stabilize within {context.timeout}s: {e}",
-                    error=e
+                    f"Service did not stabilize within {context.timeout}s: {e}", error=e
                 )
-            return StepResult.fail(
-                f"Error waiting for stability: {e}",
-                error=e
-            )
+            return StepResult.fail(f"Error waiting for stability: {e}", error=e)

@@ -34,6 +34,7 @@ def discover_account_id(session: Optional[Any] = None) -> str:
     """
     if session is None:
         import boto3
+
         session = boto3.Session()
     sts = session.client("sts")
     return sts.get_caller_identity()["Account"]
@@ -65,6 +66,7 @@ def bootstrap_bucket(
     """
     if session is None:
         import boto3
+
         session = boto3.Session(region_name=region)
 
     bucket_name = name or f"{account_id}-rc-tfstate"
@@ -151,6 +153,7 @@ def bootstrap_lock_table(
     """
     if session is None:
         import boto3
+
         session = boto3.Session(region_name=region)
 
     ddb = session.client("dynamodb", region_name=region)

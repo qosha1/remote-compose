@@ -69,12 +69,17 @@ class TestDeferLifecycleHooks:
         """rc deploy (no defer flag) runs hooks during dispatch — backward
         compatible with single-command `rc deploy`."""
         from remote_compose.provider.base import DeployResult
-        with patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks, \
-             patch("remote_compose.cli_v2.resolve_provider") as rp, \
-             patch("remote_compose.cli_v2._auto_push_empty_secrets_if_any"):
+
+        with (
+            patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks,
+            patch("remote_compose.cli_v2.resolve_provider") as rp,
+            patch("remote_compose.cli_v2._auto_push_empty_secrets_if_any"),
+        ):
             provider = MagicMock()
             provider.deploy.return_value = DeployResult(
-                revision_id="rev-test", services=["django"], duration_s=1.0,
+                revision_id="rev-test",
+                services=["django"],
+                duration_s=1.0,
             )
             rp.return_value = provider
             ok = dispatch_if_v2(rc_yml_with_migrate_hook, "deploy")
@@ -86,16 +91,22 @@ class TestDeferLifecycleHooks:
         hooks itself — caller will run them later via
         run_auto_on_deploy_hooks_for_path."""
         from remote_compose.provider.base import DeployResult
-        with patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks, \
-             patch("remote_compose.cli_v2.resolve_provider") as rp, \
-             patch("remote_compose.cli_v2._auto_push_empty_secrets_if_any"):
+
+        with (
+            patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks,
+            patch("remote_compose.cli_v2.resolve_provider") as rp,
+            patch("remote_compose.cli_v2._auto_push_empty_secrets_if_any"),
+        ):
             provider = MagicMock()
             provider.deploy.return_value = DeployResult(
-                revision_id="rev-test", services=["django"], duration_s=1.0,
+                revision_id="rev-test",
+                services=["django"],
+                duration_s=1.0,
             )
             rp.return_value = provider
             ok = dispatch_if_v2(
-                rc_yml_with_migrate_hook, "deploy",
+                rc_yml_with_migrate_hook,
+                "deploy",
                 defer_lifecycle_hooks=True,
             )
         assert ok is True
@@ -139,7 +150,9 @@ class TestRunAutoOnDeployHooksForPath:
         rp.assert_not_called()
 
     def test_runs_hooks_when_auto_on_deploy_declared(
-        self, rc_yml_with_migrate_hook, monkeypatch,
+        self,
+        rc_yml_with_migrate_hook,
+        monkeypatch,
     ):
         """End-to-end: helper resolves provider, waits for stability,
         then runs hooks."""
@@ -151,14 +164,18 @@ class TestRunAutoOnDeployHooksForPath:
         provider = MagicMock()
         ecs_client = MagicMock()
         ecs_client.describe_services.return_value = {
-            "services": [{
-                "serviceName": "django",
-                "deployments": [{
-                    "rolloutState": "COMPLETED",
-                    "runningCount": 1,
-                    "desiredCount": 1,
-                }],
-            }],
+            "services": [
+                {
+                    "serviceName": "django",
+                    "deployments": [
+                        {
+                            "rolloutState": "COMPLETED",
+                            "runningCount": 1,
+                            "desiredCount": 1,
+                        }
+                    ],
+                }
+            ],
         }
         session = MagicMock()
         session.client.return_value = ecs_client
@@ -166,8 +183,10 @@ class TestRunAutoOnDeployHooksForPath:
 
         # rc-e5u.36.6: wait moved INSIDE _run_auto_on_deploy_hooks. The
         # outer helper now just delegates with wait_for_stable=True.
-        with patch("remote_compose.cli_v2.resolve_provider", return_value=provider), \
-             patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks:
+        with (
+            patch("remote_compose.cli_v2.resolve_provider", return_value=provider),
+            patch("remote_compose.cli_v2._run_auto_on_deploy_hooks") as run_hooks,
+        ):
             run_auto_on_deploy_hooks_for_path(rc_yml_with_migrate_hook)
 
         run_hooks.assert_called_once()
@@ -177,7 +196,9 @@ class TestRunAutoOnDeployHooksForPath:
         assert kwargs.get("wait_for_stable", True) is True
 
     def test_proceeds_anyway_after_stability_timeout(
-        self, rc_yml_with_migrate_hook, monkeypatch,
+        self,
+        rc_yml_with_migrate_hook,
+        monkeypatch,
     ):
         """If services don't stabilize within budget, run hooks anyway
         with a warning — better noisy than stuck. The wait now happens
@@ -190,13 +211,23 @@ class TestRunAutoOnDeployHooksForPath:
         ecs_client = MagicMock()
         # Stuck rolling — never COMPLETED.
         ecs_client.describe_services.return_value = {
-            "services": [{
-                "serviceName": "django",
-                "deployments": [
-                    {"rolloutState": "IN_PROGRESS", "runningCount": 0, "desiredCount": 1},
-                    {"rolloutState": "COMPLETED", "runningCount": 1, "desiredCount": 1},
-                ],
-            }],
+            "services": [
+                {
+                    "serviceName": "django",
+                    "deployments": [
+                        {
+                            "rolloutState": "IN_PROGRESS",
+                            "runningCount": 0,
+                            "desiredCount": 1,
+                        },
+                        {
+                            "rolloutState": "COMPLETED",
+                            "runningCount": 1,
+                            "desiredCount": 1,
+                        },
+                    ],
+                }
+            ],
         }
         session = MagicMock()
         session.client.return_value = ecs_client
@@ -218,7 +249,8 @@ class TestRunAutoOnDeployHooksForPath:
         provider.exec.return_value = MagicMock(exit_code=0, stdout="", stderr="")
         with patch("remote_compose.cli_v2.resolve_provider", return_value=provider):
             run_auto_on_deploy_hooks_for_path(
-                rc_yml_with_migrate_hook, wait_for_stable=False,
+                rc_yml_with_migrate_hook,
+                wait_for_stable=False,
             )
 
         # Wait disabled → session_factory was never called for ECS describe.

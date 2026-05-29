@@ -9,7 +9,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from remote_compose.compose_warnings import detect_large_build_context
 
@@ -49,16 +48,21 @@ class TestThresholds:
     def test_no_warning_under_1gb(self, tmp_path):
         compose = _scaffold(tmp_path, file_sizes={"app/main.py": 100})
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert warnings == []
 
     def test_warn_at_1gb(self, tmp_path):
         # 1.2GB total: trigger WARN
-        compose = _scaffold(tmp_path, file_sizes={
-            "media/uploads.bin": 1200 * 1024 * 1024,
-        })
+        compose = _scaffold(
+            tmp_path,
+            file_sizes={
+                "media/uploads.bin": 1200 * 1024 * 1024,
+            },
+        )
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert len(warnings) == 1
@@ -70,10 +74,14 @@ class TestThresholds:
 
     def test_error_at_5gb(self, tmp_path):
         # 5.5GB total: trigger ERROR
-        compose = _scaffold(tmp_path, file_sizes={
-            "media/big.bin": 5500 * 1024 * 1024,
-        })
+        compose = _scaffold(
+            tmp_path,
+            file_sizes={
+                "media/big.bin": 5500 * 1024 * 1024,
+            },
+        )
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert len(warnings) == 1
@@ -82,14 +90,18 @@ class TestThresholds:
 
 class TestDirSummary:
     def test_top_3_dirs_named(self, tmp_path):
-        compose = _scaffold(tmp_path, file_sizes={
-            "media/big.bin": 700 * 1024 * 1024,
-            "venv/lib.bin": 400 * 1024 * 1024,
-            "node_modules/blah.bin": 200 * 1024 * 1024,
-            "docs/extra.bin": 50 * 1024 * 1024,
-        })
+        compose = _scaffold(
+            tmp_path,
+            file_sizes={
+                "media/big.bin": 700 * 1024 * 1024,
+                "venv/lib.bin": 400 * 1024 * 1024,
+                "node_modules/blah.bin": 200 * 1024 * 1024,
+                "docs/extra.bin": 50 * 1024 * 1024,
+            },
+        )
         # 1.35 GB total → WARN
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert len(warnings) == 1
@@ -123,6 +135,7 @@ class TestDedup:
                   dockerfile: Dockerfile
         """).strip())
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert len(warnings) == 1
@@ -137,6 +150,7 @@ class TestNoBuildContext:
                 image: redis:6
         """).strip())
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert warnings == []
@@ -145,14 +159,18 @@ class TestNoBuildContext:
 class TestDockerignoreFiltering:
     def test_dockerignore_excludes_named_dirs(self, tmp_path):
         # 6GB pre-ignore, but .dockerignore excludes media → should be small.
-        compose = _scaffold(tmp_path, file_sizes={
-            "media/big.bin": 6 * 1024 * 1024 * 1024,
-            "src/main.py": 100,
-        })
+        compose = _scaffold(
+            tmp_path,
+            file_sizes={
+                "media/big.bin": 6 * 1024 * 1024 * 1024,
+                "src/main.py": 100,
+            },
+        )
         # Add .dockerignore to the build context.
         ctx = tmp_path / "backend"
         (ctx / ".dockerignore").write_text("media\n")
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         # media excluded → context is tiny → no warning.
@@ -160,12 +178,16 @@ class TestDockerignoreFiltering:
 
     def test_dockerignore_excludes_nested_path(self, tmp_path):
         # Mimic sentinal: backend/backend/media is the heavy dir.
-        compose = _scaffold(tmp_path, file_sizes={
-            "backend/media/uploads.bin": 6 * 1024 * 1024 * 1024,
-        })
+        compose = _scaffold(
+            tmp_path,
+            file_sizes={
+                "backend/media/uploads.bin": 6 * 1024 * 1024 * 1024,
+            },
+        )
         ctx = tmp_path / "backend"
         (ctx / ".dockerignore").write_text("backend/media\n")
         import yaml as _y
+
         compose_obj = _y.safe_load(compose.read_text())
         warnings = detect_large_build_context(compose_obj, compose)
         assert warnings == []

@@ -9,7 +9,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from remote_compose.compose_warnings import detect_unmatched_health_check_path
 
@@ -46,6 +45,7 @@ def _scaffold_django(tmp_path: Path, urls_py_content: str = None) -> Path:
 def test_warns_when_path_not_in_urls_py(tmp_path):
     compose = _scaffold_django(tmp_path)
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     rc_raw = {
         "services": {
@@ -64,6 +64,7 @@ def test_warns_when_path_not_in_urls_py(tmp_path):
 def test_no_warning_when_path_matches(tmp_path):
     compose = _scaffold_django(tmp_path)
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     rc_raw = {
         "services": {
@@ -77,6 +78,7 @@ def test_no_warning_when_path_matches(tmp_path):
 def test_no_warning_for_root_default(tmp_path):
     compose = _scaffold_django(tmp_path)
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     rc_raw = {
         "services": {
@@ -102,6 +104,7 @@ def test_skips_non_django_services(tmp_path):
               dockerfile: Dockerfile
     """).strip())
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     rc_raw = {
         "services": {
@@ -128,6 +131,7 @@ def test_no_warning_when_no_urls_py(tmp_path):
               dockerfile: Dockerfile
     """).strip())
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     rc_raw = {
         "services": {

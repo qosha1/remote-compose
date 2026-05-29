@@ -5,42 +5,45 @@ Service for executing Docker Compose commands on remote hosts.
 import os
 import re
 import shlex
-import tempfile
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
 import yaml
 
-from ..models import DockerContext, DeploymentTarget
 from ..conf import get_setting
 from ..utils.ssh import SSHClient
-from ..exceptions import (
-    ComposeFileError,
-    DockerComposeError,
-    ValidationError,
-)
+from ..exceptions import ComposeFileError, ValidationError
 from .base import BaseService
 from .credential_service import CredentialService
 
 # Pattern for valid project names (Docker Compose standard)
-PROJECT_NAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_.-]*$')
+PROJECT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
 # Pattern for valid remote paths (no shell metacharacters)
-SAFE_PATH_PATTERN = re.compile(r'^[a-zA-Z0-9/_.-]+$')
+SAFE_PATH_PATTERN = re.compile(r"^[a-zA-Z0-9/_.-]+$")
 
 # Pattern for valid environment variable names
-ENV_VAR_NAME_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+ENV_VAR_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # Dangerous environment variables that should not be overridden
-PROTECTED_ENV_VARS = frozenset({
-    'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH',
-    'HOME', 'USER', 'SHELL', 'PWD',
-})
+PROTECTED_ENV_VARS = frozenset(
+    {
+        "PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "PWD",
+    }
+)
 
 
 @dataclass
 class ComposeResult:
     """Result of a compose command execution."""
+
     success: bool
     stdout: str
     stderr: str
@@ -53,10 +56,12 @@ class ComposeService(BaseService):
     Service for executing Docker Compose commands on remote hosts.
     """
 
-    def __init__(self, credential_service: Optional[CredentialService] = None, **kwargs):
+    def __init__(
+        self, credential_service: Optional[CredentialService] = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
-        self.compose_command = get_setting('DOCKER_COMPOSE_COMMAND', 'docker compose')
+        self.compose_command = get_setting("DOCKER_COMPOSE_COMMAND", "docker compose")
 
     def validate_compose_file(self, compose_path: str) -> dict:
         """
@@ -72,7 +77,7 @@ class ComposeService(BaseService):
             raise ComposeFileError(f"Compose file not found: {compose_path}")
 
         try:
-            with open(compose_path, 'r') as f:
+            with open(compose_path, "r") as f:
                 content = f.read()
 
             # Parse YAML
@@ -82,16 +87,16 @@ class ComposeService(BaseService):
                 raise ComposeFileError("Compose file is empty")
 
             # Basic validation
-            if 'services' not in parsed:
+            if "services" not in parsed:
                 raise ComposeFileError("Compose file must contain 'services' key")
 
-            services = list(parsed.get('services', {}).keys())
+            services = list(parsed.get("services", {}).keys())
 
             return {
-                'valid': True,
-                'content': content,
-                'parsed': parsed,
-                'services': services,
+                "valid": True,
+                "content": content,
+                "parsed": parsed,
+                "services": services,
             }
 
         except yaml.YAMLError as e:
@@ -110,7 +115,7 @@ class ComposeService(BaseService):
         if not os.path.exists(compose_path):
             raise ComposeFileError(f"Compose file not found: {compose_path}")
 
-        with open(compose_path, 'r') as f:
+        with open(compose_path, "r") as f:
             return f.read()
 
     def upload_compose_files(
@@ -118,7 +123,7 @@ class ComposeService(BaseService):
         ssh_client: SSHClient,
         compose_path: str,
         env_file_path: Optional[str] = None,
-        remote_dir: str = '/tmp/remote-compose',
+        remote_dir: str = "/tmp/remote-compose",
     ) -> dict:
         """
         Upload compose file and optional env file to remote host.
@@ -136,7 +141,7 @@ class ComposeService(BaseService):
         remote_dir = self._validate_path(remote_dir)
 
         # Ensure remote directory exists using validated path
-        ssh_client.execute(f'mkdir -p {shlex.quote(remote_dir)}')
+        ssh_client.execute(f"mkdir -p {shlex.quote(remote_dir)}")
 
         # Read and upload compose file
         compose_content = self.read_compose_file(compose_path)
@@ -144,18 +149,18 @@ class ComposeService(BaseService):
         ssh_client.upload_content(compose_content, remote_compose_path)
 
         result = {
-            'compose_path': remote_compose_path,
-            'env_path': None,
-            'remote_dir': remote_dir,
+            "compose_path": remote_compose_path,
+            "env_path": None,
+            "remote_dir": remote_dir,
         }
 
         # Upload env file if provided
         if env_file_path and os.path.exists(env_file_path):
-            with open(env_file_path, 'r') as f:
+            with open(env_file_path, "r") as f:
                 env_content = f.read()
             remote_env_path = f"{remote_dir}/.env"
             ssh_client.upload_content(env_content, remote_env_path)
-            result['env_path'] = remote_env_path
+            result["env_path"] = remote_env_path
 
         return result
 
@@ -192,7 +197,7 @@ class ComposeService(BaseService):
                 self._validate_env_var(key, value)
                 # Use shlex.quote for proper shell escaping
                 escaped_value = shlex.quote(value)
-                cmd_parts.append(f'export {key}={escaped_value};')
+                cmd_parts.append(f"export {key}={escaped_value};")
 
         # Build compose command
         compose_cmd = [self.compose_command]
@@ -200,13 +205,13 @@ class ComposeService(BaseService):
         if project_name:
             # Validate project name
             self._validate_project_name(project_name)
-            compose_cmd.extend(['-p', project_name])
+            compose_cmd.extend(["-p", project_name])
 
-        compose_cmd.extend(['-f', compose_path, command])
+        compose_cmd.extend(["-f", compose_path, command])
 
-        cmd_parts.append(' '.join(compose_cmd))
+        cmd_parts.append(" ".join(compose_cmd))
 
-        full_command = ' '.join(cmd_parts)
+        full_command = " ".join(cmd_parts)
 
         self.log_debug(f"Executing compose command: {command}")
 
@@ -247,14 +252,14 @@ class ComposeService(BaseService):
         Returns:
             ComposeResult
         """
-        cmd = 'up'
+        cmd = "up"
 
         if detached:
-            cmd += ' -d'
+            cmd += " -d"
         if build:
-            cmd += ' --build'
+            cmd += " --build"
         if remove_orphans:
-            cmd += ' --remove-orphans'
+            cmd += " --remove-orphans"
 
         return self.execute_compose(
             ssh_client=ssh_client,
@@ -288,12 +293,12 @@ class ComposeService(BaseService):
         Returns:
             ComposeResult
         """
-        cmd = 'down'
+        cmd = "down"
 
         if remove_volumes:
-            cmd += ' -v'
+            cmd += " -v"
         if remove_images:
-            cmd += f' --rmi {remove_images}'
+            cmd += f" --rmi {remove_images}"
 
         return self.execute_compose(
             ssh_client=ssh_client,
@@ -317,7 +322,7 @@ class ComposeService(BaseService):
         """
         return self.execute_compose(
             ssh_client=ssh_client,
-            command='ps',
+            command="ps",
             compose_path=compose_path,
             project_name=project_name,
         )
@@ -345,13 +350,13 @@ class ComposeService(BaseService):
         Returns:
             ComposeResult with logs
         """
-        cmd = 'logs'
+        cmd = "logs"
 
         if tail:
-            cmd += f' --tail {tail}'
+            cmd += f" --tail {tail}"
 
         if service:
-            cmd += f' {service}'
+            cmd += f" {service}"
 
         return self.execute_compose(
             ssh_client=ssh_client,
@@ -376,7 +381,7 @@ class ComposeService(BaseService):
         """
         return self.execute_compose(
             ssh_client=ssh_client,
-            command='pull',
+            command="pull",
             compose_path=compose_path,
             project_name=project_name,
             timeout=timeout,
@@ -396,9 +401,9 @@ class ComposeService(BaseService):
         Returns:
             ComposeResult
         """
-        cmd = 'restart'
+        cmd = "restart"
         if service:
-            cmd += f' {service}'
+            cmd += f" {service}"
 
         return self.execute_compose(
             ssh_client=ssh_client,
@@ -422,7 +427,7 @@ class ComposeService(BaseService):
         """
         result = self.execute_compose(
             ssh_client=ssh_client,
-            command='ps -q',
+            command="ps -q",
             compose_path=compose_path,
             project_name=project_name,
         )
@@ -430,7 +435,7 @@ class ComposeService(BaseService):
         if not result.success:
             return []
 
-        return [cid.strip() for cid in result.stdout.strip().split('\n') if cid.strip()]
+        return [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
 
     def get_service_status(
         self,
@@ -451,7 +456,7 @@ class ComposeService(BaseService):
 
         # Parse ps output
         status = {}
-        lines = result.stdout.strip().split('\n')
+        lines = result.stdout.strip().split("\n")
 
         # Skip header line
         for line in lines[1:]:
@@ -462,11 +467,11 @@ class ComposeService(BaseService):
             parts = line.split()
             if len(parts) >= 4:
                 name = parts[0]
-                state = parts[3] if len(parts) > 3 else 'unknown'
+                state = parts[3] if len(parts) > 3 else "unknown"
                 status[name] = {
-                    'name': name,
-                    'state': state,
-                    'raw': line,
+                    "name": name,
+                    "state": state,
+                    "raw": line,
                 }
 
         return status
@@ -488,7 +493,7 @@ class ComposeService(BaseService):
         """
         # Validate path before executing
         remote_dir = self._validate_path(remote_dir)
-        result = ssh_client.execute(f'rm -rf {shlex.quote(remote_dir)}')
+        result = ssh_client.execute(f"rm -rf {shlex.quote(remote_dir)}")
         return result.success
 
     def _validate_project_name(self, project_name: str) -> str:
@@ -536,7 +541,7 @@ class ComposeService(BaseService):
             raise ValidationError("Path cannot be empty")
 
         # Check for path traversal
-        if '..' in path:
+        if ".." in path:
             raise ValidationError("Path traversal not allowed")
 
         # Check for shell metacharacters
@@ -547,7 +552,7 @@ class ComposeService(BaseService):
             )
 
         # Ensure path is absolute and reasonable
-        if not path.startswith('/'):
+        if not path.startswith("/"):
             raise ValidationError("Path must be absolute")
 
         if len(path) > 500:
@@ -582,28 +587,25 @@ class ComposeService(BaseService):
             )
 
         if len(value) > 32768:  # 32KB limit
-            raise ValidationError(
-                f"Environment variable value too long: {name}"
-            )
+            raise ValidationError(f"Environment variable value too long: {name}")
 
     def _mask_sensitive_env_vars(self, env_vars: Dict[str, str]) -> Dict[str, str]:
         """Mask sensitive environment variable values for logging."""
         sensitive_patterns = [
-            r'password',
-            r'secret',
-            r'token',
-            r'key',
-            r'credential',
-            r'auth',
+            r"password",
+            r"secret",
+            r"token",
+            r"key",
+            r"credential",
+            r"auth",
         ]
 
         masked = {}
         for key, value in env_vars.items():
             key_lower = key.lower()
             is_sensitive = any(
-                re.search(pattern, key_lower)
-                for pattern in sensitive_patterns
+                re.search(pattern, key_lower) for pattern in sensitive_patterns
             )
-            masked[key] = '***' if is_sensitive else value
+            masked[key] = "***" if is_sensitive else value
 
         return masked

@@ -7,7 +7,6 @@ different files.
 
 from __future__ import annotations
 
-
 # Default VPC CIDR block for new ECS stacks. Picked to be roomy enough
 # for two public + two private /24 subnets via cidrsubnet() (~512
 # addresses each) without colliding with common private-network ranges.

@@ -17,7 +17,6 @@ from ..conf import get_setting
 from ..exceptions import (
     AWSError,
     AWSCredentialError,
-    ECRError,
     ECRRepositoryError,
     ECRAuthenticationError,
     ECRImageError,
@@ -35,13 +34,11 @@ class ECRService(BaseService):
     """
 
     def __init__(
-        self,
-        credential_service: Optional[CredentialService] = None,
-        **kwargs
+        self, credential_service: Optional[CredentialService] = None, **kwargs
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
-        self.default_region = get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        self.default_region = get_setting("AWS_DEFAULT_REGION", "us-east-1")
 
     def _get_ecr_client(
         self,
@@ -52,16 +49,20 @@ class ECRService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'ecr',
+                    "ecr",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('ecr', region_name=region)
+                return boto3.client("ecr", region_name=region)
 
         except NoCredentialsError:
             raise AWSCredentialError(
@@ -80,16 +81,20 @@ class ECRService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'sts',
+                    "sts",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('sts', region_name=region)
+                return boto3.client("sts", region_name=region)
         except Exception as e:
             raise AWSError(f"Failed to create STS client: {e}")
 
@@ -102,9 +107,9 @@ class ECRService(BaseService):
         name: str,
         region: Optional[str] = None,
         credential: Optional[SecureCredential] = None,
-        image_tag_mutability: str = 'MUTABLE',
+        image_tag_mutability: str = "MUTABLE",
         scan_on_push: bool = False,
-        encryption_type: str = 'AES256',
+        encryption_type: str = "AES256",
     ) -> Dict[str, Any]:
         """
         Get an existing ECR repository or create it if it doesn't exist.
@@ -124,44 +129,42 @@ class ECRService(BaseService):
 
         try:
             response = client.describe_repositories(repositoryNames=[name])
-            repositories = response.get('repositories', [])
+            repositories = response.get("repositories", [])
             if repositories:
                 self.log_info(f"Found existing ECR repository: {name}")
                 return self._format_repository(repositories[0])
 
         except ClientError as e:
-            if e.response['Error']['Code'] != 'RepositoryNotFoundException':
+            if e.response["Error"]["Code"] != "RepositoryNotFoundException":
                 raise ECRRepositoryError(
                     f"Failed to describe repository: {e}",
                     repository_name=name,
-                    region=region
+                    region=region,
                 )
 
         try:
             create_params = {
-                'repositoryName': name,
-                'imageTagMutability': image_tag_mutability,
-                'imageScanningConfiguration': {
-                    'scanOnPush': scan_on_push,
+                "repositoryName": name,
+                "imageTagMutability": image_tag_mutability,
+                "imageScanningConfiguration": {
+                    "scanOnPush": scan_on_push,
                 },
-                'encryptionConfiguration': {
-                    'encryptionType': encryption_type,
+                "encryptionConfiguration": {
+                    "encryptionType": encryption_type,
                 },
             }
 
             response = client.create_repository(**create_params)
-            repository = response.get('repository', {})
+            repository = response.get("repository", {})
 
             self.log_info(f"Created ECR repository: {name}")
-            self.notify_observers('ecr_repository_created', repository_name=name)
+            self.notify_observers("ecr_repository_created", repository_name=name)
 
             return self._format_repository(repository)
 
         except ClientError as e:
             raise ECRRepositoryError(
-                f"Failed to create repository: {e}",
-                repository_name=name,
-                region=region
+                f"Failed to create repository: {e}", repository_name=name, region=region
             )
 
     def delete_repository(
@@ -192,25 +195,23 @@ class ECRService(BaseService):
             )
 
             self.log_info(f"Deleted ECR repository: {name}")
-            self.notify_observers('ecr_repository_deleted', repository_name=name)
+            self.notify_observers("ecr_repository_deleted", repository_name=name)
 
             return True
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'RepositoryNotFoundException':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "RepositoryNotFoundException":
                 self.log_warning(f"Repository not found for deletion: {name}")
                 return False
-            elif error_code == 'RepositoryNotEmptyException':
+            elif error_code == "RepositoryNotEmptyException":
                 raise ECRRepositoryError(
                     f"Repository {name} is not empty. Use force=True to delete with images.",
                     repository_name=name,
-                    region=region
+                    region=region,
                 )
             raise ECRRepositoryError(
-                f"Failed to delete repository: {e}",
-                repository_name=name,
-                region=region
+                f"Failed to delete repository: {e}", repository_name=name, region=region
             )
 
     def list_repositories(
@@ -234,14 +235,14 @@ class ECRService(BaseService):
 
         try:
             repositories = []
-            paginator = client.get_paginator('describe_repositories')
+            paginator = client.get_paginator("describe_repositories")
 
             paginate_params = {}
             if max_results:
-                paginate_params['PaginationConfig'] = {'MaxItems': max_results}
+                paginate_params["PaginationConfig"] = {"MaxItems": max_results}
 
             for page in paginator.paginate(**paginate_params):
-                for repo in page.get('repositories', []):
+                for repo in page.get("repositories", []):
                     repositories.append(self._format_repository(repo))
 
             return repositories
@@ -252,14 +253,18 @@ class ECRService(BaseService):
     def _format_repository(self, repo: Dict[str, Any]) -> Dict[str, Any]:
         """Format repository response to consistent structure."""
         return {
-            'repository_arn': repo.get('repositoryArn'),
-            'repository_name': repo.get('repositoryName'),
-            'repository_uri': repo.get('repositoryUri'),
-            'registry_id': repo.get('registryId'),
-            'created_at': repo.get('createdAt'),
-            'image_tag_mutability': repo.get('imageTagMutability'),
-            'image_scanning_enabled': repo.get('imageScanningConfiguration', {}).get('scanOnPush', False),
-            'encryption_type': repo.get('encryptionConfiguration', {}).get('encryptionType'),
+            "repository_arn": repo.get("repositoryArn"),
+            "repository_name": repo.get("repositoryName"),
+            "repository_uri": repo.get("repositoryUri"),
+            "registry_id": repo.get("registryId"),
+            "created_at": repo.get("createdAt"),
+            "image_tag_mutability": repo.get("imageTagMutability"),
+            "image_scanning_enabled": repo.get("imageScanningConfiguration", {}).get(
+                "scanOnPush", False
+            ),
+            "encryption_type": repo.get("encryptionConfiguration", {}).get(
+                "encryptionType"
+            ),
         }
 
     # -------------------------------------------------------------------------
@@ -285,42 +290,39 @@ class ECRService(BaseService):
 
         try:
             response = client.get_authorization_token()
-            auth_data = response.get('authorizationData', [])
+            auth_data = response.get("authorizationData", [])
 
             if not auth_data:
                 raise ECRAuthenticationError(
-                    "No authorization data returned from ECR",
-                    region=region
+                    "No authorization data returned from ECR", region=region
                 )
 
             auth = auth_data[0]
-            token = auth.get('authorizationToken', '')
+            token = auth.get("authorizationToken", "")
 
-            decoded = base64.b64decode(token).decode('utf-8')
-            username, password = decoded.split(':', 1)
+            decoded = base64.b64decode(token).decode("utf-8")
+            username, password = decoded.split(":", 1)
 
-            expires_at = auth.get('expiresAt')
+            expires_at = auth.get("expiresAt")
             if isinstance(expires_at, datetime):
                 expires_at = expires_at.isoformat()
 
             self.log_info("Retrieved ECR authorization token")
 
             return {
-                'username': username,
-                'password': password,
-                'proxy_endpoint': auth.get('proxyEndpoint'),
-                'expires_at': expires_at,
+                "username": username,
+                "password": password,
+                "proxy_endpoint": auth.get("proxyEndpoint"),
+                "expires_at": expires_at,
             }
 
         except ClientError as e:
             raise ECRAuthenticationError(
-                f"Failed to get authorization token: {e}",
-                region=region
+                f"Failed to get authorization token: {e}", region=region
             )
         except (ValueError, UnicodeDecodeError) as e:
             raise ECRAuthenticationError(
-                f"Failed to decode authorization token: {e}",
-                region=region
+                f"Failed to decode authorization token: {e}", region=region
             )
 
     def docker_login(
@@ -353,10 +355,16 @@ class ECRService(BaseService):
         import subprocess
 
         try:
-            process = subprocess.run(
-                ['docker', 'login', '--username', auth['username'],
-                 '--password-stdin', auth['proxy_endpoint']],
-                input=auth['password'].encode(),
+            subprocess.run(
+                [
+                    "docker",
+                    "login",
+                    "--username",
+                    auth["username"],
+                    "--password-stdin",
+                    auth["proxy_endpoint"],
+                ],
+                input=auth["password"].encode(),
                 capture_output=True,
                 check=True,
             )
@@ -367,13 +375,12 @@ class ECRService(BaseService):
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
             raise ECRAuthenticationError(
-                f"Docker login failed: {error_msg}",
-                region=region
+                f"Docker login failed: {error_msg}", region=region
             )
         except FileNotFoundError:
             raise ECRAuthenticationError(
                 "Docker CLI not found. Ensure Docker is installed and in PATH.",
-                region=region
+                region=region,
             )
 
     # -------------------------------------------------------------------------
@@ -404,20 +411,20 @@ class ECRService(BaseService):
         try:
             response = client.describe_images(
                 repositoryName=repository,
-                imageIds=[{'imageTag': tag}],
+                imageIds=[{"imageTag": tag}],
             )
 
-            images = response.get('imageDetails', [])
+            images = response.get("imageDetails", [])
             return len(images) > 0
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code in ('ImageNotFoundException', 'RepositoryNotFoundException'):
+            error_code = e.response["Error"]["Code"]
+            if error_code in ("ImageNotFoundException", "RepositoryNotFoundException"):
                 return False
             raise ECRImageError(
                 f"Failed to check image existence: {e}",
                 repository_name=repository,
-                image_tag=tag
+                image_tag=tag,
             )
 
     def get_image_uri(
@@ -425,7 +432,7 @@ class ECRService(BaseService):
         account_id: str,
         region: str,
         repository: str,
-        tag: str = 'latest',
+        tag: str = "latest",
     ) -> str:
         """
         Build the full ECR image URI.
@@ -466,31 +473,30 @@ class ECRService(BaseService):
 
         try:
             images = []
-            paginator = client.get_paginator('describe_images')
+            paginator = client.get_paginator("describe_images")
 
-            paginate_params = {'repositoryName': repository}
+            paginate_params = {"repositoryName": repository}
             if filter_tag_status:
-                paginate_params['filter'] = {'tagStatus': filter_tag_status}
+                paginate_params["filter"] = {"tagStatus": filter_tag_status}
             if max_results:
-                paginate_params['PaginationConfig'] = {'MaxItems': max_results}
+                paginate_params["PaginationConfig"] = {"MaxItems": max_results}
 
             for page in paginator.paginate(**paginate_params):
-                for image in page.get('imageDetails', []):
+                for image in page.get("imageDetails", []):
                     images.append(self._format_image(image))
 
             return images
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'RepositoryNotFoundException':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "RepositoryNotFoundException":
                 raise ECRRepositoryError(
                     f"Repository not found: {repository}",
                     repository_name=repository,
-                    region=region
+                    region=region,
                 )
             raise ECRImageError(
-                f"Failed to list images: {e}",
-                repository_name=repository
+                f"Failed to list images: {e}", repository_name=repository
             )
 
     def delete_image(
@@ -521,66 +527,67 @@ class ECRService(BaseService):
                 imageIds=image_ids,
             )
 
-            deleted = response.get('imageIds', [])
-            failures = response.get('failures', [])
+            deleted = response.get("imageIds", [])
+            failures = response.get("failures", [])
 
             if deleted:
                 self.log_info(f"Deleted {len(deleted)} image(s) from {repository}")
 
             if failures:
                 failed_tags = [
-                    f.get('imageId', {}).get('imageTag', f.get('imageId', {}).get('imageDigest', 'unknown'))
+                    f.get("imageId", {}).get(
+                        "imageTag", f.get("imageId", {}).get("imageDigest", "unknown")
+                    )
                     for f in failures
                 ]
                 self.log_warning(f"Failed to delete images: {failed_tags}")
 
             self.notify_observers(
-                'ecr_images_deleted',
+                "ecr_images_deleted",
                 repository_name=repository,
-                deleted_count=len(deleted)
+                deleted_count=len(deleted),
             )
 
             return {
-                'deleted': deleted,
-                'failed': [
+                "deleted": deleted,
+                "failed": [
                     {
-                        'image_id': f.get('imageId'),
-                        'failure_code': f.get('failureCode'),
-                        'failure_reason': f.get('failureReason'),
+                        "image_id": f.get("imageId"),
+                        "failure_code": f.get("failureCode"),
+                        "failure_reason": f.get("failureReason"),
                     }
                     for f in failures
                 ],
             }
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'RepositoryNotFoundException':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "RepositoryNotFoundException":
                 raise ECRRepositoryError(
                     f"Repository not found: {repository}",
                     repository_name=repository,
-                    region=region
+                    region=region,
                 )
             raise ECRImageError(
-                f"Failed to delete images: {e}",
-                repository_name=repository
+                f"Failed to delete images: {e}", repository_name=repository
             )
 
     def _format_image(self, image: Dict[str, Any]) -> Dict[str, Any]:
         """Format image response to consistent structure."""
-        pushed_at = image.get('imagePushedAt')
+        pushed_at = image.get("imagePushedAt")
         if isinstance(pushed_at, datetime):
             pushed_at = pushed_at.isoformat()
 
         return {
-            'image_digest': image.get('imageDigest'),
-            'image_tags': image.get('imageTags', []),
-            'image_size_bytes': image.get('imageSizeInBytes'),
-            'pushed_at': pushed_at,
-            'registry_id': image.get('registryId'),
-            'repository_name': image.get('repositoryName'),
-            'image_scan_status': image.get('imageScanStatus', {}).get('status'),
-            'image_manifest_media_type': image.get('imageManifestMediaType'),
-            'artifact_media_type': image.get('artifactMediaType'),
+            "image_digest": image.get("imageDigest"),
+            "image_tags": image.get("imageTags", []),
+            "image_size_bytes": image.get("imageSizeInBytes"),
+            "pushed_at": pushed_at,
+            "registry_id": image.get("registryId"),
+            "repository_name": image.get("repositoryName"),
+            "image_scan_status": image.get("imageScanStatus", {}).get("status"),
+            "image_manifest_media_type": image.get("imageManifestMediaType"),
+            "artifact_media_type": image.get("artifactMediaType"),
         }
 
     # -------------------------------------------------------------------------
@@ -604,7 +611,7 @@ class ECRService(BaseService):
 
         try:
             response = sts_client.get_caller_identity()
-            account_id = response.get('Account')
+            account_id = response.get("Account")
 
             if not account_id:
                 raise AWSError("Failed to retrieve account ID from STS")
@@ -647,7 +654,7 @@ class ECRService(BaseService):
             ECR password for Docker login
         """
         auth = self.get_authorization_token(region, credential)
-        return auth['password']
+        return auth["password"]
 
     def tag_image(
         self,
@@ -681,18 +688,20 @@ class ECRService(BaseService):
                 imageTag=target_tag,
             )
 
-            self.log_info(f"Tagged image {source_image_digest[:12]} as {target_tag} in {repository}")
+            self.log_info(
+                f"Tagged image {source_image_digest[:12]} as {target_tag} in {repository}"
+            )
             return True
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'ImageAlreadyExistsException':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "ImageAlreadyExistsException":
                 self.log_info(f"Image already has tag {target_tag}")
                 return True
             raise ECRImageError(
                 f"Failed to tag image: {e}",
                 repository_name=repository,
-                image_tag=target_tag
+                image_tag=target_tag,
             )
 
     def _get_image_manifest(
@@ -708,22 +717,20 @@ class ECRService(BaseService):
         try:
             response = client.batch_get_image(
                 repositoryName=repository,
-                imageIds=[{'imageDigest': image_digest}],
+                imageIds=[{"imageDigest": image_digest}],
             )
 
-            images = response.get('images', [])
+            images = response.get("images", [])
             if not images:
                 raise ECRImageError(
-                    f"Image not found: {image_digest}",
-                    repository_name=repository
+                    f"Image not found: {image_digest}", repository_name=repository
                 )
 
-            return images[0].get('imageManifest', '')
+            return images[0].get("imageManifest", "")
 
         except ClientError as e:
             raise ECRImageError(
-                f"Failed to get image manifest: {e}",
-                repository_name=repository
+                f"Failed to get image manifest: {e}", repository_name=repository
             )
 
     def set_lifecycle_policy(
@@ -746,6 +753,7 @@ class ECRService(BaseService):
             True if successful
         """
         import json
+
         client = self._get_ecr_client(region, credential)
 
         try:
@@ -761,7 +769,7 @@ class ECRService(BaseService):
             raise ECRRepositoryError(
                 f"Failed to set lifecycle policy: {e}",
                 repository_name=repository,
-                region=region
+                region=region,
             )
 
     def create_default_lifecycle_policy(

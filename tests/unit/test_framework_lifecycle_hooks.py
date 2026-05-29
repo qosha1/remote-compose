@@ -18,12 +18,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
 from remote_compose.frameworks import DJANGO, PHOENIX, RAILS
-
 
 # ---------------------------------------------------------------------------
 # Framework presets carry the expected hooks
@@ -44,7 +42,9 @@ class TestFrameworkLifecycleMaps:
         # rc-2kj: symmetric with Rails 'seed' for fixture seeding.
         assert "loaddata" in DJANGO.lifecycle_hooks
         assert DJANGO.lifecycle_hooks["loaddata"][:3] == (
-            "python", "manage.py", "loaddata",
+            "python",
+            "manage.py",
+            "loaddata",
         )
 
     def test_rails_has_console_and_seed(self):
@@ -74,9 +74,14 @@ def _write_v2(tmp_path: Path, *, rc_services: dict, compose_services: dict) -> P
         "terraform": {"backend": {"type": "local"}},
         "services": rc_services,
     }
-    (tmp_path / "docker-compose.yml").write_text(yaml.safe_dump({
-        "version": "3", "services": compose_services,
-    }))
+    (tmp_path / "docker-compose.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "3",
+                "services": compose_services,
+            }
+        )
+    )
     p = tmp_path / "rc.yml"
     p.write_text(yaml.safe_dump(rc))
     return p
@@ -88,7 +93,9 @@ class TestExplicitFrameworkField:
             tmp_path,
             rc_services={
                 "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
                     "framework": "django",
                 },
             },
@@ -100,7 +107,10 @@ class TestExplicitFrameworkField:
 
         assert "createsuperuser" in spec.lifecycle
         assert spec.lifecycle["createsuperuser"]["command"] == [
-            "python", "manage.py", "createsuperuser", "--noinput",
+            "python",
+            "manage.py",
+            "createsuperuser",
+            "--noinput",
         ]
         # Framework-injected hooks default to non-auto, non-run-once.
         assert spec.lifecycle["createsuperuser"]["auto_on_deploy"] is False
@@ -110,7 +120,9 @@ class TestExplicitFrameworkField:
             tmp_path,
             rc_services={
                 "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
                     "framework": "django",
                 },
             },
@@ -130,7 +142,9 @@ class TestExplicitFrameworkField:
             tmp_path,
             rc_services={
                 "web": {
-                    "cpu": 512, "memory": 1024, "type": "application",
+                    "cpu": 512,
+                    "memory": 1024,
+                    "type": "application",
                     "framework": "rails",
                 },
             },
@@ -149,7 +163,9 @@ class TestExplicitFrameworkField:
             tmp_path,
             rc_services={
                 "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
                     "framework": "not-a-framework",
                 },
             },
@@ -173,7 +189,9 @@ class TestUserOverrideWins:
             tmp_path,
             rc_services={
                 "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
                     "framework": "django",
                     "lifecycle": {
                         "createsuperuser": {
@@ -189,7 +207,9 @@ class TestUserOverrideWins:
         spec = ctx.services["api"]
         # User's command wins; framework default is not merged in.
         assert spec.lifecycle["createsuperuser"]["command"] == [
-            "python", "manage.py", "create_admin",
+            "python",
+            "manage.py",
+            "create_admin",
         ]
         # Other framework hooks the user DIDN'T override still land.
         assert "shell" in spec.lifecycle
@@ -206,9 +226,7 @@ class TestAutoDetection:
         # framework: field but build context points at it.
         df_dir = tmp_path / "ctx"
         df_dir.mkdir()
-        (df_dir / "Dockerfile").write_text(
-            "FROM python:3.11\nCOPY manage.py /app/\n"
-        )
+        (df_dir / "Dockerfile").write_text("FROM python:3.11\nCOPY manage.py /app/\n")
         rc_path = _write_v2(
             tmp_path,
             rc_services={
@@ -237,7 +255,9 @@ class TestSchemaParsesFrameworkField:
             tmp_path,
             rc_services={
                 "api": {
-                    "cpu": 256, "memory": 512, "type": "application",
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "application",
                     "framework": "django",
                 },
             },

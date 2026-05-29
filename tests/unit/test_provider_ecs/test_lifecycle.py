@@ -25,17 +25,26 @@ def _ctx(tmp_path: Path, **overrides) -> DeployContext:
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": overrides.pop("region", "us-west-2"),
-            "cluster": overrides.pop("cluster", "myapp-prod"),
-            "vpc_cidr": "10.0.0.0/16",
-            "aws_profile": "default",
-        }},
+        provider_config={
+            "ecs": {
+                "region": overrides.pop("region", "us-west-2"),
+                "cluster": overrides.pop("cluster", "myapp-prod"),
+                "vpc_cidr": "10.0.0.0/16",
+                "aws_profile": "default",
+            }
+        },
         tf_backend_config=overrides.pop("tf_backend", {"type": "local"}),
         working_dir=tmp_path,
         services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                               public=True, port=80, health_check_path="/"),
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/",
+            ),
             "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
         },
         secrets=[],
@@ -133,7 +142,9 @@ class TestDeploy:
         ctx = _ctx(tmp_path)
         out_dir = ctx.working_dir / "terraform"
         runner = recorder(out_dir)
-        runner.script("output", '{"alb_dns_name": {"value": "my-alb-1.elb.amazonaws.com"}}')
+        runner.script(
+            "output", '{"alb_dns_name": {"value": "my-alb-1.elb.amazonaws.com"}}'
+        )
 
         result = provider.deploy(ctx)
         assert "alb_dns_name" in result.terraform_outputs
@@ -166,7 +177,9 @@ class TestDestroy:
 
 
 class TestRedeploy:
-    def test_redeploy_force_new_deployment_per_service(self, provider, mock_session, tmp_path):
+    def test_redeploy_force_new_deployment_per_service(
+        self, provider, mock_session, tmp_path
+    ):
         ctx = _ctx(tmp_path)
         provider.redeploy(ctx)
         ecs_client = mock_session.client.return_value
@@ -186,14 +199,24 @@ class TestRedeploy:
 
 
 class TestStatus:
-    def test_status_maps_boto3_response_to_report(self, provider, mock_session, tmp_path):
+    def test_status_maps_boto3_response_to_report(
+        self, provider, mock_session, tmp_path
+    ):
         ecs_client = mock_session.client.return_value
         ecs_client.describe_services.return_value = {
             "services": [
-                {"serviceName": "web", "runningCount": 2, "desiredCount": 2,
-                 "events": [{"message": "steady state"}]},
-                {"serviceName": "api", "runningCount": 0, "desiredCount": 1,
-                 "events": [{"message": "starting"}]},
+                {
+                    "serviceName": "web",
+                    "runningCount": 2,
+                    "desiredCount": 2,
+                    "events": [{"message": "steady state"}],
+                },
+                {
+                    "serviceName": "api",
+                    "runningCount": 0,
+                    "desiredCount": 1,
+                    "events": [{"message": "starting"}],
+                },
             ],
         }
         ctx = _ctx(tmp_path)
@@ -203,7 +226,9 @@ class TestStatus:
         assert by_name["api"].health == "degraded"
         assert report.cluster_health == "degraded"
 
-    def test_status_all_services_reported_even_if_missing(self, provider, mock_session, tmp_path):
+    def test_status_all_services_reported_even_if_missing(
+        self, provider, mock_session, tmp_path
+    ):
         ecs_client = mock_session.client.return_value
         ecs_client.describe_services.return_value = {"services": []}
         ctx = _ctx(tmp_path)
@@ -218,12 +243,24 @@ class TestStatus:
         ctx = _ctx(tmp_path)
         provider.emit_terraform(ctx, ctx.working_dir / "terraform")
         runner = recorder(ctx.working_dir / "terraform")
-        runner.script("output", '{"alb_dns_name": {"value": "alb-99.elb.amazonaws.com"}}')
+        runner.script(
+            "output", '{"alb_dns_name": {"value": "alb-99.elb.amazonaws.com"}}'
+        )
 
         mock_session.client.return_value.describe_services.return_value = {
             "services": [
-                {"serviceName": "web", "runningCount": 1, "desiredCount": 1, "events": []},
-                {"serviceName": "api", "runningCount": 1, "desiredCount": 1, "events": []},
+                {
+                    "serviceName": "web",
+                    "runningCount": 1,
+                    "desiredCount": 1,
+                    "events": [],
+                },
+                {
+                    "serviceName": "api",
+                    "runningCount": 1,
+                    "desiredCount": 1,
+                    "events": [],
+                },
             ],
         }
         report = provider.status(ctx)
@@ -237,9 +274,15 @@ class TestRollback:
             provider.rollback(ctx)
 
     def test_remote_backend_not_implemented_yet(self, provider, tmp_path):
-        ctx = _ctx(tmp_path, tf_backend={
-            "type": "s3", "bucket": "b", "key": "k.tfstate", "region": "us-west-2",
-        })
+        ctx = _ctx(
+            tmp_path,
+            tf_backend={
+                "type": "s3",
+                "bucket": "b",
+                "key": "k.tfstate",
+                "region": "us-west-2",
+            },
+        )
         with pytest.raises(NotImplementedError):
             provider.rollback(ctx)
 
@@ -261,12 +304,15 @@ class TestLogsAndExec:
         assert out == ["line 1", "line 2"]
 
     def test_logs_empty_when_no_streams(self, provider, mock_session, tmp_path):
-        mock_session.client.return_value.describe_log_streams.return_value = {"logStreams": []}
+        mock_session.client.return_value.describe_log_streams.return_value = {
+            "logStreams": []
+        }
         ctx = _ctx(tmp_path)
         assert list(provider.logs(ctx, "web")) == []
 
     def test_exec_captures_stdout_via_sentinels(self, provider, mock_session, tmp_path):
         from unittest import mock as _mock
+
         ecs = mock_session.client.return_value
         ecs.list_tasks.return_value = {"taskArns": ["arn:aws:ecs:...:task/abc"]}
         ctx = _ctx(tmp_path)
@@ -295,8 +341,11 @@ class TestLogsAndExec:
         assert "--task" in cmd
         assert "arn:aws:ecs:...:task/abc" in cmd
 
-    def test_exec_returns_real_exit_code_from_sentinel(self, provider, mock_session, tmp_path):
+    def test_exec_returns_real_exit_code_from_sentinel(
+        self, provider, mock_session, tmp_path
+    ):
         from unittest import mock as _mock
+
         mock_session.client.return_value.list_tasks.return_value = {
             "taskArns": ["arn:task/abc"]
         }
@@ -309,8 +358,11 @@ class TestLogsAndExec:
             result = provider.exec(ctx, "web", ["false"])
         assert result.exit_code == 42
 
-    def test_exec_handles_session_manager_failure(self, provider, mock_session, tmp_path):
+    def test_exec_handles_session_manager_failure(
+        self, provider, mock_session, tmp_path
+    ):
         from unittest import mock as _mock
+
         mock_session.client.return_value.list_tasks.return_value = {
             "taskArns": ["arn:task/abc"]
         }
@@ -318,14 +370,20 @@ class TestLogsAndExec:
         # No sentinels — session died before our wrapper started.
         with _mock.patch("subprocess.run") as run:
             run.return_value = _mock.Mock(
-                returncode=254, stdout=b"", stderr=b"InvalidParameterException",
+                returncode=254,
+                stdout=b"",
+                stderr=b"InvalidParameterException",
             )
             result = provider.exec(ctx, "web", ["whoami"])
         assert result.exit_code == 254
         assert "InvalidParameterException" in result.stderr
 
     def test_exec_no_running_tasks_returns_error(
-        self, provider, mock_session, tmp_path, monkeypatch,
+        self,
+        provider,
+        mock_session,
+        tmp_path,
+        monkeypatch,
     ):
         # ECSProvider.exec polls list_tasks for up to 5 min (rc-e5u.46.6)
         # waiting for a task that has its ExecuteCommandAgent ready. With
@@ -348,17 +406,23 @@ class TestExecPicksCorrectTask:
     'execute command was not enabled when the task was run'."""
 
     def test_skips_task_with_enable_execute_command_false(
-        self, provider, mock_session, tmp_path,
+        self,
+        provider,
+        mock_session,
+        tmp_path,
     ):
         from unittest import mock as _mock
+
         ecs = mock_session.client.return_value
         old_arn = "arn:aws:ecs:...:task/old"
         new_arn = "arn:aws:ecs:...:task/new"
         ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
         ecs.describe_services.return_value = {
-            "services": [{
-                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
-            }],
+            "services": [
+                {
+                    "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+                }
+            ],
         }
         ecs.describe_tasks.return_value = {
             "tasks": [
@@ -367,24 +431,32 @@ class TestExecPicksCorrectTask:
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": False,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "RUNNING",
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "RUNNING",
+                                }
+                            ],
+                        }
+                    ],
                 },
                 {
                     "taskArn": new_arn,
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": True,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "RUNNING",
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "RUNNING",
+                                }
+                            ],
+                        }
+                    ],
                 },
             ],
         }
@@ -404,17 +476,23 @@ class TestExecPicksCorrectTask:
         assert old_arn not in cmd
 
     def test_prefers_current_revision_over_older_exec_ready_task(
-        self, provider, mock_session, tmp_path,
+        self,
+        provider,
+        mock_session,
+        tmp_path,
     ):
         from unittest import mock as _mock
+
         ecs = mock_session.client.return_value
         old_arn = "arn:aws:ecs:...:task/old"
         new_arn = "arn:aws:ecs:...:task/new"
         ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
         ecs.describe_services.return_value = {
-            "services": [{
-                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
-            }],
+            "services": [
+                {
+                    "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+                }
+            ],
         }
         # Both tasks are exec-ready (enableExecuteCommand=True, agent
         # RUNNING). Old is on rev 41; new is on rev 42 (current). With
@@ -427,24 +505,32 @@ class TestExecPicksCorrectTask:
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": True,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "RUNNING",
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "RUNNING",
+                                }
+                            ],
+                        }
+                    ],
                 },
                 {
                     "taskArn": new_arn,
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": True,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "RUNNING",
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "RUNNING",
+                                }
+                            ],
+                        }
+                    ],
                 },
             ],
         }
@@ -463,21 +549,27 @@ class TestExecPicksCorrectTask:
         assert old_arn not in cmd
 
     def test_falls_back_to_old_revision_when_new_not_ready(
-        self, provider, mock_session, tmp_path,
+        self,
+        provider,
+        mock_session,
+        tmp_path,
     ):
         # Edge case: the current-revision task hasn't finished registering
         # its ExecuteCommandAgent yet. The old-revision task IS ready.
         # Rather than block lifecycle hooks indefinitely, exec falls
         # back to the old-revision task (which IS exec-able).
         from unittest import mock as _mock
+
         ecs = mock_session.client.return_value
         old_arn = "arn:aws:ecs:...:task/old-ready"
         new_arn = "arn:aws:ecs:...:task/new-not-ready"
         ecs.list_tasks.return_value = {"taskArns": [old_arn, new_arn]}
         ecs.describe_services.return_value = {
-            "services": [{
-                "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
-            }],
+            "services": [
+                {
+                    "taskDefinition": "arn:aws:ecs:...:task-definition/web:42",
+                }
+            ],
         }
         ecs.describe_tasks.return_value = {
             "tasks": [
@@ -486,24 +578,32 @@ class TestExecPicksCorrectTask:
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": True,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:41",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "RUNNING",
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "RUNNING",
+                                }
+                            ],
+                        }
+                    ],
                 },
                 {
                     "taskArn": new_arn,
                     "lastStatus": "RUNNING",
                     "enableExecuteCommand": True,
                     "taskDefinitionArn": "arn:aws:ecs:...:task-definition/web:42",
-                    "containers": [{
-                        "managedAgents": [{
-                            "name": "ExecuteCommandAgent",
-                            "lastStatus": "PENDING",  # Not ready yet
-                        }],
-                    }],
+                    "containers": [
+                        {
+                            "managedAgents": [
+                                {
+                                    "name": "ExecuteCommandAgent",
+                                    "lastStatus": "PENDING",  # Not ready yet
+                                }
+                            ],
+                        }
+                    ],
                 },
             ],
         }

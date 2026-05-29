@@ -12,30 +12,46 @@ from pathlib import Path
 import click
 
 
-@click.group(name='compose')
+@click.group(name="compose")
 def compose_group():
     """docker-compose interop helpers."""
     pass
 
 
-@compose_group.command(name='import')
-@click.option('--from', 'compose_file', default='./docker-compose.yml',
-              show_default=True,
-              type=click.Path(exists=True, dir_okay=False),
-              help='Path to the source docker-compose.yml.')
-@click.option('--out', 'out_path', default='./rc.yml', show_default=True,
-              type=click.Path(dir_okay=False),
-              help='Where to write the scaffolded rc.yml.')
-@click.option('--project', 'project_name', default=None,
-              help='rc.yml v2 project field. Defaults to the parent dir name '
-                   'of the compose file.')
-@click.option('--exclude', 'exclude_csv', default=None,
-              help='Comma-separated list of compose service names to drop '
-                   'from the deploy set (lands under compose.exclude in '
-                   'the output). Useful for dev-only sidecars: e.g. '
-                   '--exclude=ngrok,docs-builder,eval-app.')
-@click.option('--force', is_flag=True,
-              help='Overwrite an existing rc.yml at --out.')
+@compose_group.command(name="import")
+@click.option(
+    "--from",
+    "compose_file",
+    default="./docker-compose.yml",
+    show_default=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the source docker-compose.yml.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default="./rc.yml",
+    show_default=True,
+    type=click.Path(dir_okay=False),
+    help="Where to write the scaffolded rc.yml.",
+)
+@click.option(
+    "--project",
+    "project_name",
+    default=None,
+    help="rc.yml v2 project field. Defaults to the parent dir name "
+    "of the compose file.",
+)
+@click.option(
+    "--exclude",
+    "exclude_csv",
+    default=None,
+    help="Comma-separated list of compose service names to drop "
+    "from the deploy set (lands under compose.exclude in "
+    "the output). Useful for dev-only sidecars: e.g. "
+    "--exclude=ngrok,docs-builder,eval-app.",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing rc.yml at --out.")
 def compose_import(compose_file, out_path, project_name, exclude_csv, force):
     """Scaffold a starter rc.yml v2 from an existing docker-compose.yml.
 
@@ -71,7 +87,8 @@ def compose_import(compose_file, out_path, project_name, exclude_csv, force):
 
     excluded = (
         [s.strip() for s in exclude_csv.split(",") if s.strip()]
-        if exclude_csv else None
+        if exclude_csv
+        else None
     )
     try:
         rc_yml = scaffold_rc_yml(src, project=project_name, exclude=excluded)
@@ -81,8 +98,9 @@ def compose_import(compose_file, out_path, project_name, exclude_csv, force):
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(rc_yml)
 
-    click.echo(f"\nrc compose import")
+    click.echo("\nrc compose import")
     click.echo(f"  source:  {src}")
     click.echo(f"  wrote:   {dst}")
-    click.echo(f"\n  Next: edit {dst.name} (provider region, secrets), "
-               f"then `rc plan`.")
+    click.echo(
+        f"\n  Next: edit {dst.name} (provider region, secrets), " f"then `rc plan`."
+    )

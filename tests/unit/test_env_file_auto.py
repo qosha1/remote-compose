@@ -5,7 +5,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 import yaml
 
 from remote_compose.cli_v2 import (
@@ -19,10 +18,10 @@ from remote_compose.config.v2_schema import (
     parse as parse_v2,
 )
 
-
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+
 
 def test_env_file_auto_is_a_valid_secret_source():
     assert "env_file_auto" in VALID_SECRET_SOURCES
@@ -61,6 +60,7 @@ def test_env_file_auto_parses_from_yaml(tmp_path):
 # _expand_env_file_auto
 # ---------------------------------------------------------------------------
 
+
 def _setup(tmp_path, compose_text, env_files):
     """Write compose + env_files; return (compose_path, env_paths)."""
     compose = tmp_path / "docker-compose.yml"
@@ -93,8 +93,10 @@ class TestExpand:
         compose, _ = _setup(
             tmp_path,
             "services: {api: {image: x}, worker: {image: x}}",
-            {".envs/.local/.django": "AWS_KEY=foo\nDB_URL=bar\n",
-             ".envs/.local/.postgres": "POSTGRES_PASSWORD=p\n"},
+            {
+                ".envs/.local/.django": "AWS_KEY=foo\nDB_URL=bar\n",
+                ".envs/.local/.postgres": "POSTGRES_PASSWORD=p\n",
+            },
         )
         compose_services = {
             "api": {"env_file": [".envs/.local/.django", ".envs/.local/.postgres"]},
@@ -121,8 +123,9 @@ class TestExpand:
             {".envs/.local/.django": "K=v\n"},
         )
         # User has a manually-declared `source: file` AND an auto entry
-        manual = SecretRefV2(name="extra", source="file",
-                             path=str(tmp_path / ".envs/.local/.django"))
+        manual = SecretRefV2(
+            name="extra", source="file", path=str(tmp_path / ".envs/.local/.django")
+        )
         secrets = [manual, SecretRefV2(name="env", source="env_file_auto")]
         compose_services = {"api": {"env_file": ".envs/.local/.django"}}
         out, suppressed, _ = _expand_env_file_auto(secrets, compose_services, compose)
@@ -146,6 +149,7 @@ class TestExpand:
 # ---------------------------------------------------------------------------
 # rc-e5u.44.22 — secret name when env_file lives OUTSIDE the compose dir
 # ---------------------------------------------------------------------------
+
 
 class TestSecretNamingOutsideComposeDir:
     """The previous implementation fell back to the bare basename when
@@ -181,7 +185,8 @@ class TestSecretNamingOutsideComposeDir:
         # Old behavior: name = 'django' (basename only).
         # New behavior (.44.22): name = 'local-django' (last 3 segments slug).
         proj_root, compose_path = self._setup_with_external_env_files(
-            tmp_path, {".envs/.local/.django": "K=v\n"},
+            tmp_path,
+            {".envs/.local/.django": "K=v\n"},
         )
         compose_services = {
             "api": {"env_file": str(proj_root / ".envs/.local/.django")},
@@ -196,16 +201,19 @@ class TestSecretNamingOutsideComposeDir:
         # /.envs/.staging/.django, both outside compose dir. Old: BOTH
         # collapse to 'django'. New: distinct 'local-django' / 'staging-django'.
         proj_root, compose_path = self._setup_with_external_env_files(
-            tmp_path, {
+            tmp_path,
+            {
                 ".envs/.local/.django": "L=local\n",
                 ".envs/.staging/.django": "S=staging\n",
             },
         )
         compose_services = {
-            "api": {"env_file": [
-                str(proj_root / ".envs/.local/.django"),
-                str(proj_root / ".envs/.staging/.django"),
-            ]},
+            "api": {
+                "env_file": [
+                    str(proj_root / ".envs/.local/.django"),
+                    str(proj_root / ".envs/.staging/.django"),
+                ]
+            },
         }
         secrets = [SecretRefV2(name="env", source="env_file_auto")]
         out, _, _ = _expand_env_file_auto(secrets, compose_services, compose_path)
@@ -219,7 +227,8 @@ class TestSecretNamingOutsideComposeDir:
         # Old behavior: in-tree compose → 'local-django'; /tmp compose → 'django'.
         # New behavior: BOTH produce 'local-django'.
         proj_root, _ = self._setup_with_external_env_files(
-            tmp_path, {".envs/.local/.django": "K=v\n"},
+            tmp_path,
+            {".envs/.local/.django": "K=v\n"},
         )
         env_abs = str((proj_root / ".envs/.local/.django").resolve())
 
@@ -229,7 +238,8 @@ class TestSecretNamingOutsideComposeDir:
         services_a = {"api": {"env_file": ".envs/.local/.django"}}
         out_a, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
-            services_a, compose_a,
+            services_a,
+            compose_a,
         )
 
         # Scenario B: compose lives in a sibling /tmp-style dir; env_file
@@ -240,7 +250,8 @@ class TestSecretNamingOutsideComposeDir:
         services_b = {"api": {"env_file": env_abs}}
         out_b, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
-            services_b, compose_b,
+            services_b,
+            compose_b,
         )
 
         names_a = sorted(s.name for s in out_a)
@@ -259,7 +270,8 @@ class TestSecretNamingOutsideComposeDir:
         services = {"api": {"env_file": str(ep)}}
         out, _, _ = _expand_env_file_auto(
             [SecretRefV2(name="env", source="env_file_auto")],
-            services, compose,
+            services,
+            compose,
         )
         # Name comes from path segments (likely 'tmp-django' or similar
         # depending on tmp_path layout) — just assert it's non-empty + valid.
@@ -272,6 +284,7 @@ class TestSecretNamingOutsideComposeDir:
 # End-to-end via build_deploy_context — env keys in the file disappear from
 # the per-service env dict (the bead's whole point)
 # ---------------------------------------------------------------------------
+
 
 def test_build_deploy_context_strips_env_file_keys_when_auto_present(tmp_path):
     """Acceptance: a key in env_file lands in secrets, NOT in env."""

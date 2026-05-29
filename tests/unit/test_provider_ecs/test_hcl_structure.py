@@ -18,10 +18,7 @@ import pytest
 from remote_compose.provider import DeployContext, SecretRef, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 
-
-REF_RE = re.compile(
-    r"(aws_[a-z0-9_]+|data\.aws_[a-z0-9_]+)\.([A-Za-z_][A-Za-z0-9_]*)"
-)
+REF_RE = re.compile(r"(aws_[a-z0-9_]+|data\.aws_[a-z0-9_]+)\.([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _ctx(tmp_path: Path) -> DeployContext:
@@ -31,20 +28,36 @@ def _ctx(tmp_path: Path) -> DeployContext:
         project="struct",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={"domain": "api.example.com", "tls": {"mode": "acm"}},
-        provider_config={"ecs": {
-            "region": "us-west-2", "cluster": "struct-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "struct-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                               public=True, port=80, health_check_path="/"),
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/",
+            ),
             "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
-            "db":  ServiceSpec(name="db", cpu=512, memory=1024, type="infrastructure",
-                               volumes=[{"name": "data", "mount": "/data"}]),
-            "worker": ServiceSpec(name="worker", cpu=1024, memory=2048,
-                                  type="worker", launch_type="EC2"),
+            "db": ServiceSpec(
+                name="db",
+                cpu=512,
+                memory=1024,
+                type="infrastructure",
+                volumes=[{"name": "data", "mount": "/data"}],
+            ),
+            "worker": ServiceSpec(
+                name="worker", cpu=1024, memory=2048, type="worker", launch_type="EC2"
+            ),
         },
         secrets=[
             SecretRef(name="django", source="file", path=str(env)),
@@ -105,18 +118,31 @@ class TestResourceInventory:
         ECSProvider().emit_terraform(_ctx(tmp_path), out)
         mod = _parse_module(out)
         expected = {
-            "aws_vpc", "aws_subnet", "aws_internet_gateway",
-            "aws_security_group", "aws_lb", "aws_lb_listener",
-            "aws_lb_target_group", "aws_ecs_cluster",
+            "aws_vpc",
+            "aws_subnet",
+            "aws_internet_gateway",
+            "aws_security_group",
+            "aws_lb",
+            "aws_lb_listener",
+            "aws_lb_target_group",
+            "aws_ecs_cluster",
             "aws_ecs_cluster_capacity_providers",
-            "aws_iam_role", "aws_cloudwatch_log_group",
-            "aws_ecr_repository", "aws_ecs_task_definition", "aws_ecs_service",
-            "aws_efs_file_system", "aws_efs_mount_target", "aws_efs_access_point",
-            "aws_secretsmanager_secret", "aws_secretsmanager_secret_version",
+            "aws_iam_role",
+            "aws_cloudwatch_log_group",
+            "aws_ecr_repository",
+            "aws_ecs_task_definition",
+            "aws_ecs_service",
+            "aws_efs_file_system",
+            "aws_efs_mount_target",
+            "aws_efs_access_point",
+            "aws_secretsmanager_secret",
+            "aws_secretsmanager_secret_version",
             "aws_iam_role_policy",  # for secrets
-            "aws_launch_template", "aws_autoscaling_group",
+            "aws_launch_template",
+            "aws_autoscaling_group",
             "aws_ecs_capacity_provider",
-            "aws_acm_certificate", "aws_route53_record",
+            "aws_acm_certificate",
+            "aws_route53_record",
         }
         missing = expected - set(mod["resources"].keys())
         assert not missing, f"missing resource types: {missing}"
@@ -161,12 +187,12 @@ class TestReferentialIntegrity:
         # definitions as references.
         text = re.sub(
             r'resource\s+"([^"]+)"\s+"([^"]+)"',
-            lambda m: f'<<def {m.group(1)}.{m.group(2)}>>',
+            lambda m: f"<<def {m.group(1)}.{m.group(2)}>>",
             mod["raw_text"],
         )
         text = re.sub(
             r'data\s+"([^"]+)"\s+"([^"]+)"',
-            lambda m: f'<<def data.{m.group(1)}.{m.group(2)}>>',
+            lambda m: f"<<def data.{m.group(1)}.{m.group(2)}>>",
             text,
         )
         text = re.sub(r"<<def [^>]+>>", "", text)
@@ -180,10 +206,13 @@ class TestReferentialIntegrity:
             unresolved.append(token)
 
         # Deduplicate, keep only references for AWS-managed types
-        unresolved = sorted(set(
-            u for u in unresolved
-            if u.startswith("aws_") or u.startswith("data.aws_")
-        ))
-        assert not unresolved, (
-            "references to undefined resources:\n  " + "\n  ".join(unresolved)
+        unresolved = sorted(
+            set(
+                u
+                for u in unresolved
+                if u.startswith("aws_") or u.startswith("data.aws_")
+            )
+        )
+        assert not unresolved, "references to undefined resources:\n  " + "\n  ".join(
+            unresolved
         )

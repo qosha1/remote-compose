@@ -8,20 +8,16 @@ from remote_compose.services import TargetService
 
 
 class Command(BaseCommand):
-    help = 'Test SSH connection to a deployment target'
+    help = "Test SSH connection to a deployment target"
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--name',
-            required=True,
-            help='Target name to test'
-        )
+        parser.add_argument("--name", required=True, help="Target name to test")
 
     def handle(self, *args, **options):
         service = TargetService()
 
         try:
-            target = service.get_target_by_name(options['name'])
+            target = service.get_target_by_name(options["name"])
         except Exception as e:
             raise CommandError(str(e))
 
@@ -29,7 +25,7 @@ class Command(BaseCommand):
 
         result = service.test_connection(target)
 
-        if result['success']:
+        if result["success"]:
             self.stdout.write(
                 self.style.SUCCESS(f"✓ Connection successful: {result['message']}")
             )

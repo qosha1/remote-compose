@@ -15,49 +15,98 @@ import yaml
 from ._dispatchers import _secrets_push_v2
 
 
-@click.command(name='up')
-@click.option('--from-compose', 'from_compose',
-              type=click.Path(exists=True, dir_okay=False), default=None,
-              help='If rc.yml is missing, scaffold one from this docker-compose.yml first.')
-@click.option('--public-service', 'public_service', default=None,
-              help='Override the auto-detected ALB-fronted service when scaffolding.')
-@click.option('--region', default='us-west-2',
-              help='AWS region used when scaffolding rc.yml (ignored if rc.yml exists).')
-@click.option('--aws-profile', 'aws_profile', default=None,
-              help='aws_profile used when scaffolding rc.yml (ignored if rc.yml exists).')
-@click.option('--testing-defaults/--no-testing-defaults', 'testing_defaults',
-              default=None,
-              help='Inject DJANGO_ALLOWED_HOSTS=* / CSRF_TRUSTED_ORIGINS=* '
-                   'on Django services when scaffolding rc.yml (ignored if '
-                   'rc.yml exists). Default auto-on for rc-test-* projects. '
-                   'See rc-e5u.46.4.')
-@click.option('--ttl', 'ttl', default=None,
-              help='Mark this stack ephemeral with the given TTL '
-                   '(e.g. 30m, 4h, 2h30m). Tags resources Ephemeral=true + '
-                   'ExpiresAt=<iso>; `rc reap` later destroys past-due stacks.')
-@click.option('--dev', 'dev_mode', is_flag=True,
-              help='Dev-mode deploy: provision EFS-backed bind mounts for '
-                   'every services[*].dev_volumes entry so `rc dev push` can '
-                   'stream local source into the running task for sub-second '
-                   'iteration. See rc-e5u.45.8.')
-@click.option('--domain', 'domain', default=None,
-              help='Wire the ALB to a custom FQDN. Scaffolds '
-                   'services.<public>.domain + provider_config.ecs.'
-                   'route53_zone (drop-leftmost-label heuristic) so '
-                   'terraform creates ACM cert + Route 53 A records. '
-                   'Verifies the zone exists in the configured aws_profile '
-                   'before deploying. See rc-e5u.46.7.')
-@click.option('--alias', 'aliases', multiple=True,
-              help='Add an additional FQDN as a SAN on the ACM cert + an '
-                   'extra A record. Repeat --alias N times for N aliases. '
-                   'Requires --domain.')
-@click.option('--route53-zone', 'route53_zone', default=None,
-              help='Override the Route 53 hosted-zone name (defaults to '
-                   '--domain with the leftmost label dropped). Use when '
-                   'your zone is something other than parent-of-FQDN.')
+@click.command(name="up")
+@click.option(
+    "--from-compose",
+    "from_compose",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="If rc.yml is missing, scaffold one from this docker-compose.yml first.",
+)
+@click.option(
+    "--public-service",
+    "public_service",
+    default=None,
+    help="Override the auto-detected ALB-fronted service when scaffolding.",
+)
+@click.option(
+    "--region",
+    default="us-west-2",
+    help="AWS region used when scaffolding rc.yml (ignored if rc.yml exists).",
+)
+@click.option(
+    "--aws-profile",
+    "aws_profile",
+    default=None,
+    help="aws_profile used when scaffolding rc.yml (ignored if rc.yml exists).",
+)
+@click.option(
+    "--testing-defaults/--no-testing-defaults",
+    "testing_defaults",
+    default=None,
+    help="Inject DJANGO_ALLOWED_HOSTS=* / CSRF_TRUSTED_ORIGINS=* "
+    "on Django services when scaffolding rc.yml (ignored if "
+    "rc.yml exists). Default auto-on for rc-test-* projects. "
+    "See rc-e5u.46.4.",
+)
+@click.option(
+    "--ttl",
+    "ttl",
+    default=None,
+    help="Mark this stack ephemeral with the given TTL "
+    "(e.g. 30m, 4h, 2h30m). Tags resources Ephemeral=true + "
+    "ExpiresAt=<iso>; `rc reap` later destroys past-due stacks.",
+)
+@click.option(
+    "--dev",
+    "dev_mode",
+    is_flag=True,
+    help="Dev-mode deploy: provision EFS-backed bind mounts for "
+    "every services[*].dev_volumes entry so `rc dev push` can "
+    "stream local source into the running task for sub-second "
+    "iteration. See rc-e5u.45.8.",
+)
+@click.option(
+    "--domain",
+    "domain",
+    default=None,
+    help="Wire the ALB to a custom FQDN. Scaffolds "
+    "services.<public>.domain + provider_config.ecs."
+    "route53_zone (drop-leftmost-label heuristic) so "
+    "terraform creates ACM cert + Route 53 A records. "
+    "Verifies the zone exists in the configured aws_profile "
+    "before deploying. See rc-e5u.46.7.",
+)
+@click.option(
+    "--alias",
+    "aliases",
+    multiple=True,
+    help="Add an additional FQDN as a SAN on the ACM cert + an "
+    "extra A record. Repeat --alias N times for N aliases. "
+    "Requires --domain.",
+)
+@click.option(
+    "--route53-zone",
+    "route53_zone",
+    default=None,
+    help="Override the Route 53 hosted-zone name (defaults to "
+    "--domain with the leftmost label dropped). Use when "
+    "your zone is something other than parent-of-FQDN.",
+)
 @click.pass_context
-def up_cmd(ctx, from_compose, public_service, region, aws_profile,
-           testing_defaults, ttl, dev_mode, domain, aliases, route53_zone):
+def up_cmd(
+    ctx,
+    from_compose,
+    public_service,
+    region,
+    aws_profile,
+    testing_defaults,
+    ttl,
+    dev_mode,
+    domain,
+    aliases,
+    route53_zone,
+):
     """One-shot: scaffold rc.yml (if missing), deploy, push secrets, print ALB URL.
 
     The "I have a docker-compose.yml — get me a running stack" command. With
@@ -65,7 +114,7 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
     then runs the deploy and secrets-push pipeline. Idempotent: rerun on an
     unchanged config does the no-op terraform apply and a forced rollout.
     """
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     target = Path(config_path)
 
     if aliases and not domain:
@@ -81,6 +130,7 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
                 f"scaffold inline, or run `rc init --from-compose <path>` first."
             )
         from remote_compose.init_from_compose import generate_v2_rc_yml
+
         click.echo(f"Scaffolding {target} from {from_compose}...")
         text = generate_v2_rc_yml(
             Path(from_compose),
@@ -96,6 +146,7 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
     if domain:
         from remote_compose.init_from_compose import _patch_rc_yml_domain
         from remote_compose.init_from_compose import _zone_from_domain_drop_leftmost
+
         # rc-d7s: when rc.yml exists and declares provider_config.ecs.aws_profile,
         # use it as the default for the Route 53 pre-flight. Without this, the
         # pre-flight uses --aws-profile=None (no boto3 profile, may differ from
@@ -106,11 +157,10 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
         if target.exists():
             try:
                 import yaml as _yaml
+
                 rc_raw = _yaml.safe_load(target.read_text()) or {}
                 if isinstance(rc_raw, dict):
-                    ecs_cfg = (
-                        (rc_raw.get("provider_config") or {}).get("ecs") or {}
-                    )
+                    ecs_cfg = (rc_raw.get("provider_config") or {}).get("ecs") or {}
                     effective_profile = effective_profile or ecs_cfg.get("aws_profile")
                     effective_region = ecs_cfg.get("region") or effective_region
             except Exception:
@@ -118,8 +168,10 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
         zone_check = route53_zone or _zone_from_domain_drop_leftmost(domain)
         try:
             import boto3
+
             session = boto3.Session(
-                profile_name=effective_profile, region_name=effective_region,
+                profile_name=effective_profile,
+                region_name=effective_region,
             )
             r53 = session.client("route53")
             zones = r53.list_hosted_zones().get("HostedZones") or []
@@ -141,7 +193,10 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
             )
         try:
             wired = _patch_rc_yml_domain(
-                target, domain, list(aliases or []), route53_zone=route53_zone,
+                target,
+                domain,
+                list(aliases or []),
+                route53_zone=route53_zone,
             )
         except ValueError as exc:
             raise click.ClickException(f"--domain: {exc}")
@@ -162,8 +217,11 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
             rc_raw_existing = yaml.safe_load(target.read_text()) or {}
         except yaml.YAMLError:
             rc_raw_existing = {}
-        compose_field = rc_raw_existing.get("compose_file") if isinstance(
-            rc_raw_existing, dict) else None
+        compose_field = (
+            rc_raw_existing.get("compose_file")
+            if isinstance(rc_raw_existing, dict)
+            else None
+        )
         if compose_field:
             cp = Path(compose_field)
             if not cp.is_absolute():
@@ -173,6 +231,7 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
     if compose_path_for_autofix is not None:
         try:
             from remote_compose.init_from_compose import auto_fix_nginx_if_needed
+
             result = auto_fix_nginx_if_needed(target, compose_path_for_autofix)
         except Exception as exc:
             click.echo(f"  WARN: nginx auto-fix skipped: {exc}", err=True)
@@ -203,11 +262,16 @@ def up_cmd(ctx, from_compose, public_service, region, aws_profile,
             )
 
     from remote_compose.cli_v2 import (
-        dispatch_if_v2, run_auto_on_deploy_hooks_for_path,
+        dispatch_if_v2,
+        run_auto_on_deploy_hooks_for_path,
     )
+
     if not dispatch_if_v2(
-        str(target), 'deploy',
-        ttl=ttl, dev=dev_mode, defer_lifecycle_hooks=True,
+        str(target),
+        "deploy",
+        ttl=ttl,
+        dev=dev_mode,
+        defer_lifecycle_hooks=True,
         # rc-1bk: defer the force-roll until after _secrets_push_v2 below
         # populates SM. Otherwise the deploy rolls services with
         # placeholder secrets and tasks fail to start, which then hangs

@@ -19,7 +19,7 @@ class TestParse:
         assert parse(p) == {"FOO": "1", "BAR": "two"}
 
     def test_strips_quotes(self, tmp_path):
-        p = _write(tmp_path, 'A="hello"\nB=\'world\'\n')
+        p = _write(tmp_path, "A=\"hello\"\nB='world'\n")
         assert parse(p) == {"A": "hello", "B": "world"}
 
     def test_preserves_mismatched_quotes(self, tmp_path):

@@ -58,7 +58,7 @@ class ECSDeploymentService(BaseService):
         ecr_service: Optional[ECRService] = None,
         image_build_service: Optional[ImageBuildService] = None,
         efs_service: Optional[EFSService] = None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.ecs_service = ecs_service or ECSService()
@@ -103,8 +103,8 @@ class ECSDeploymentService(BaseService):
         compose_file_path: str,
         project_name: Optional[str] = None,
         environment: Optional[Dict[str, str]] = None,
-        version: str = '',
-        deployed_by: str = 'system',
+        version: str = "",
+        deployed_by: str = "system",
         desired_count: int = 1,
         cpu: Optional[str] = None,
         memory: Optional[str] = None,
@@ -155,10 +155,14 @@ class ECSDeploymentService(BaseService):
 
         try:
             self._log_step(deployment, "Starting ECS deployment")
-            self._log_step(deployment, f"Cluster: {cluster.name} ({cluster.aws_region})")
+            self._log_step(
+                deployment, f"Cluster: {cluster.name} ({cluster.aws_region})"
+            )
 
             # Step 1: Convert compose to task definition
-            self._log_step(deployment, "Converting docker-compose to ECS task definition")
+            self._log_step(
+                deployment, "Converting docker-compose to ECS task definition"
+            )
             task_definition = self._convert_compose(
                 compose_path=compose_path,
                 cluster=cluster,
@@ -169,18 +173,20 @@ class ECSDeploymentService(BaseService):
             )
 
             for warning in self.compose_converter.warnings:
-                self._log_step(deployment, f"Warning: {warning}", level='warning')
+                self._log_step(deployment, f"Warning: {warning}", level="warning")
 
             self._log_step(
                 deployment,
                 f"Task definition: {task_definition.name} "
-                f"(CPU: {task_definition.cpu}, Memory: {task_definition.memory}MB)"
+                f"(CPU: {task_definition.cpu}, Memory: {task_definition.memory}MB)",
             )
 
             # Step 2: Register task definition in AWS
             self._log_step(deployment, "Registering task definition in AWS")
             task_definition = self.ecs_service.register_task_definition(task_definition)
-            self._log_step(deployment, f"Registered: {task_definition.aws_task_definition_arn}")
+            self._log_step(
+                deployment, f"Registered: {task_definition.aws_task_definition_arn}"
+            )
 
             # Step 3: Create or update service
             ecs_service = self._get_or_create_service(
@@ -213,7 +219,7 @@ class ECSDeploymentService(BaseService):
                 )
                 self._log_step(
                     deployment,
-                    f"Service stable: {ecs_service.running_count}/{ecs_service.desired_count} tasks running"
+                    f"Service stable: {ecs_service.running_count}/{ecs_service.desired_count} tasks running",
                 )
 
             # Step 5: Finalize deployment
@@ -222,12 +228,14 @@ class ECSDeploymentService(BaseService):
 
             deployment.status = Deployment.Status.SUCCESS
             deployment.completed_at = end_time
-            deployment.metadata.update({
-                'task_definition_arn': task_definition.aws_task_definition_arn,
-                'service_arn': ecs_service.aws_service_arn,
-                'running_count': ecs_service.running_count,
-                'cluster_arn': cluster.aws_cluster_arn,
-            })
+            deployment.metadata.update(
+                {
+                    "task_definition_arn": task_definition.aws_task_definition_arn,
+                    "service_arn": ecs_service.aws_service_arn,
+                    "running_count": ecs_service.running_count,
+                    "cluster_arn": cluster.aws_cluster_arn,
+                }
+            )
 
             # Only save if we have a valid deployment record
             if deployment.id:
@@ -245,18 +253,18 @@ class ECSDeploymentService(BaseService):
             self.audit_service.log(
                 action=AuditAction.DEPLOYMENT_COMPLETED,
                 actor=deployed_by,
-                resource_type='ecs_deployment',
+                resource_type="ecs_deployment",
                 resource_id=deployment.id if deployment.id else None,
                 resource_name=project_name,
                 details={
-                    'cluster': cluster.name,
-                    'project': project_name,
-                    'version': version,
-                    'duration': duration,
+                    "cluster": cluster.name,
+                    "project": project_name,
+                    "version": version,
+                    "duration": duration,
                 },
             )
 
-            self.notify_observers('ecs_deployment_success', deployment=deployment)
+            self.notify_observers("ecs_deployment_success", deployment=deployment)
             return deployment
 
         except Exception as e:
@@ -271,24 +279,26 @@ class ECSDeploymentService(BaseService):
             if deployment.id:
                 deployment.save()
 
-            self._log_step(deployment, f"Deployment failed: {e}", level='error')
+            self._log_step(deployment, f"Deployment failed: {e}", level="error")
 
             self.audit_service.log(
                 action=AuditAction.DEPLOYMENT_FAILED,
                 actor=deployed_by,
-                resource_type='ecs_deployment',
+                resource_type="ecs_deployment",
                 resource_id=deployment.id if deployment.id else None,
                 resource_name=project_name,
                 details={
-                    'cluster': cluster.name,
-                    'project': project_name,
-                    'error': str(e),
+                    "cluster": cluster.name,
+                    "project": project_name,
+                    "error": str(e),
                 },
                 success=False,
                 error_message=str(e),
             )
 
-            self.notify_observers('ecs_deployment_failed', deployment=deployment, error=e)
+            self.notify_observers(
+                "ecs_deployment_failed", deployment=deployment, error=e
+            )
             raise ECSDeploymentError(f"Deployment failed: {e}")
 
     def deploy_with_pipeline(
@@ -296,34 +306,27 @@ class ECSDeploymentService(BaseService):
         cluster: ECSCluster,
         compose_file_path: str,
         project_name: Optional[str] = None,
-
         # Build options
         build_images: bool = True,
         force_rebuild: bool = False,
         push_images: bool = True,
-        image_tag: str = 'latest',
-
+        image_tag: str = "latest",
         # Environment
         environment: Optional[Dict[str, str]] = None,
-
         # Volume handling
         create_efs_for_volumes: bool = True,
-
         # Deployment
-        version: str = '',
-        deployed_by: str = 'system',
+        version: str = "",
+        deployed_by: str = "system",
         desired_count: int = 1,
         cpu: Optional[str] = None,
         memory: Optional[str] = None,
         wait_for_stable: bool = True,
         timeout: int = 300,
-
         # Behavior
         strict_mode: bool = False,
         dry_run: bool = False,
-
         target: Optional[DeploymentTarget] = None,
-
         # Event handler for observability
         event_handler: Optional[callable] = None,
     ) -> Deployment:
@@ -385,29 +388,23 @@ class ECSDeploymentService(BaseService):
             compose_file_path=compose_path,
             project_name=project_name,
             image_tag=image_tag,
-
             # Build options
             build_images=build_images,
             force_rebuild=force_rebuild,
             push_images=push_images,
-
             # Environment
             environment=environment or {},
-
             # Volume handling
             create_efs_for_volumes=create_efs_for_volumes,
-
             # Deployment settings
             desired_count=desired_count,
             cpu=cpu,
             memory=memory,
             wait_for_stable=wait_for_stable,
             timeout=timeout,
-
             # Behavior
             strict_mode=strict_mode,
             dry_run=dry_run,
-
             # Tracking
             deployed_by=deployed_by,
             version=version,
@@ -423,18 +420,18 @@ class ECSDeploymentService(BaseService):
 
         # Default logging handler
         def log_handler(event_type, **kwargs):
-            step = kwargs.get('step', '')
-            message = kwargs.get('message', '')
-            if event_type == 'step_started':
+            step = kwargs.get("step", "")
+            message = kwargs.get("message", "")
+            if event_type == "step_started":
                 self.log_info(f"Step started: {step}")
-            elif event_type == 'step_completed':
+            elif event_type == "step_completed":
                 self.log_info(f"Step completed: {step} - {message}")
-            elif event_type == 'step_failed':
+            elif event_type == "step_failed":
                 self.log_error(f"Step failed: {step} - {message}")
-            elif event_type == 'pipeline_completed':
-                duration = kwargs.get('duration', 0)
+            elif event_type == "pipeline_completed":
+                duration = kwargs.get("duration", 0)
                 self.log_info(f"Pipeline completed in {duration:.1f}s")
-            elif event_type == 'rollback_started':
+            elif event_type == "rollback_started":
                 self.log_warning("Rollback started due to failure")
 
         pipeline.attach_event_handler(log_handler)
@@ -447,22 +444,22 @@ class ECSDeploymentService(BaseService):
             self.audit_service.log(
                 action=AuditAction.DEPLOYMENT_COMPLETED,
                 actor=deployed_by,
-                resource_type='ecs_pipeline_deployment',
+                resource_type="ecs_pipeline_deployment",
                 resource_id=context.deployment.id if context.deployment else None,
                 resource_name=project_name,
                 details={
-                    'cluster': cluster.name,
-                    'project': project_name,
-                    'version': version,
-                    'duration': result.duration_seconds,
-                    'steps_completed': result.completed_steps,
+                    "cluster": cluster.name,
+                    "project": project_name,
+                    "version": version,
+                    "duration": result.duration_seconds,
+                    "steps_completed": result.completed_steps,
                 },
             )
 
             self.notify_observers(
-                'ecs_pipeline_deployment_success',
+                "ecs_pipeline_deployment_success",
                 deployment=context.deployment,
-                result=result
+                result=result,
             )
 
             return context.deployment
@@ -474,25 +471,25 @@ class ECSDeploymentService(BaseService):
             self.audit_service.log(
                 action=AuditAction.DEPLOYMENT_FAILED,
                 actor=deployed_by,
-                resource_type='ecs_pipeline_deployment',
+                resource_type="ecs_pipeline_deployment",
                 resource_id=context.deployment.id if context.deployment else None,
                 resource_name=project_name,
                 details={
-                    'cluster': cluster.name,
-                    'project': project_name,
-                    'failed_step': result.failed_step,
-                    'completed_steps': result.completed_steps,
-                    'error': error_message,
+                    "cluster": cluster.name,
+                    "project": project_name,
+                    "failed_step": result.failed_step,
+                    "completed_steps": result.completed_steps,
+                    "error": error_message,
                 },
                 success=False,
                 error_message=error_message,
             )
 
             self.notify_observers(
-                'ecs_pipeline_deployment_failed',
+                "ecs_pipeline_deployment_failed",
                 deployment=context.deployment,
                 error=result.error,
-                failed_step=result.failed_step
+                failed_step=result.failed_step,
             )
 
             raise ECSDeploymentError(
@@ -505,7 +502,7 @@ class ECSDeploymentService(BaseService):
         compose_file_path: Optional[str] = None,
         force_new_deployment: bool = False,
         desired_count: Optional[int] = None,
-        deployed_by: str = 'system',
+        deployed_by: str = "system",
         wait_for_stable: bool = True,
         timeout: int = 300,
     ) -> Deployment:
@@ -520,14 +517,14 @@ class ECSDeploymentService(BaseService):
 
         deployment = Deployment.objects.create(
             project_name=ecs_service.name,
-            version='update',
+            version="update",
             deployed_by=deployed_by,
             status=Deployment.Status.RUNNING,
             metadata={
-                'type': 'ecs_update',
-                'service': ecs_service.name,
-                'cluster': cluster.name,
-            }
+                "type": "ecs_update",
+                "service": ecs_service.name,
+                "cluster": cluster.name,
+            },
         )
 
         try:
@@ -546,14 +543,17 @@ class ECSDeploymentService(BaseService):
                 )
 
                 self._log_step(deployment, "Registering new task definition")
-                task_definition = self.ecs_service.register_task_definition(task_definition)
+                task_definition = self.ecs_service.register_task_definition(
+                    task_definition
+                )
 
             self._log_step(deployment, "Updating service")
             ecs_service = self.ecs_service.update_service(
                 ecs_service=ecs_service,
                 task_definition=task_definition,
                 desired_count=desired_count,
-                force_new_deployment=force_new_deployment or compose_file_path is not None,
+                force_new_deployment=force_new_deployment
+                or compose_file_path is not None,
             )
 
             if wait_for_stable:
@@ -587,7 +587,7 @@ class ECSDeploymentService(BaseService):
             deployment.completed_at = timezone.now()
             deployment.save()
 
-            self._log_step(deployment, f"Update failed: {e}", level='error')
+            self._log_step(deployment, f"Update failed: {e}", level="error")
             raise
 
     def scale(
@@ -609,7 +609,9 @@ class ECSDeploymentService(BaseService):
         Returns:
             Updated ECSService
         """
-        self.log_info(f"Scaling {ecs_service.name} from {ecs_service.desired_count} to {desired_count}")
+        self.log_info(
+            f"Scaling {ecs_service.name} from {ecs_service.desired_count} to {desired_count}"
+        )
 
         ecs_service = self.ecs_service.update_service(
             ecs_service=ecs_service,
@@ -640,15 +642,21 @@ class ECSDeploymentService(BaseService):
         current_task_def = ecs_service.task_definition
 
         if not to_task_definition:
-            previous = ECSTaskDefinition.objects.filter(
-                cluster=ecs_service.cluster,
-                name=current_task_def.name,
-                revision__lt=current_task_def.revision,
-                status=ECSTaskDefinition.Status.REGISTERED,
-            ).order_by('-revision').first()
+            previous = (
+                ECSTaskDefinition.objects.filter(
+                    cluster=ecs_service.cluster,
+                    name=current_task_def.name,
+                    revision__lt=current_task_def.revision,
+                    status=ECSTaskDefinition.Status.REGISTERED,
+                )
+                .order_by("-revision")
+                .first()
+            )
 
             if not previous:
-                raise ECSDeploymentError("No previous task definition found for rollback")
+                raise ECSDeploymentError(
+                    "No previous task definition found for rollback"
+                )
 
             to_task_definition = previous
 
@@ -698,25 +706,27 @@ class ECSDeploymentService(BaseService):
                 task_arns=task_arns,
             )
             for task in task_details:
-                tasks.append({
-                    'task_arn': task['taskArn'],
-                    'status': task['lastStatus'],
-                    'desired_status': task['desiredStatus'],
-                    'health': task.get('healthStatus', 'UNKNOWN'),
-                    'started_at': task.get('startedAt'),
-                })
+                tasks.append(
+                    {
+                        "task_arn": task["taskArn"],
+                        "status": task["lastStatus"],
+                        "desired_status": task["desiredStatus"],
+                        "health": task.get("healthStatus", "UNKNOWN"),
+                        "started_at": task.get("startedAt"),
+                    }
+                )
 
         return {
-            'service_name': ecs_service.name,
-            'cluster': ecs_service.cluster.name,
-            'status': ecs_service.status,
-            'desired_count': ecs_service.desired_count,
-            'running_count': ecs_service.running_count,
-            'pending_count': ecs_service.pending_count,
-            'is_healthy': ecs_service.is_healthy,
-            'task_definition': ecs_service.task_definition.full_arn,
-            'last_deployment': ecs_service.last_deployment_at,
-            'tasks': tasks,
+            "service_name": ecs_service.name,
+            "cluster": ecs_service.cluster.name,
+            "status": ecs_service.status,
+            "desired_count": ecs_service.desired_count,
+            "running_count": ecs_service.running_count,
+            "pending_count": ecs_service.pending_count,
+            "is_healthy": ecs_service.is_healthy,
+            "task_definition": ecs_service.task_definition.full_arn,
+            "last_deployment": ecs_service.last_deployment_at,
+            "tasks": tasks,
         }
 
     def list_services(
@@ -736,11 +746,13 @@ class ECSDeploymentService(BaseService):
                 status = self.get_service_status(ecs_service)
                 services.append(status)
             except Exception as e:
-                services.append({
-                    'service_name': ecs_service.name,
-                    'status': 'error',
-                    'error': str(e),
-                })
+                services.append(
+                    {
+                        "service_name": ecs_service.name,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
 
         return services
 
@@ -776,16 +788,20 @@ class ECSDeploymentService(BaseService):
 
         if environment:
             import yaml
+
             compose_dict = yaml.safe_load(content)
-            for service_name, service_config in compose_dict.get('services', {}).items():
-                existing_env = service_config.get('environment', {})
+            for service_name, service_config in compose_dict.get(
+                "services", {}
+            ).items():
+                existing_env = service_config.get("environment", {})
                 if isinstance(existing_env, list):
                     existing_env = {
-                        e.split('=')[0]: e.split('=')[1]
-                        for e in existing_env if '=' in e
+                        e.split("=")[0]: e.split("=")[1]
+                        for e in existing_env
+                        if "=" in e
                     }
                 existing_env.update(environment)
-                service_config['environment'] = existing_env
+                service_config["environment"] = existing_env
             content = yaml.dump(compose_dict)
 
         return self.compose_converter.convert(
@@ -822,23 +838,25 @@ class ECSDeploymentService(BaseService):
                 credential=cluster.aws_credential,
             )
             # Only treat ACTIVE services as existing - INACTIVE services should be recreated
-            aws_status = aws_service.get('status', 'UNKNOWN')
-            if aws_status == 'ACTIVE':
+            aws_status = aws_service.get("status", "UNKNOWN")
+            if aws_status == "ACTIVE":
                 # Service exists and is active in AWS, import it to local DB
                 self.log_info(f"Found existing active service in AWS: {project_name}")
                 ecs_service = ECSServiceModel.objects.create(
                     name=project_name,
                     cluster=cluster,
                     task_definition=task_definition,
-                    aws_service_arn=aws_service['serviceArn'],
-                    desired_count=aws_service.get('desiredCount', desired_count),
-                    running_count=aws_service.get('runningCount', 0),
-                    pending_count=aws_service.get('pendingCount', 0),
+                    aws_service_arn=aws_service["serviceArn"],
+                    desired_count=aws_service.get("desiredCount", desired_count),
+                    running_count=aws_service.get("runningCount", 0),
+                    pending_count=aws_service.get("pendingCount", 0),
                     status=ECSServiceModel.ServiceStatus.ACTIVE,
                 )
                 return ecs_service
             else:
-                self.log_info(f"Found {aws_status} service in AWS: {project_name} - will create new")
+                self.log_info(
+                    f"Found {aws_status} service in AWS: {project_name} - will create new"
+                )
         except Exception:
             # Service doesn't exist in AWS, create new
             pass
@@ -874,17 +892,17 @@ class ECSDeploymentService(BaseService):
             status=Deployment.Status.RUNNING,
             started_at=timezone.now(),
             metadata={
-                'type': 'ecs',
-                'cluster_name': cluster.name,
-                'cluster_arn': cluster.aws_cluster_arn,
-                'region': cluster.aws_region,
+                "type": "ecs",
+                "cluster_name": cluster.name,
+                "cluster_arn": cluster.aws_cluster_arn,
+                "region": cluster.aws_region,
             },
         )
 
         # If we have a target, use it. Otherwise we need to handle ECS without target/context
         if target:
             deployment.target = target
-            if hasattr(target, 'contexts') and target.contexts.exists():
+            if hasattr(target, "contexts") and target.contexts.exists():
                 deployment.context = target.contexts.first()
 
         # For ECS deployments without a target, we need to create placeholder relationships
@@ -901,23 +919,23 @@ class ECSDeploymentService(BaseService):
         self,
         deployment: Deployment,
         message: str,
-        level: str = 'info',
+        level: str = "info",
     ) -> None:
         """Log a deployment step."""
         # Always print to stdout for visibility
-        prefix = ''
-        if level == 'warning':
-            prefix = 'Warning: '
-        elif level == 'error':
-            prefix = 'ERROR: '
+        prefix = ""
+        if level == "warning":
+            prefix = "Warning: "
+        elif level == "error":
+            prefix = "ERROR: "
         print(f"{prefix}{message}")
 
         # Only save to database if deployment is saved
         if deployment.id:
             log_level_map = {
-                'info': DeploymentLog.LogLevel.INFO,
-                'warning': DeploymentLog.LogLevel.WARNING,
-                'error': DeploymentLog.LogLevel.ERROR,
+                "info": DeploymentLog.LogLevel.INFO,
+                "warning": DeploymentLog.LogLevel.WARNING,
+                "error": DeploymentLog.LogLevel.ERROR,
             }
 
             DeploymentLog.objects.create(
@@ -927,9 +945,9 @@ class ECSDeploymentService(BaseService):
             )
 
         # Always log to console/service logger
-        if level == 'error':
+        if level == "error":
             self.log_error(message)
-        elif level == 'warning':
+        elif level == "warning":
             self.log_warning(message)
         else:
             self.log_info(message)

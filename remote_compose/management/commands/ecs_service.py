@@ -9,63 +9,71 @@ from remote_compose.services import ECSService as ECSServiceAPI, ECSDeploymentSe
 
 
 class Command(BaseCommand):
-    help = 'Manage ECS services'
+    help = "Manage ECS services"
 
     def add_arguments(self, parser):
-        subparsers = parser.add_subparsers(dest='action', help='Action to perform')
+        subparsers = parser.add_subparsers(dest="action", help="Action to perform")
 
         # List services
-        list_parser = subparsers.add_parser('list', help='List ECS services')
-        list_parser.add_argument('--cluster', help='Filter by cluster name')
+        list_parser = subparsers.add_parser("list", help="List ECS services")
+        list_parser.add_argument("--cluster", help="Filter by cluster name")
 
         # Show service
-        show_parser = subparsers.add_parser('show', help='Show service details')
-        show_parser.add_argument('name', help='Service name')
-        show_parser.add_argument('--cluster', required=True, help='Cluster name')
+        show_parser = subparsers.add_parser("show", help="Show service details")
+        show_parser.add_argument("name", help="Service name")
+        show_parser.add_argument("--cluster", required=True, help="Cluster name")
 
         # Scale service
-        scale_parser = subparsers.add_parser('scale', help='Scale a service')
-        scale_parser.add_argument('name', help='Service name')
-        scale_parser.add_argument('--cluster', required=True, help='Cluster name')
-        scale_parser.add_argument('--count', type=int, required=True, help='Desired task count')
-        scale_parser.add_argument('--no-wait', action='store_true', help='Do not wait for scaling')
+        scale_parser = subparsers.add_parser("scale", help="Scale a service")
+        scale_parser.add_argument("name", help="Service name")
+        scale_parser.add_argument("--cluster", required=True, help="Cluster name")
+        scale_parser.add_argument(
+            "--count", type=int, required=True, help="Desired task count"
+        )
+        scale_parser.add_argument(
+            "--no-wait", action="store_true", help="Do not wait for scaling"
+        )
 
         # Restart service
-        restart_parser = subparsers.add_parser('restart', help='Force new deployment')
-        restart_parser.add_argument('name', help='Service name')
-        restart_parser.add_argument('--cluster', required=True, help='Cluster name')
-        restart_parser.add_argument('--no-wait', action='store_true', help='Do not wait')
+        restart_parser = subparsers.add_parser("restart", help="Force new deployment")
+        restart_parser.add_argument("name", help="Service name")
+        restart_parser.add_argument("--cluster", required=True, help="Cluster name")
+        restart_parser.add_argument(
+            "--no-wait", action="store_true", help="Do not wait"
+        )
 
         # Delete service
-        delete_parser = subparsers.add_parser('delete', help='Delete a service')
-        delete_parser.add_argument('name', help='Service name')
-        delete_parser.add_argument('--cluster', required=True, help='Cluster name')
-        delete_parser.add_argument('--force', action='store_true', help='Force delete')
+        delete_parser = subparsers.add_parser("delete", help="Delete a service")
+        delete_parser.add_argument("name", help="Service name")
+        delete_parser.add_argument("--cluster", required=True, help="Cluster name")
+        delete_parser.add_argument("--force", action="store_true", help="Force delete")
 
         # Logs
-        logs_parser = subparsers.add_parser('logs', help='Show recent deployment logs')
-        logs_parser.add_argument('name', help='Service name')
-        logs_parser.add_argument('--cluster', required=True, help='Cluster name')
-        logs_parser.add_argument('--limit', type=int, default=50, help='Number of log entries')
+        logs_parser = subparsers.add_parser("logs", help="Show recent deployment logs")
+        logs_parser.add_argument("name", help="Service name")
+        logs_parser.add_argument("--cluster", required=True, help="Cluster name")
+        logs_parser.add_argument(
+            "--limit", type=int, default=50, help="Number of log entries"
+        )
 
     def handle(self, *args, **options):
-        action = options.get('action')
+        action = options.get("action")
 
         if not action:
-            self.print_help('manage.py', 'ecs_service')
+            self.print_help("manage.py", "ecs_service")
             return
 
-        if action == 'list':
+        if action == "list":
             self.handle_list(options)
-        elif action == 'show':
+        elif action == "show":
             self.handle_show(options)
-        elif action == 'scale':
+        elif action == "scale":
             self.handle_scale(options)
-        elif action == 'restart':
+        elif action == "restart":
             self.handle_restart(options)
-        elif action == 'delete':
+        elif action == "delete":
             self.handle_delete(options)
-        elif action == 'logs':
+        elif action == "logs":
             self.handle_logs(options)
 
     def _get_service(self, name, cluster_name):
@@ -82,14 +90,16 @@ class Command(BaseCommand):
     def handle_list(self, options):
         queryset = ECSServiceModel.objects.all()
 
-        if options.get('cluster'):
-            queryset = queryset.filter(cluster__name=options['cluster'])
+        if options.get("cluster"):
+            queryset = queryset.filter(cluster__name=options["cluster"])
 
         if not queryset.exists():
             self.stdout.write("No services found")
             return
 
-        self.stdout.write(f"{'Service':<25} {'Cluster':<20} {'Status':<12} {'Running':<10} {'Desired':<10}")
+        self.stdout.write(
+            f"{'Service':<25} {'Cluster':<20} {'Status':<12} {'Running':<10} {'Desired':<10}"
+        )
         self.stdout.write("-" * 80)
 
         for service in queryset:
@@ -99,7 +109,7 @@ class Command(BaseCommand):
             )
 
     def handle_show(self, options):
-        service = self._get_service(options['name'], options['cluster'])
+        service = self._get_service(options["name"], options["cluster"])
 
         deployment_service = ECSDeploymentService()
 
@@ -115,13 +125,13 @@ class Command(BaseCommand):
             self.stdout.write(f"  Running Count: {status['running_count']}")
             self.stdout.write(f"  Pending Count: {status['pending_count']}")
 
-            if status.get('last_deployment'):
+            if status.get("last_deployment"):
                 self.stdout.write(f"  Last Deployment: {status['last_deployment']}")
 
-            if status.get('tasks'):
+            if status.get("tasks"):
                 self.stdout.write(f"\n  Tasks ({len(status['tasks'])}):")
-                for task in status['tasks']:
-                    task_id = task['task_arn'].split('/')[-1][:12]
+                for task in status["tasks"]:
+                    task_id = task["task_arn"].split("/")[-1][:12]
                     self.stdout.write(
                         f"    - {task_id}: {task['status']} "
                         f"(health: {task['health']})"
@@ -129,14 +139,14 @@ class Command(BaseCommand):
 
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"Could not fetch live status: {e}"))
-            self.stdout.write(f"\nLocal data:")
+            self.stdout.write("\nLocal data:")
             self.stdout.write(f"  Status: {service.status}")
             self.stdout.write(f"  Desired: {service.desired_count}")
             self.stdout.write(f"  Running: {service.running_count}")
 
     def handle_scale(self, options):
-        service = self._get_service(options['name'], options['cluster'])
-        count = options['count']
+        service = self._get_service(options["name"], options["cluster"])
+        count = options["count"]
 
         self.stdout.write(
             f"Scaling {service.name} from {service.desired_count} to {count} tasks..."
@@ -148,7 +158,7 @@ class Command(BaseCommand):
             service = deployment_service.scale(
                 ecs_service=service,
                 desired_count=count,
-                wait_for_stable=not options['no_wait'],
+                wait_for_stable=not options["no_wait"],
             )
 
             self.stdout.write(
@@ -161,7 +171,7 @@ class Command(BaseCommand):
             raise CommandError(f"Scaling failed: {e}")
 
     def handle_restart(self, options):
-        service = self._get_service(options['name'], options['cluster'])
+        service = self._get_service(options["name"], options["cluster"])
 
         self.stdout.write(f"Forcing new deployment for {service.name}...")
 
@@ -173,7 +183,7 @@ class Command(BaseCommand):
                 force_new_deployment=True,
             )
 
-            if not options['no_wait']:
+            if not options["no_wait"]:
                 self.stdout.write("Waiting for deployment to stabilize...")
                 service = ecs_api.wait_for_service_stable(service)
 
@@ -187,12 +197,12 @@ class Command(BaseCommand):
             raise CommandError(f"Restart failed: {e}")
 
     def handle_delete(self, options):
-        service = self._get_service(options['name'], options['cluster'])
+        service = self._get_service(options["name"], options["cluster"])
 
-        if not options.get('force'):
+        if not options.get("force"):
             self.stdout.write(f"About to delete service: {service.name}")
             confirm = input("Type 'yes' to confirm: ")
-            if confirm != 'yes':
+            if confirm != "yes":
                 self.stdout.write("Cancelled")
                 return
 
@@ -203,7 +213,7 @@ class Command(BaseCommand):
         try:
             ecs_api.delete_service(
                 ecs_service=service,
-                force=options.get('force', False),
+                force=options.get("force", False),
             )
             self.stdout.write(self.style.SUCCESS(f"Service deleted: {service.name}"))
 
@@ -211,7 +221,7 @@ class Command(BaseCommand):
             raise CommandError(f"Delete failed: {e}")
 
     def handle_logs(self, options):
-        service = self._get_service(options['name'], options['cluster'])
+        service = self._get_service(options["name"], options["cluster"])
 
         from remote_compose.models import DeploymentLog
 
@@ -222,19 +232,21 @@ class Command(BaseCommand):
             return
 
         for deployment in deployments:
-            self.stdout.write(f"\n--- Deployment {deployment.id} ({deployment.status}) ---")
+            self.stdout.write(
+                f"\n--- Deployment {deployment.id} ({deployment.status}) ---"
+            )
             self.stdout.write(f"Started: {deployment.created_at}")
 
-            logs = DeploymentLog.objects.filter(
-                deployment=deployment
-            ).order_by('timestamp')[:options['limit']]
+            logs = DeploymentLog.objects.filter(deployment=deployment).order_by(
+                "timestamp"
+            )[: options["limit"]]
 
             for log in logs:
                 # remote-compose-mps: model field is `log_level`, not `level`.
                 level_style = {
-                    'info': lambda x: x,
-                    'warning': self.style.WARNING,
-                    'error': self.style.ERROR,
+                    "info": lambda x: x,
+                    "warning": self.style.WARNING,
+                    "error": self.style.ERROR,
                 }.get(log.log_level, lambda x: x)
 
                 self.stdout.write(

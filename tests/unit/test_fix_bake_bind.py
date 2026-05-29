@@ -16,8 +16,12 @@ import pytest
 from remote_compose.fix_bake_bind import bake_bind_mount_source
 
 
-def _scaffold(tmp_path: Path, compose_yaml: str, dockerfile_content: str = None,
-              dockerfile_rel: str = "compose/local/django/Dockerfile") -> Path:
+def _scaffold(
+    tmp_path: Path,
+    compose_yaml: str,
+    dockerfile_content: str = None,
+    dockerfile_rel: str = "compose/local/django/Dockerfile",
+) -> Path:
     """Lay out a compose-style project with a Dockerfile."""
     compose = tmp_path / "docker-compose.yml"
     compose.write_text(compose_yaml)
@@ -29,7 +33,9 @@ def _scaffold(tmp_path: Path, compose_yaml: str, dockerfile_content: str = None,
 
 class TestHappyPath:
     def test_appends_copy_for_relative_source_bind_mount(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               django:
                 build:
@@ -37,7 +43,8 @@ class TestHappyPath:
                   dockerfile: compose/local/django/Dockerfile
                 volumes:
                   - ./backend:/app
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "django")
         assert result.skipped_reason is None
         assert result.copies_added == [("./backend", "/app")]
@@ -46,7 +53,9 @@ class TestHappyPath:
         assert "rc-bys" in df
 
     def test_appends_multiple_copies(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               django:
                 build:
@@ -56,7 +65,8 @@ class TestHappyPath:
                   - ./backend:/app
                   - ./scripts:/app/scripts
                   - ./test-fixtures:/app/test-fixtures
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "django")
         assert len(result.copies_added) == 3
         df = (tmp_path / "compose/local/django/Dockerfile").read_text()
@@ -66,7 +76,9 @@ class TestHappyPath:
 
 class TestSkipPaths:
     def test_skips_named_volume(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               postgres:
                 build:
@@ -76,13 +88,16 @@ class TestSkipPaths:
                   - postgres_data:/var/lib/postgresql/data
             volumes:
               postgres_data: {}
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "postgres")
         assert result.skipped_reason is not None
         assert "no source bind mounts" in result.skipped_reason
 
     def test_skips_x11_socket(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               celerybrowser:
                 build:
@@ -90,12 +105,15 @@ class TestSkipPaths:
                   dockerfile: compose/local/django/Dockerfile
                 volumes:
                   - /tmp/.X11-unix:/tmp/.X11-unix
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "celerybrowser")
         assert result.skipped_reason is not None
 
     def test_skips_postgres_data(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               postgres:
                 build:
@@ -103,7 +121,8 @@ class TestSkipPaths:
                   dockerfile: compose/local/django/Dockerfile
                 volumes:
                   - ./pg_data:/var/lib/postgresql/data
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "postgres")
         # /var/lib/postgresql/data is in _SKIP_CONTAINER_PATHS
         assert result.skipped_reason is not None
@@ -111,22 +130,28 @@ class TestSkipPaths:
 
 class TestErrorPaths:
     def test_unknown_service_raises(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               django:
                 build:
                   context: .
                   dockerfile: compose/local/django/Dockerfile
-        """).strip())
+        """).strip(),
+        )
         with pytest.raises(ValueError, match="not in compose"):
             bake_bind_mount_source(compose, "doesnotexist")
 
     def test_image_only_service_raises(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               redis:
                 image: redis:6
-        """).strip())
+        """).strip(),
+        )
         with pytest.raises(ValueError, match="no `build:` stanza"):
             bake_bind_mount_source(compose, "redis")
 
@@ -255,7 +280,9 @@ class TestDockerignoreAwareness:
     def test_no_dockerignore_keeps_old_behavior(self, tmp_path):
         # Backwards-compat: when there's no .dockerignore, every COPY is
         # appended exactly as before.
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               django:
                 build:
@@ -264,7 +291,8 @@ class TestDockerignoreAwareness:
                 volumes:
                   - ./backend:/app
                   - ./test-fixtures:/app/test-fixtures
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "django")
         assert ("./backend", "/app") in result.copies_added
         assert ("./test-fixtures", "/app/test-fixtures") in result.copies_added
@@ -294,7 +322,9 @@ class TestDockerignoreAwareness:
 
 class TestLongFormVolumes:
     def test_long_form_dict(self, tmp_path):
-        compose = _scaffold(tmp_path, textwrap.dedent("""
+        compose = _scaffold(
+            tmp_path,
+            textwrap.dedent("""
             services:
               django:
                 build:
@@ -304,6 +334,7 @@ class TestLongFormVolumes:
                   - type: bind
                     source: ./backend
                     target: /app
-        """).strip())
+        """).strip(),
+        )
         result = bake_bind_mount_source(compose, "django")
         assert result.copies_added == [("./backend", "/app")]

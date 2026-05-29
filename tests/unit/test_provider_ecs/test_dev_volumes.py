@@ -22,11 +22,13 @@ def _ctx(tmp_path: Path, services: dict, *, dev_mode: bool = False) -> DeployCon
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-1",
-            "cluster": "test",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-1",
+                "cluster": "test",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -39,14 +41,24 @@ def _ctx(tmp_path: Path, services: dict, *, dev_mode: bool = False) -> DeployCon
 # Production path: dev_volumes are inert when dev_mode is False
 # ---------------------------------------------------------------------------
 
+
 class TestDevModeOff:
     def test_dev_volumes_emit_nothing_when_dev_mode_false(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=False)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=False,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         # No dev EFS file system, no dev access points, no DevMode tag.
@@ -61,11 +73,18 @@ class TestDevModeOff:
     def test_no_dev_volumes_no_emission(self, tmp_path):
         """A dev-mode deploy with NO services declaring dev_volumes also
         emits no dev EFS — keeps the dev path opt-in per service."""
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -76,18 +95,33 @@ class TestDevModeOff:
 # Dev path: shared EFS file system + per-entry access point + task-def mount
 # ---------------------------------------------------------------------------
 
+
 class TestDevModeOn:
     def test_emits_one_shared_efs_per_project(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-            "worker": ServiceSpec(
-                name="worker", cpu=256, memory=512, type="worker",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+                "worker": ServiceSpec(
+                    name="worker",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -100,15 +134,26 @@ class TestDevModeOn:
         assert 'DevMode = "true"' in efs_tf
 
     def test_per_entry_access_point(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[
-                    {"name": "src", "source": "./backend", "mount": "/app"},
-                    {"name": "tpl", "source": "./templates", "mount": "/app/templates"},
-                ],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"},
+                        {
+                            "name": "tpl",
+                            "source": "./templates",
+                            "mount": "/app/templates",
+                        },
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -119,12 +164,21 @@ class TestDevModeOn:
         assert 'path = "/django__tpl"' in efs_tf
 
     def test_access_point_has_generic_dev_uid_gid(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -137,12 +191,21 @@ class TestDevModeOn:
     def test_efs_uses_elastic_throughput(self, tmp_path):
         """Elastic suits intermittent rc dev push spikes — bursting would
         exhaust credits on a big initial seed of a Django project."""
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -151,12 +214,21 @@ class TestDevModeOn:
         assert 'throughput_mode  = "elastic"' in dev_block
 
     def test_task_def_mounts_dev_volume_at_declared_path(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services_tf = (out / "services.tf").read_text()
@@ -171,20 +243,33 @@ class TestDevModeOn:
         """ECS rejects duplicate `volume name=` entries. Two dev mounts on
         one service therefore need distinct sourceVolume names even though
         they share the same EFS file system."""
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[
-                    {"name": "src", "source": "./backend", "mount": "/app"},
-                    {"name": "tpl", "source": "./templates", "mount": "/app/templates"},
-                ],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"},
+                        {
+                            "name": "tpl",
+                            "source": "./templates",
+                            "mount": "/app/templates",
+                        },
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services_tf = (out / "services.tf").read_text()
         # Two distinct sourceVolume names + two volume{} blocks.
-        django_block = services_tf.split('resource "aws_ecs_task_definition" "django"')[1]
+        django_block = services_tf.split('resource "aws_ecs_task_definition" "django"')[
+            1
+        ]
         django_block = django_block.split("resource ")[0]
         assert django_block.count("name = ") >= 2
         assert 'sourceVolume  = "dev-django-src"' in django_block
@@ -194,12 +279,21 @@ class TestDevModeOn:
         """Two tasks editing the same code dir on EFS = half-written .pyc
         files + import errors. Force stop-then-start for dev-mounted
         services, same as for stateful EFS volumes."""
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services_tf = (out / "services.tf").read_text()
@@ -214,18 +308,31 @@ class TestDevModeOn:
 # regardless of dev mode; dev_volumes ride alongside it.
 # ---------------------------------------------------------------------------
 
+
 class TestPersistentAndDevTogether:
     def test_persistent_and_dev_volumes_coexist(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
-            ),
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+                ),
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -240,17 +347,29 @@ class TestPersistentAndDevTogether:
     def test_persistent_volumes_emit_in_production_with_no_dev(self, tmp_path):
         """Production deploy (dev_mode=False): persistent volumes still
         provisioned, nothing emits DevMode artifacts."""
-        ctx = _ctx(tmp_path, {
-            "postgres": ServiceSpec(
-                name="postgres", cpu=512, memory=1024, type="infrastructure",
-                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
-            ),
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                # dev_volumes declared but dev_mode is off — must be inert.
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=False)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+                ),
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    # dev_volumes declared but dev_mode is off — must be inert.
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=False,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
@@ -264,18 +383,33 @@ class TestPersistentAndDevTogether:
 # under one shared file system.
 # ---------------------------------------------------------------------------
 
+
 class TestMultiServiceDevMounts:
     def test_two_services_share_one_dev_efs(self, tmp_path):
-        ctx = _ctx(tmp_path, {
-            "django": ServiceSpec(
-                name="django", cpu=512, memory=1024, type="application",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-            "celery": ServiceSpec(
-                name="celery", cpu=256, memory=512, type="worker",
-                dev_volumes=[{"name": "src", "source": "./backend", "mount": "/app"}],
-            ),
-        }, dev_mode=True)
+        ctx = _ctx(
+            tmp_path,
+            {
+                "django": ServiceSpec(
+                    name="django",
+                    cpu=512,
+                    memory=1024,
+                    type="application",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+                "celery": ServiceSpec(
+                    name="celery",
+                    cpu=256,
+                    memory=512,
+                    type="worker",
+                    dev_volumes=[
+                        {"name": "src", "source": "./backend", "mount": "/app"}
+                    ],
+                ),
+            },
+            dev_mode=True,
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()

@@ -14,7 +14,6 @@ repos.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,6 @@ from remote_compose.v1_migrate.discover import (
     discover,
 )
 
-
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "v1_migrate"
 V1_RC_YML = FIXTURES / "ss-debuggai-prod.rc.yml"
 INVENTORY_JSON = FIXTURES / "inventory.json"
@@ -35,6 +33,7 @@ INVENTORY_JSON = FIXTURES / "inventory.json"
 # ---------------------------------------------------------------------
 # V1Stack: parsed from rc v1 yaml
 # ---------------------------------------------------------------------
+
 
 class TestV1StackParse:
     def test_basic_shape(self):
@@ -79,6 +78,7 @@ class TestV1StackParse:
 # ResourceInventory: parsed from boto3 snapshot
 # ---------------------------------------------------------------------
 
+
 class TestResourceInventoryParse:
     def test_basic_shape(self):
         inv = ResourceInventory.from_json(INVENTORY_JSON)
@@ -103,7 +103,7 @@ class TestResourceInventoryParse:
 
     def test_alb_listeners(self):
         inv = ResourceInventory.from_json(INVENTORY_JSON)
-        ports = sorted(l.port for l in inv.alb.listeners)
+        ports = sorted(lst.port for lst in inv.alb.listeners)
         assert ports == [80, 443]
 
     def test_acm_cert_for_domain(self):
@@ -145,6 +145,7 @@ class TestResourceInventoryParse:
 # ---------------------------------------------------------------------
 # discover() composes V1Stack + ResourceInventory from real inputs
 # ---------------------------------------------------------------------
+
 
 class TestDiscoverComposite:
     def test_returns_pair(self, tmp_path):

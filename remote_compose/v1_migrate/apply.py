@@ -76,13 +76,13 @@ class PhaseResult:
 
 class Phase(ABC):
     @abstractmethod
-    def run(self) -> PhaseResult:
-        ...
+    def run(self) -> PhaseResult: ...
 
 
 # ---------------------------------------------------------------------
 # ValidatePhase — read-only
 # ---------------------------------------------------------------------
+
 
 class ValidatePhase(Phase):
     def __init__(self, plan: MigrationPlan, aws_session: Any = None):
@@ -105,7 +105,8 @@ class ValidatePhase(Phase):
                 fresh = re_discover()
             except Exception as e:
                 return PhaseResult(
-                    name="validate", ok=False,
+                    name="validate",
+                    ok=False,
                     details=f"re-discover failed: {e}",
                     elapsed_sec=time.time() - start,
                 )
@@ -143,6 +144,7 @@ class ValidatePhase(Phase):
 # EmitV2TerraformPhase
 # ---------------------------------------------------------------------
 
+
 class EmitV2TerraformPhase(Phase):
     def __init__(self, plan: MigrationPlan, output_dir: Path):
         self.plan = plan
@@ -154,21 +156,21 @@ class EmitV2TerraformPhase(Phase):
 
         # main.tf — minimal stub naming the modules referenced by imports.
         main_tf_lines = [
-            'terraform {',
+            "terraform {",
             '  required_version = ">= 1.5"',
-            '  required_providers {',
+            "  required_providers {",
             '    aws = { source = "hashicorp/aws", version = "~> 5.0" }',
-            '  }',
-            '}',
-            '',
+            "  }",
+            "}",
+            "",
             'provider "aws" {',
             f'  region  = "{self.plan.rc_v2_yml.get("provider_config", {}).get("ecs", {}).get("region", "")}"',
             f'  profile = "{self.plan.rc_v2_yml.get("provider_config", {}).get("ecs", {}).get("aws_profile", "")}"',
-            '}',
-            '',
-            '# Module references for imported resources.',
-            '# Concrete module bodies emitted by the v2 ECSProvider on the',
-            '# next `rc deploy` after this migration completes.',
+            "}",
+            "",
+            "# Module references for imported resources.",
+            "# Concrete module bodies emitted by the v2 ECSProvider on the",
+            "# next `rc deploy` after this migration completes.",
         ]
         (self.output_dir / "main.tf").write_text("\n".join(main_tf_lines) + "\n")
 
@@ -180,8 +182,11 @@ class EmitV2TerraformPhase(Phase):
 
         # rc.yml.v2 — the new config the operator will commit.
         import yaml as _yaml
+
         (self.output_dir / "rc.yml.v2").write_text(
-            _yaml.safe_dump(self.plan.rc_v2_yml, default_flow_style=False, sort_keys=False)
+            _yaml.safe_dump(
+                self.plan.rc_v2_yml, default_flow_style=False, sort_keys=False
+            )
         )
 
         return PhaseResult(
@@ -238,7 +243,8 @@ class ImportStatePhase(Phase):
         out_str, rc = self.terraform.init()
         if rc != 0:
             return PhaseResult(
-                name="import_state", ok=False,
+                name="import_state",
+                ok=False,
                 details=f"terraform init failed (rc={rc}): {out_str}",
                 elapsed_sec=time.time() - start,
             )
@@ -246,7 +252,8 @@ class ImportStatePhase(Phase):
         plan_out, plan_rc = self.terraform.plan()
         if _DESTROY_RE.search(plan_out) or _WILL_BE_DESTROYED_RE.search(plan_out):
             return PhaseResult(
-                name="import_state", ok=False,
+                name="import_state",
+                ok=False,
                 details=(
                     "ABORT: terraform plan shows destroy actions. "
                     f"Plan output:\n{plan_out}"
@@ -255,7 +262,8 @@ class ImportStatePhase(Phase):
             )
         if plan_rc not in (0, 2):
             return PhaseResult(
-                name="import_state", ok=False,
+                name="import_state",
+                ok=False,
                 details=f"terraform plan failed (rc={plan_rc}): {plan_out}",
                 elapsed_sec=time.time() - start,
             )
@@ -263,12 +271,14 @@ class ImportStatePhase(Phase):
         apply_out, apply_rc = self.terraform.apply()
         if apply_rc != 0:
             return PhaseResult(
-                name="import_state", ok=False,
+                name="import_state",
+                ok=False,
                 details=f"terraform apply failed (rc={apply_rc}): {apply_out}",
                 elapsed_sec=time.time() - start,
             )
         return PhaseResult(
-            name="import_state", ok=True,
+            name="import_state",
+            ok=True,
             details=f"sandbox-import green: {apply_out}",
             elapsed_sec=time.time() - start,
         )
@@ -277,6 +287,7 @@ class ImportStatePhase(Phase):
 # ---------------------------------------------------------------------
 # ServicesCutoverPhase
 # ---------------------------------------------------------------------
+
 
 class ServicesCutoverPhase(Phase):
     """The actual cutover.
@@ -316,11 +327,23 @@ class ServicesCutoverPhase(Phase):
         """
         # Fields RegisterTaskDefinition accepts.
         keep_top_level = {
-            "family", "taskRoleArn", "executionRoleArn", "networkMode",
-            "containerDefinitions", "volumes", "placementConstraints",
-            "requiresCompatibilities", "cpu", "memory", "tags",
-            "pidMode", "ipcMode", "proxyConfiguration",
-            "inferenceAccelerators", "ephemeralStorage", "runtimePlatform",
+            "family",
+            "taskRoleArn",
+            "executionRoleArn",
+            "networkMode",
+            "containerDefinitions",
+            "volumes",
+            "placementConstraints",
+            "requiresCompatibilities",
+            "cpu",
+            "memory",
+            "tags",
+            "pidMode",
+            "ipcMode",
+            "proxyConfiguration",
+            "inferenceAccelerators",
+            "ephemeralStorage",
+            "runtimePlatform",
         }
         out = {k: v for k, v in src.items() if k in keep_top_level}
         # Per-container surgery: replace secrets[], drop overlapping env keys.
@@ -329,15 +352,13 @@ class ServicesCutoverPhase(Phase):
         for c in out.get("containerDefinitions", []):
             c = dict(c)  # shallow copy
             c["secrets"] = [
-                {"name": k, "valueFrom": v}
-                for k, v in self.plan.secret_arn_map.items()
+                {"name": k, "valueFrom": v} for k, v in self.plan.secret_arn_map.items()
             ]
             # Drop env entries that collide with the secret set
             # (ECS rejects task defs where same key is in both).
             if "environment" in c:
                 c["environment"] = [
-                    e for e in c["environment"]
-                    if e.get("name") not in secret_names
+                    e for e in c["environment"] if e.get("name") not in secret_names
                 ]
             new_containers.append(c)
         out["containerDefinitions"] = new_containers
@@ -347,7 +368,8 @@ class ServicesCutoverPhase(Phase):
         start = time.time()
         cluster = (
             self.plan.rc_v2_yml.get("provider_config", {})
-            .get("ecs", {}).get("cluster", "")
+            .get("ecs", {})
+            .get("cluster", "")
         )
 
         # Discover existing services if caller didn't pre-list them.
@@ -355,13 +377,11 @@ class ServicesCutoverPhase(Phase):
         if not services and self.ecs_client is not None:
             try:
                 resp = self.ecs_client.list_services(cluster=cluster)
-                services = [
-                    arn.split("/")[-1]
-                    for arn in resp.get("serviceArns", [])
-                ]
+                services = [arn.split("/")[-1] for arn in resp.get("serviceArns", [])]
             except Exception as e:
                 return PhaseResult(
-                    name="services_cutover", ok=False,
+                    name="services_cutover",
+                    ok=False,
                     details=f"list_services failed: {e}",
                     elapsed_sec=time.time() - start,
                 )
@@ -371,12 +391,14 @@ class ServicesCutoverPhase(Phase):
             try:
                 # Read current task def for this service.
                 desc = self.ecs_client.describe_services(
-                    cluster=cluster, services=[svc_name],
+                    cluster=cluster,
+                    services=[svc_name],
                 )
                 svcs = desc.get("services", [])
                 if not svcs:
                     return PhaseResult(
-                        name="services_cutover", ok=False,
+                        name="services_cutover",
+                        ok=False,
                         details=f"service {svc_name} not found in {cluster}",
                         elapsed_sec=time.time() - start,
                     )
@@ -391,9 +413,7 @@ class ServicesCutoverPhase(Phase):
 
                 # Register + update.
                 reg = self.ecs_client.register_task_definition(**new_td_kwargs)
-                new_td_arn = reg.get("taskDefinition", {}).get(
-                    "taskDefinitionArn", ""
-                )
+                new_td_arn = reg.get("taskDefinition", {}).get("taskDefinitionArn", "")
                 self.ecs_client.update_service(
                     cluster=cluster,
                     service=svc_name,
@@ -402,7 +422,8 @@ class ServicesCutoverPhase(Phase):
                 rolled.append((svc_name, new_td_arn))
             except Exception as e:
                 return PhaseResult(
-                    name="services_cutover", ok=False,
+                    name="services_cutover",
+                    ok=False,
                     details=(
                         f"FAIL on service {svc_name!r}: {e}. "
                         f"Rolled so far: {rolled}. "
@@ -413,7 +434,8 @@ class ServicesCutoverPhase(Phase):
                 )
 
         return PhaseResult(
-            name="services_cutover", ok=True,
+            name="services_cutover",
+            ok=True,
             details=(
                 f"registered + rolled {len(rolled)} services: "
                 + ", ".join(f"{n}->{a.rsplit('/', 1)[-1]}" for n, a in rolled)
@@ -425,6 +447,7 @@ class ServicesCutoverPhase(Phase):
 # ---------------------------------------------------------------------
 # DecommissionV1Phase — tripwire on destructive AWS calls
 # ---------------------------------------------------------------------
+
 
 class DecommissionV1Phase(Phase):
     def __init__(
@@ -452,7 +475,8 @@ class DecommissionV1Phase(Phase):
                 shutil.move(str(self.v1_rc_yml_path), str(archived_path))
 
         return PhaseResult(
-            name="decommission_v1", ok=True,
+            name="decommission_v1",
+            ok=True,
             details=(
                 f"archived v1 rc.yml to {self.archive_dir} "
                 "(no SM/EFS/ALB/ACM mutation)"

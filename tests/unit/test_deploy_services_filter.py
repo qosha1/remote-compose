@@ -15,24 +15,23 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from remote_compose.provider.base import (
-    DeployContext,
-    DeployResult,
-    SecretRef,
-    ServiceSpec,
-)
+from remote_compose.provider.base import DeployContext, ServiceSpec
 from remote_compose.provider.fake import FakeProvider
-
 
 # ---------------------------------------------------------------------------
 # FakeProvider behavior
 # ---------------------------------------------------------------------------
 
+
 def _ctx(services=None):
     services = services or {
         "django": ServiceSpec(name="django", cpu=1024, memory=2048, type="application"),
-        "nginx": ServiceSpec(name="nginx", cpu=256, memory=512, type="proxy", public=True, port=80),
-        "postgres": ServiceSpec(name="postgres", cpu=512, memory=1024, type="infrastructure"),
+        "nginx": ServiceSpec(
+            name="nginx", cpu=256, memory=512, type="proxy", public=True, port=80
+        ),
+        "postgres": ServiceSpec(
+            name="postgres", cpu=512, memory=1024, type="infrastructure"
+        ),
     }
     return DeployContext(
         project="test-proj",
@@ -87,6 +86,7 @@ class TestFakeProviderServicesFilter:
 # ECSProvider._build_and_push_images filter (no real AWS / docker)
 # ---------------------------------------------------------------------------
 
+
 class TestEcsBuildFilter:
     def test_build_loop_filters_to_named_services(self):
         from remote_compose.provider.ecs.provider import ECSProvider
@@ -94,15 +94,24 @@ class TestEcsBuildFilter:
         # Two services with build_context, one without (nginx uses image)
         services = {
             "django": ServiceSpec(
-                name="django", cpu=1024, memory=2048, type="application",
+                name="django",
+                cpu=1024,
+                memory=2048,
+                type="application",
                 build_context=Path("/tmp/django"),
             ),
             "celery": ServiceSpec(
-                name="celery", cpu=512, memory=1024, type="worker",
+                name="celery",
+                cpu=512,
+                memory=1024,
+                type="worker",
                 build_context=Path("/tmp/celery"),
             ),
             "nginx": ServiceSpec(
-                name="nginx", cpu=256, memory=512, type="proxy",
+                name="nginx",
+                cpu=256,
+                memory=512,
+                type="proxy",
                 image="nginx:alpine",  # no build_context
             ),
         }
@@ -125,26 +134,40 @@ class TestEcsBuildFilter:
         import remote_compose.provider.ecs.ecr_auth as _auth
 
         built = []
+
         class StubBuilder:
-            def __init__(self, **_): pass
+            def __init__(self, **_):
+                pass
+
             def build(self, spec):
                 built.append(spec.service)
                 return spec.tags
+
         class StubPusher:
-            def __init__(self, **_): pass
-            def push(self, tags): pass
+            def __init__(self, **_):
+                pass
+
+            def push(self, tags):
+                pass
+
         class StubAuth:
-            def __init__(self, **_): pass
+            def __init__(self, **_):
+                pass
 
         from unittest.mock import patch as _patch
-        with _patch.object(_image, "ImageBuilder", StubBuilder), \
-             _patch.object(_image, "ImagePusher", StubPusher), \
-             _patch.object(_auth, "ECRAuthenticator", StubAuth), \
-             _patch.object(provider, "session_factory",
-                           lambda c: MagicMock()):
+
+        with (
+            _patch.object(_image, "ImageBuilder", StubBuilder),
+            _patch.object(_image, "ImagePusher", StubPusher),
+            _patch.object(_auth, "ECRAuthenticator", StubAuth),
+            _patch.object(provider, "session_factory", lambda c: MagicMock()),
+        ):
             warnings = []
             pushed = provider._build_and_push_images(
-                ctx, outputs, warnings, services_filter=["django"],
+                ctx,
+                outputs,
+                warnings,
+                services_filter=["django"],
             )
 
         # Only django built; celery skipped despite having a build_context
@@ -156,11 +179,17 @@ class TestEcsBuildFilter:
 
         services = {
             "django": ServiceSpec(
-                name="django", cpu=1024, memory=2048, type="application",
+                name="django",
+                cpu=1024,
+                memory=2048,
+                type="application",
                 build_context=Path("/tmp/django"),
             ),
             "celery": ServiceSpec(
-                name="celery", cpu=512, memory=1024, type="worker",
+                name="celery",
+                cpu=512,
+                memory=1024,
+                type="worker",
                 build_context=Path("/tmp/celery"),
             ),
         }
@@ -177,24 +206,36 @@ class TestEcsBuildFilter:
 
         import remote_compose.image as _image
         import remote_compose.provider.ecs.ecr_auth as _auth
+
         built = []
+
         class StubBuilder:
-            def __init__(self, **_): pass
+            def __init__(self, **_):
+                pass
+
             def build(self, spec):
                 built.append(spec.service)
                 return spec.tags
+
         class StubPusher:
-            def __init__(self, **_): pass
-            def push(self, tags): pass
+            def __init__(self, **_):
+                pass
+
+            def push(self, tags):
+                pass
+
         class StubAuth:
-            def __init__(self, **_): pass
+            def __init__(self, **_):
+                pass
 
         from unittest.mock import patch as _patch
-        with _patch.object(_image, "ImageBuilder", StubBuilder), \
-             _patch.object(_image, "ImagePusher", StubPusher), \
-             _patch.object(_auth, "ECRAuthenticator", StubAuth), \
-             _patch.object(provider, "session_factory",
-                           lambda c: MagicMock()):
+
+        with (
+            _patch.object(_image, "ImageBuilder", StubBuilder),
+            _patch.object(_image, "ImagePusher", StubPusher),
+            _patch.object(_auth, "ECRAuthenticator", StubAuth),
+            _patch.object(provider, "session_factory", lambda c: MagicMock()),
+        ):
             warnings = []
             pushed = provider._build_and_push_images(ctx, outputs, warnings)
 
@@ -206,6 +247,7 @@ class TestEcsBuildFilter:
 # auto_on_deploy hook scoping with services_filter
 # ---------------------------------------------------------------------------
 
+
 class TestHookFilter:
     def test_hooks_run_only_for_filtered_services(self):
         from remote_compose.cli_v2 import _run_auto_on_deploy_hooks
@@ -215,15 +257,18 @@ class TestHookFilter:
         django = ServiceV2(name="django", cpu=1024, memory=2048)
         django.lifecycle = {
             "migrate": LifecycleHookV2(
-                name="migrate", command=["python", "manage.py", "migrate"],
+                name="migrate",
+                command=["python", "manage.py", "migrate"],
                 auto_on_deploy=True,
             )
         }
-        nginx = ServiceV2(name="nginx", cpu=256, memory=512, type="proxy",
-                          public=True, port=80)
+        nginx = ServiceV2(
+            name="nginx", cpu=256, memory=512, type="proxy", public=True, port=80
+        )
         nginx.lifecycle = {
             "reload": LifecycleHookV2(
-                name="reload", command=["nginx", "-s", "reload"],
+                name="reload",
+                command=["nginx", "-s", "reload"],
                 auto_on_deploy=True,
             )
         }
@@ -253,7 +298,8 @@ class TestHookFilter:
         django = ServiceV2(name="django", cpu=1024, memory=2048)
         django.lifecycle = {
             "migrate": LifecycleHookV2(
-                name="migrate", command=["python", "manage.py", "migrate"],
+                name="migrate",
+                command=["python", "manage.py", "migrate"],
                 auto_on_deploy=True,
             )
         }

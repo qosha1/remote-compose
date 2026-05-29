@@ -25,8 +25,8 @@ class CredentialService(BaseService):
         name: str,
         key_path: Optional[str] = None,
         key_content: Optional[str] = None,
-        description: str = '',
-        created_by: str = '',
+        description: str = "",
+        created_by: str = "",
     ) -> SecureCredential:
         """
         Create a new SSH key credential.
@@ -47,7 +47,7 @@ class CredentialService(BaseService):
         if key_path:
             if not os.path.exists(key_path):
                 raise ValidationError(f"SSH key file not found: {key_path}")
-            with open(key_path, 'r') as f:
+            with open(key_path, "r") as f:
                 key_content = f.read()
 
         # Validate key format
@@ -65,7 +65,7 @@ class CredentialService(BaseService):
         )
 
         self.log_info(f"Created SSH key credential: {name}")
-        self.notify_observers('credential_created', credential=credential)
+        self.notify_observers("credential_created", credential=credential)
 
         return credential
 
@@ -74,9 +74,9 @@ class CredentialService(BaseService):
         name: str,
         access_key_id: str,
         secret_access_key: str,
-        region: str = 'us-east-1',
-        description: str = '',
-        created_by: str = '',
+        region: str = "us-east-1",
+        description: str = "",
+        created_by: str = "",
     ) -> SecureCredential:
         """
         Create a new AWS credential.
@@ -93,7 +93,9 @@ class CredentialService(BaseService):
             SecureCredential instance
         """
         if not access_key_id or not secret_access_key:
-            raise ValidationError("Both access_key_id and secret_access_key are required")
+            raise ValidationError(
+                "Both access_key_id and secret_access_key are required"
+            )
 
         encrypted = encrypt_value(secret_access_key)
 
@@ -108,7 +110,7 @@ class CredentialService(BaseService):
         )
 
         self.log_info(f"Created AWS credential: {name}")
-        self.notify_observers('credential_created', credential=credential)
+        self.notify_observers("credential_created", credential=credential)
 
         return credential
 
@@ -145,14 +147,17 @@ class CredentialService(BaseService):
         Returns:
             Decrypted SSH key content
         """
-        if credential.credential_type != SecureCredential.CredentialType.SSH_PRIVATE_KEY:
-            raise CredentialError(
-                f"Credential {credential.name} is not an SSH key"
-            )
+        if (
+            credential.credential_type
+            != SecureCredential.CredentialType.SSH_PRIVATE_KEY
+        ):
+            raise CredentialError(f"Credential {credential.name} is not an SSH key")
         return self.get_decrypted_value(credential)
 
     @contextmanager
-    def get_ssh_key_file(self, credential: SecureCredential) -> Generator[str, None, None]:
+    def get_ssh_key_file(
+        self, credential: SecureCredential
+    ) -> Generator[str, None, None]:
         """
         Get SSH key as a temporary file using a context manager.
 
@@ -175,10 +180,10 @@ class CredentialService(BaseService):
 
         try:
             # Create temp file with restricted permissions
-            fd, path = tempfile.mkstemp(suffix='.pem', prefix='remote_compose_')
+            fd, path = tempfile.mkstemp(suffix=".pem", prefix="remote_compose_")
             os.chmod(path, 0o600)
 
-            with os.fdopen(fd, 'w') as f:
+            with os.fdopen(fd, "w") as f:
                 f.write(key_content)
 
             yield path
@@ -206,16 +211,16 @@ class CredentialService(BaseService):
             )
 
         return {
-            'access_key_id': credential.aws_access_key_id,
-            'secret_access_key': self.get_decrypted_value(credential),
-            'region': credential.aws_region,
+            "access_key_id": credential.aws_access_key_id,
+            "secret_access_key": self.get_decrypted_value(credential),
+            "region": credential.aws_region,
         }
 
     def rotate_credential(
         self,
         credential: SecureCredential,
         new_value: str,
-        rotated_by: str = '',
+        rotated_by: str = "",
     ) -> SecureCredential:
         """
         Rotate a credential with a new value.
@@ -229,16 +234,21 @@ class CredentialService(BaseService):
             Updated SecureCredential instance
         """
         # Validate new value based on type
-        if credential.credential_type == SecureCredential.CredentialType.SSH_PRIVATE_KEY:
+        if (
+            credential.credential_type
+            == SecureCredential.CredentialType.SSH_PRIVATE_KEY
+        ):
             if not self._validate_ssh_key(new_value):
                 raise ValidationError("Invalid SSH private key format")
 
         credential.encrypted_value = encrypt_value(new_value)
         credential.last_rotated_at = timezone.now()
-        credential.save(update_fields=['encrypted_value', 'last_rotated_at', 'updated_at'])
+        credential.save(
+            update_fields=["encrypted_value", "last_rotated_at", "updated_at"]
+        )
 
         self.log_info(f"Rotated credential: {credential.name}", rotated_by=rotated_by)
-        self.notify_observers('credential_rotated', credential=credential)
+        self.notify_observers("credential_rotated", credential=credential)
 
         return credential
 
@@ -263,7 +273,7 @@ class CredentialService(BaseService):
         credential.delete()
 
         self.log_info(f"Deleted credential: {name}")
-        self.notify_observers('credential_deleted', credential_name=name)
+        self.notify_observers("credential_deleted", credential_name=name)
 
         return True
 
@@ -294,11 +304,11 @@ class CredentialService(BaseService):
 
         # Check for common key headers
         valid_headers = [
-            '-----BEGIN RSA PRIVATE KEY-----',
-            '-----BEGIN OPENSSH PRIVATE KEY-----',
-            '-----BEGIN EC PRIVATE KEY-----',
-            '-----BEGIN DSA PRIVATE KEY-----',
-            '-----BEGIN PRIVATE KEY-----',
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+            "-----BEGIN DSA PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----",
         ]
 
         return any(header in key_content for header in valid_headers)
@@ -308,8 +318,8 @@ class CredentialService(BaseService):
         name: str,
         private_pem: str,
         public_openssh: str,
-        description: str = '',
-        created_by: str = '',
+        description: str = "",
+        created_by: str = "",
     ) -> SecureCredential:
         """Store an SSH keypair (private + public) as a single credential.
 
@@ -333,7 +343,7 @@ class CredentialService(BaseService):
             created_by=created_by,
         )
         self.log_info(f"Stored SSH keypair: {name}")
-        self.notify_observers('credential_created', credential=credential)
+        self.notify_observers("credential_created", credential=credential)
         return credential
 
     def get_ssh_keypair(self, credential: SecureCredential) -> tuple[str, str]:

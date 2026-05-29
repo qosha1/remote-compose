@@ -19,9 +19,10 @@ from typing import Any
 @dataclass
 class AuditFinding:
     """One leftover AWS resource matched against a project name."""
-    resource_type: str       # 'ecs_cluster' / 'vpc' / 'log_group' / ...
-    identifier: str          # name or id (for human readability)
-    arn: str | None = None   # full ARN when available (for --delete)
+
+    resource_type: str  # 'ecs_cluster' / 'vpc' / 'log_group' / ...
+    identifier: str  # name or id (for human readability)
+    arn: str | None = None  # full ARN when available (for --delete)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -47,8 +48,10 @@ class AuditReport:
             lines.append("  ✓ clean — no resources match this project")
             return "\n".join(lines)
         groups = self.by_type()
-        lines.append(f"  {len(self.findings)} leftover resource(s) across "
-                     f"{len(groups)} class(es):")
+        lines.append(
+            f"  {len(self.findings)} leftover resource(s) across "
+            f"{len(groups)} class(es):"
+        )
         for kind in sorted(groups):
             items = groups[kind]
             lines.append(f"    {kind} ({len(items)}):")
@@ -84,6 +87,7 @@ def audit_project(session, project: str, region: str) -> AuditReport:
 # Wrap every API call in try/except so a single missing-permission
 # doesn't blow up the whole sweep.
 # ---------------------------------------------------------------------
+
 
 def _safe(fn, default):
     """Call fn() and return its result if it matches `default`'s type;
@@ -124,10 +128,14 @@ def _audit_vpcs(session, project: str) -> list[AuditFinding]:
     out: list[AuditFinding] = []
     for v in vpcs:
         if _has_project_tag(v.get("Tags"), project):
-            out.append(AuditFinding(
-                "vpc", v.get("VpcId", ""), arn=None,
-                extra={"cidr": v.get("CidrBlock")},
-            ))
+            out.append(
+                AuditFinding(
+                    "vpc",
+                    v.get("VpcId", ""),
+                    arn=None,
+                    extra={"cidr": v.get("CidrBlock")},
+                )
+            )
     return out
 
 
@@ -138,9 +146,13 @@ def _audit_albs(session, project: str) -> list[AuditFinding]:
     for lb in lbs:
         name = lb.get("LoadBalancerName", "")
         if project in name:
-            out.append(AuditFinding(
-                "alb", name, arn=lb.get("LoadBalancerArn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "alb",
+                    name,
+                    arn=lb.get("LoadBalancerArn"),
+                )
+            )
     return out
 
 
@@ -151,9 +163,13 @@ def _audit_target_groups(session, project: str) -> list[AuditFinding]:
     for tg in tgs:
         name = tg.get("TargetGroupName", "")
         if project in name:
-            out.append(AuditFinding(
-                "target_group", name, arn=tg.get("TargetGroupArn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "target_group",
+                    name,
+                    arn=tg.get("TargetGroupArn"),
+                )
+            )
     return out
 
 
@@ -166,9 +182,13 @@ def _audit_efs(session, project: str) -> list[AuditFinding]:
         # separate call per fs. For the audit, accept name-token match.
         name = f.get("Name") or ""
         if project in name:
-            out.append(AuditFinding(
-                "efs", f.get("FileSystemId", ""), arn=f.get("FileSystemArn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "efs",
+                    f.get("FileSystemId", ""),
+                    arn=f.get("FileSystemArn"),
+                )
+            )
     return out
 
 
@@ -180,9 +200,13 @@ def _audit_ecr(session, project: str) -> list[AuditFinding]:
     for r in repos:
         name = r.get("repositoryName", "")
         if name == project or name.startswith(prefix):
-            out.append(AuditFinding(
-                "ecr_repository", name, arn=r.get("repositoryArn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "ecr_repository",
+                    name,
+                    arn=r.get("repositoryArn"),
+                )
+            )
     return out
 
 
@@ -193,9 +217,13 @@ def _audit_service_discovery(session, project: str) -> list[AuditFinding]:
     for ns in nss:
         name = ns.get("Name", "")
         if project in name:
-            out.append(AuditFinding(
-                "service_discovery_namespace", name, arn=ns.get("Arn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "service_discovery_namespace",
+                    name,
+                    arn=ns.get("Arn"),
+                )
+            )
     return out
 
 
@@ -206,9 +234,13 @@ def _audit_log_groups(session, project: str) -> list[AuditFinding]:
     for g in groups:
         name = g.get("logGroupName", "")
         if project in name:
-            out.append(AuditFinding(
-                "log_group", name, arn=g.get("arn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "log_group",
+                    name,
+                    arn=g.get("arn"),
+                )
+            )
     return out
 
 
@@ -220,9 +252,13 @@ def _audit_iam_roles(session, project: str) -> list[AuditFinding]:
     for r in roles:
         name = r.get("RoleName", "")
         if name == project or name.startswith(prefix):
-            out.append(AuditFinding(
-                "iam_role", name, arn=r.get("Arn"),
-            ))
+            out.append(
+                AuditFinding(
+                    "iam_role",
+                    name,
+                    arn=r.get("Arn"),
+                )
+            )
     return out
 
 
@@ -234,9 +270,13 @@ def _audit_secrets(session, project: str) -> list[AuditFinding]:
     for s in secs:
         name = s.get("Name", "")
         if name == project or name.startswith(prefix):
-            out.append(AuditFinding(
-                "secret", name, arn=s.get("ARN"),
-            ))
+            out.append(
+                AuditFinding(
+                    "secret",
+                    name,
+                    arn=s.get("ARN"),
+                )
+            )
     return out
 
 
@@ -246,11 +286,14 @@ def _audit_security_groups(session, project: str) -> list[AuditFinding]:
     out: list[AuditFinding] = []
     for sg in sgs:
         if _has_project_tag(sg.get("Tags"), project):
-            out.append(AuditFinding(
-                "security_group", sg.get("GroupId", ""),
-                arn=None,
-                extra={"name": sg.get("GroupName")},
-            ))
+            out.append(
+                AuditFinding(
+                    "security_group",
+                    sg.get("GroupId", ""),
+                    arn=None,
+                    extra={"name": sg.get("GroupName")},
+                )
+            )
     return out
 
 

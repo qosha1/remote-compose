@@ -31,6 +31,7 @@ from typing import Any, Iterable, Optional
 
 import yaml
 
+from .defaults import VPC_CIDR_DEFAULT as _VPC_CIDR_DEFAULT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,11 +73,17 @@ def _classify_volume_entry(entry: Any) -> tuple[str, Optional[str], Optional[str
         source = entry.get("source")
         target = entry.get("target")
         if vtype == "bind":
-            return "bind", str(source) if source is not None else None, \
-                str(target) if target is not None else None
+            return (
+                "bind",
+                str(source) if source is not None else None,
+                str(target) if target is not None else None,
+            )
         if vtype == "volume":
-            return "named", str(source) if source is not None else None, \
-                str(target) if target is not None else None
+            return (
+                "named",
+                str(source) if source is not None else None,
+                str(target) if target is not None else None,
+            )
         if vtype == "tmpfs":
             return "other", None, str(target) if target is not None else None
         return "other", None, None
@@ -380,9 +387,6 @@ def _scan_upstream_servers(text: str) -> list[tuple[str, str, int]]:
     return out
 
 
-from .defaults import VPC_CIDR_DEFAULT as _VPC_CIDR_DEFAULT
-
-
 def _resolver_ip_for(vpc_cidr: Optional[str]) -> str:
     """VPC's internal DNS resolver = network base + 2 (AWS convention).
 
@@ -410,6 +414,7 @@ def _looks_like_django_service(svc_compose: dict, compose_path: Path) -> bool:
     directly so it gets equivalent treatment for Rails / Phoenix / etc.
     """
     from remote_compose.frameworks import detect_framework
+
     fw = detect_framework(svc_compose, compose_path)
     return bool(fw and fw.name == "django")
 
@@ -450,7 +455,7 @@ def detect_nginx_upstream_resolver(
     # user the EXACT snippet that will work on their stack.
     rc_raw = rc_v2_raw or {}
     project = str(rc_raw.get("project") or "")
-    ecs_cfg = ((rc_raw.get("provider_config") or {}).get("ecs") or {})
+    ecs_cfg = (rc_raw.get("provider_config") or {}).get("ecs") or {}
     vpc_cidr = ecs_cfg.get("vpc_cidr")
     resolver_ip = _resolver_ip_for(vpc_cidr)
     namespace = f"{project}.local" if project else "<project>.local"
@@ -501,8 +506,9 @@ def detect_nginx_upstream_resolver(
                 fqdn = f"{host}.{namespace}:{port}"
                 django_hint = ""
                 upstream_compose = services.get(host)
-                if isinstance(upstream_compose, dict) and \
-                        _looks_like_django_service(upstream_compose, compose_path):
+                if isinstance(upstream_compose, dict) and _looks_like_django_service(
+                    upstream_compose, compose_path
+                ):
                     django_hint = (
                         f" Django gotcha: the upstream {host!r} is a Django "
                         f"service and its ALLOWED_HOSTS check rejects requests "
@@ -625,13 +631,12 @@ _LOCALHOST_HOST_VALUES = {"localhost", "127.0.0.1", "host.docker.internal"}
 # rc-7qq: KEYs that name another compose service. Pattern: <SVC>_HOST,
 # DATABASE_HOST etc. We special-case the most common ones rather than
 # guessing from arbitrary key names.
-_HOST_KEY_PATTERN = re.compile(
-    r"^(?:[A-Z][A-Z0-9_]*_)?(?:HOST|HOSTNAME)$"
-)
+_HOST_KEY_PATTERN = re.compile(r"^(?:[A-Z][A-Z0-9_]*_)?(?:HOST|HOSTNAME)$")
 
 
 def detect_localhost_host_in_env_file(
-    compose: dict, compose_path: Path,
+    compose: dict,
+    compose_path: Path,
 ) -> list[str]:
     """rc-7qq: warn when a compose service's env_file declares
     ``<SOMETHING>_HOST=localhost`` (or 127.0.0.1, host.docker.internal)
@@ -739,7 +744,7 @@ def detect_stale_nginx_resolver_ip(
     if not isinstance(services, dict) or not services:
         return warnings
     rc_raw = rc_v2_raw or {}
-    ecs_cfg = ((rc_raw.get("provider_config") or {}).get("ecs") or {})
+    ecs_cfg = (rc_raw.get("provider_config") or {}).get("ecs") or {}
     vpc_cidr = ecs_cfg.get("vpc_cidr")
     expected_ip = _resolver_ip_for(vpc_cidr)
     seen: set[tuple[str, str]] = set()
@@ -865,7 +870,8 @@ def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
                 total = 0
                 count = 0
                 for root, dirs, files in os.walk(
-                    entry.path, followlinks=False,
+                    entry.path,
+                    followlinks=False,
                 ):
                     # Apply .dockerignore to nested paths too. Compute
                     # the path relative to ctx_path and check membership.
@@ -873,7 +879,8 @@ def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
                     # Prune ignored subdirs in-place so os.walk doesn't
                     # descend into them.
                     dirs[:] = [
-                        d for d in dirs
+                        d
+                        for d in dirs
                         if os.path.join(rel, d).replace(os.sep, "/") not in ignored
                     ]
                     for f in files:
@@ -894,7 +901,8 @@ def _build_context_size(ctx_path: Path) -> tuple[int, list[tuple[str, int]]]:
 
 
 def detect_large_build_context(
-    compose: dict, compose_path: Path,
+    compose: dict,
+    compose_path: Path,
 ) -> list[str]:
     """rc-2v8: warn / error when a service's build context exceeds size
     thresholds.
@@ -968,7 +976,7 @@ def detect_unmatched_health_check_path(
     """
     warnings: list[str] = []
     rc_raw = rc_v2_raw or {}
-    rc_services = (rc_raw.get("services") or {})
+    rc_services = rc_raw.get("services") or {}
     if not isinstance(rc_services, dict):
         return warnings
     services = compose.get("services") or {}
@@ -1021,8 +1029,7 @@ def detect_unmatched_health_check_path(
                 continue
             seen.add(key)
             samples = (
-                f" Sample routes found: {sample_routes[:3]}."
-                if sample_routes else ""
+                f" Sample routes found: {sample_routes[:3]}." if sample_routes else ""
             )
             warnings.append(
                 f"service {svc_name!r}: rc.yml health_check_path={hc!r} "
@@ -1038,16 +1045,34 @@ def detect_unmatched_health_check_path(
 # matters only in the message we surface — the first match wins per
 # service.
 _DEV_MODE_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\buvicorn\b.*--reload\b", "uvicorn --reload (WatchFiles flakes on ECS, ALB sees connection refused during reloads)"),
-    (r"\bgunicorn\b.*--reload\b", "gunicorn --reload (worker-recycling on file change is unstable for ECS)"),
-    (r"\bmanage\.py\s+runserver\b", "Django runserver (single-threaded dev server, not for production)"),
-    (r"\bflask\s+run\b.*--debug\b", "flask run --debug (Werkzeug dev server, single-threaded)"),
-    (r"\bflask\s+run\b(?!.*--no-debug)", "flask run (default --debug=on enables Werkzeug dev server)"),
+    (
+        r"\buvicorn\b.*--reload\b",
+        "uvicorn --reload (WatchFiles flakes on ECS, ALB sees connection refused during reloads)",
+    ),
+    (
+        r"\bgunicorn\b.*--reload\b",
+        "gunicorn --reload (worker-recycling on file change is unstable for ECS)",
+    ),
+    (
+        r"\bmanage\.py\s+runserver\b",
+        "Django runserver (single-threaded dev server, not for production)",
+    ),
+    (
+        r"\bflask\s+run\b.*--debug\b",
+        "flask run --debug (Werkzeug dev server, single-threaded)",
+    ),
+    (
+        r"\bflask\s+run\b(?!.*--no-debug)",
+        "flask run (default --debug=on enables Werkzeug dev server)",
+    ),
     (r"\bnpm\s+run\s+dev\b", "npm run dev (Node dev server, hot-reload)"),
     (r"\byarn\s+dev\b", "yarn dev (Node dev server, hot-reload)"),
     (r"\bnext\s+dev\b", "next dev (Next.js dev server)"),
     (r"\bwebpack-dev-server\b", "webpack-dev-server"),
-    (r"\brails\s+s(?:erver)?\b(?!.*-e\s+production)", "rails server without -e production"),
+    (
+        r"\brails\s+s(?:erver)?\b(?!.*-e\s+production)",
+        "rails server without -e production",
+    ),
 )
 
 
@@ -1081,6 +1106,7 @@ def detect_dev_mode_command(compose: dict) -> list[str]:
     requires inspecting the built image and is tracked separately.
     """
     import re
+
     warnings: list[str] = []
     services = compose.get("services") or {}
     if not isinstance(services, dict):
@@ -1105,7 +1131,8 @@ def detect_dev_mode_command(compose: dict) -> list[str]:
 
 
 def detect_python_pyc_in_build_context(
-    compose: dict, compose_path: Path,
+    compose: dict,
+    compose_path: Path,
 ) -> list[str]:
     """rc-ife: warn when a Python service's build context contains
     __pycache__ or .pyc files AND .dockerignore doesn't exclude them.
@@ -1145,10 +1172,17 @@ def detect_python_pyc_in_build_context(
         elif isinstance(cmd, list):
             cmd_str = " ".join(str(p) for p in cmd)
         cmd_lower = cmd_str.lower()
-        if any(s in cmd_lower for s in (
-            "python", "manage.py", "gunicorn", "uvicorn", "flask ",
-            "celery ",
-        )):
+        if any(
+            s in cmd_lower
+            for s in (
+                "python",
+                "manage.py",
+                "gunicorn",
+                "uvicorn",
+                "flask ",
+                "celery ",
+            )
+        ):
             return True
         # Image name hint (e.g., 'python:3.11', 'tiangolo/uvicorn-...').
         image = svc_compose.get("image") or ""
@@ -1207,12 +1241,9 @@ def detect_python_pyc_in_build_context(
                     ignore_lines.add(line)
             except OSError:
                 pass
-        ignored_pyc = any(
-            "__pycache__" in line for line in ignore_lines
-        )
+        ignored_pyc = any("__pycache__" in line for line in ignore_lines)
         ignored_pyc_ext = any(
-            line.endswith("*.pyc") or line == "*.pyc"
-            for line in ignore_lines
+            line.endswith("*.pyc") or line == "*.pyc" for line in ignore_lines
         )
         if ignored_pyc and ignored_pyc_ext:
             continue

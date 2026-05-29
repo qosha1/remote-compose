@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -32,7 +32,7 @@ class DiscoveryError(Exception):
 
 @dataclass
 class CopilotAddon:
-    name: str           # filename stem
+    name: str  # filename stem
     path: Path
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -40,7 +40,7 @@ class CopilotAddon:
 @dataclass
 class CopilotService:
     name: str
-    type: str           # 'Backend Service', 'Worker Service', 'Load Balanced Web Service', 'Static Site', etc.
+    type: str  # 'Backend Service', 'Worker Service', 'Load Balanced Web Service', 'Static Site', etc.
     manifest_path: Path
     raw: dict[str, Any] = field(default_factory=dict)
     addons: list[CopilotAddon] = field(default_factory=list)
@@ -58,7 +58,9 @@ class CopilotApp:
     root: Path
     services: list[CopilotService] = field(default_factory=list)
     environments: list[CopilotEnvironment] = field(default_factory=list)
-    pipelines: list[Path] = field(default_factory=list)  # presence noted; not translated
+    pipelines: list[Path] = field(
+        default_factory=list
+    )  # presence noted; not translated
 
     def service(self, name: str) -> CopilotService:
         for s in self.services:

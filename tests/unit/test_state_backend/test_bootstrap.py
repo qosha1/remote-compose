@@ -17,7 +17,6 @@ from unittest import mock
 
 import pytest
 
-
 # These imports MUST fail today — state_backend doesn't exist yet.
 # Each test re-imports lazily to surface the right error per test.
 
@@ -31,6 +30,7 @@ class TestBootstrapBucket:
         s3 = mock.MagicMock()
         # head_bucket raises 404 on first call (bucket doesn't exist yet)
         from botocore.exceptions import ClientError
+
         s3.head_bucket.side_effect = ClientError(
             {"Error": {"Code": "404", "Message": "Not Found"}},
             "HeadBucket",
@@ -85,7 +85,8 @@ class TestBootstrapBucket:
         """Bucket exists but in another AWS account → head_bucket raises
         403; bootstrap must raise a clear error (not silently succeed)."""
         from remote_compose.state_backend.bootstrap import (
-            BucketOwnershipError, bootstrap_bucket,
+            BucketOwnershipError,
+            bootstrap_bucket,
         )
         from botocore.exceptions import ClientError
 
@@ -114,6 +115,7 @@ class TestBootstrapLockTable:
 
         ddb = mock.MagicMock()
         from botocore.exceptions import ClientError
+
         ddb.describe_table.side_effect = ClientError(
             {"Error": {"Code": "ResourceNotFoundException", "Message": "Not found"}},
             "DescribeTable",
@@ -130,7 +132,9 @@ class TestBootstrapLockTable:
         assert kwargs["BillingMode"] == "PAY_PER_REQUEST"
         # Hash key must be 'LockID' — that's what terraform's s3 backend writes.
         assert {"AttributeName": "LockID", "KeyType": "HASH"} in kwargs["KeySchema"]
-        assert {"AttributeName": "LockID", "AttributeType": "S"} in kwargs["AttributeDefinitions"]
+        assert {"AttributeName": "LockID", "AttributeType": "S"} in kwargs[
+            "AttributeDefinitions"
+        ]
 
     def test_idempotent_on_existing_table(self):
         """Second-call path: describe_table returns the table → no-op,

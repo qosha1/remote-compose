@@ -71,15 +71,15 @@ def load_env_file(env_file_path: str) -> dict:
         print(f"Error: Env file not found: {env_file_path}")
         sys.exit(1)
 
-    with open(env_file_path, 'r') as f:
+    with open(env_file_path, "r") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 continue
-            if line.startswith('export '):
+            if line.startswith("export "):
                 line = line[7:]
-            if '=' in line:
-                key, value = line.split('=', 1)
+            if "=" in line:
+                key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
                 if value and value[0] in ('"', "'") and value[-1] == value[0]:
@@ -99,63 +99,71 @@ def setup_django(env_vars: dict):
     if settings.configured:
         return
 
-    temp_dir = tempfile.mkdtemp(prefix='remote_compose_ecs_')
+    temp_dir = tempfile.mkdtemp(prefix="remote_compose_ecs_")
 
-    encryption_key = env_vars.get('REMOTE_COMPOSE_ENCRYPTION_KEY') or env_vars.get('ENCRYPTION_KEY')
+    encryption_key = env_vars.get("REMOTE_COMPOSE_ENCRYPTION_KEY") or env_vars.get(
+        "ENCRYPTION_KEY"
+    )
     if not encryption_key:
         from cryptography.fernet import Fernet
+
         encryption_key = Fernet.generate_key().decode()
         print("Warning: No encryption key found, generated temporary key")
 
     settings.configure(
         DEBUG=True,
         DATABASES={
-            'default': {
-                'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': os.path.join(temp_dir, 'ecs_deploy.sqlite3'),
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": os.path.join(temp_dir, "ecs_deploy.sqlite3"),
             }
         },
         INSTALLED_APPS=[
-            'django.contrib.contenttypes',
-            'django.contrib.auth',
-            'remote_compose',
+            "django.contrib.contenttypes",
+            "django.contrib.auth",
+            "remote_compose",
         ],
-        DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
+        DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
         USE_TZ=True,
         REMOTE_COMPOSE={
-            'ENCRYPTION_KEY': encryption_key,
-            'DEPLOYMENT_TIMEOUT': 300,
-            'AWS_DEFAULT_REGION': env_vars.get('AWS_DEFAULT_REGION', env_vars.get('AWS_REGION', 'us-east-1')),
+            "ENCRYPTION_KEY": encryption_key,
+            "DEPLOYMENT_TIMEOUT": 300,
+            "AWS_DEFAULT_REGION": env_vars.get(
+                "AWS_DEFAULT_REGION", env_vars.get("AWS_REGION", "us-east-1")
+            ),
         },
         CACHES={
-            'default': {
-                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
             }
         },
-        SECRET_KEY='ecs-deploy-script-key',
+        SECRET_KEY="ecs-deploy-script-key",
     )
 
     django.setup()
 
     from django.core.management import call_command
-    call_command('migrate', '--run-syncdb', verbosity=0)
+
+    call_command("migrate", "--run-syncdb", verbosity=0)
 
     return temp_dir
 
 
 def check_aws_credentials():
     """Check if AWS credentials are configured."""
-    access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
     if not access_key or not secret_key:
         print("Error: AWS credentials not found in environment")
         print("Expected variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
         return False
 
-    print(f"AWS credentials found:")
+    print("AWS credentials found:")
     print(f"  Access Key: {access_key[:4]}...{access_key[-4:]}")
-    print(f"  Region: {os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))}")
+    print(
+        f"  Region: {os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))}"
+    )
     return True
 
 
@@ -165,7 +173,9 @@ def list_clusters(region: str = None):
     from remote_compose.models import ECSCluster
 
     ecs_service = ECSService()
-    region = region or os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+    region = region or os.environ.get(
+        "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1")
+    )
 
     print(f"\n=== ECS Clusters in {region} ===\n")
 
@@ -177,8 +187,10 @@ def list_clusters(region: str = None):
             print(f"{'Name':<30} {'Status':<15} {'Services':<10} {'Tasks':<10}")
             print("-" * 70)
             for cluster in aws_clusters:
-                print(f"{cluster['name']:<30} {cluster['status']:<15} "
-                      f"{cluster['active_services']:<10} {cluster['running_tasks']:<10}")
+                print(
+                    f"{cluster['name']:<30} {cluster['status']:<15} "
+                    f"{cluster['active_services']:<10} {cluster['running_tasks']:<10}"
+                )
         else:
             print("  No clusters found in AWS")
     except Exception as e:
@@ -194,13 +206,15 @@ def list_clusters(region: str = None):
         print("  No clusters tracked locally")
 
 
-def create_cluster(name: str, region: str = None, launch_type: str = 'fargate'):
+def create_cluster(name: str, region: str = None, launch_type: str = "fargate"):
     """Create a new ECS cluster."""
     from remote_compose.services import ECSService
     from remote_compose.models import ECSCluster
 
     ecs_service = ECSService()
-    region = region or os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+    region = region or os.environ.get(
+        "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1")
+    )
 
     print(f"\nCreating ECS cluster: {name} in {region}")
     print(f"Launch type: {launch_type}")
@@ -209,13 +223,19 @@ def create_cluster(name: str, region: str = None, launch_type: str = 'fargate'):
         cluster = ecs_service.create_cluster(
             name=name,
             region=region,
-            capacity_providers=['FARGATE', 'FARGATE_SPOT'] if launch_type == 'fargate' else None,
+            capacity_providers=(
+                ["FARGATE", "FARGATE_SPOT"] if launch_type == "fargate" else None
+            ),
         )
 
-        cluster.launch_type = ECSCluster.LaunchType.FARGATE if launch_type == 'fargate' else ECSCluster.LaunchType.EC2
+        cluster.launch_type = (
+            ECSCluster.LaunchType.FARGATE
+            if launch_type == "fargate"
+            else ECSCluster.LaunchType.EC2
+        )
         cluster.save()
 
-        print(f"\nCluster created successfully!")
+        print("\nCluster created successfully!")
         print(f"  Name: {cluster.name}")
         print(f"  ARN: {cluster.aws_cluster_arn}")
         print(f"  Region: {cluster.aws_region}")
@@ -232,6 +252,7 @@ def create_cluster(name: str, region: str = None, launch_type: str = 'fargate'):
     except Exception as e:
         print(f"\nError creating cluster: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -249,7 +270,9 @@ def get_or_import_cluster(name: str, region: str = None):
 
     # Try to import from AWS
     ecs_service = ECSService()
-    region = region or os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+    region = region or os.environ.get(
+        "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1")
+    )
 
     print(f"Cluster '{name}' not found locally, checking AWS...")
 
@@ -280,10 +303,10 @@ def find_compose_file(repo_path: str, compose_file: str = None) -> str:
         raise FileNotFoundError(f"Compose file not found: {path}")
 
     common_names = [
-        'docker-compose.yml',
-        'docker-compose.yaml',
-        'compose.yml',
-        'compose.yaml',
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
     ]
 
     for name in common_names:
@@ -299,7 +322,7 @@ def deploy(
     cluster,
     compose_file: str = None,
     project_name: str = None,
-    version: str = '',
+    version: str = "",
     env_vars: dict = None,
     desired_count: int = 1,
     cpu: str = None,
@@ -308,7 +331,7 @@ def deploy(
     timeout: int = 300,
     build: bool = True,
     force_rebuild: bool = False,
-    image_tag: str = 'latest',
+    image_tag: str = "latest",
     create_efs: bool = True,
     strict: bool = False,
     dry_run: bool = False,
@@ -345,13 +368,13 @@ def deploy(
         print(f"CPU: {cpu}")
     if memory:
         print(f"Memory: {memory}MB")
-    print(f"\nBuild Options:")
+    print("\nBuild Options:")
     print(f"  Build Images: {build}")
     print(f"  Force Rebuild: {force_rebuild}")
     print(f"  Image Tag: {image_tag}")
-    print(f"\nVolume Options:")
+    print("\nVolume Options:")
     print(f"  Create EFS: {create_efs}")
-    print(f"\nBehavior:")
+    print("\nBehavior:")
     print(f"  Strict Mode: {strict}")
     print(f"  Dry Run: {dry_run}")
     print(f"{'=' * 60}\n")
@@ -360,25 +383,25 @@ def deploy(
 
     # Event handler to print pipeline progress
     def pipeline_event_handler(event_type, **kwargs):
-        step = kwargs.get('step', '')
-        message = kwargs.get('message', '')
-        if event_type == 'step_started':
+        step = kwargs.get("step", "")
+        message = kwargs.get("message", "")
+        if event_type == "step_started":
             print(f"[STEP] Starting: {step}")
-        elif event_type == 'step_completed':
+        elif event_type == "step_completed":
             print(f"[DONE] {step}: {message}")
-        elif event_type == 'step_skipped':
+        elif event_type == "step_skipped":
             print(f"[SKIP] {step}: {message}")
-        elif event_type == 'step_failed':
+        elif event_type == "step_failed":
             print(f"[FAIL] {step}: {message}")
-        elif event_type == 'rollback_started':
-            print(f"\n[ROLLBACK] Cleaning up resources...")
-        elif event_type == 'step_cleanup_completed':
+        elif event_type == "rollback_started":
+            print("\n[ROLLBACK] Cleaning up resources...")
+        elif event_type == "step_cleanup_completed":
             print(f"[CLEANUP] {step}")
-        elif event_type == 'pipeline_completed':
-            duration = kwargs.get('duration', 0)
+        elif event_type == "pipeline_completed":
+            duration = kwargs.get("duration", 0)
             print(f"\n[COMPLETE] Pipeline finished in {duration:.1f}s")
-        elif event_type == 'pipeline_failed':
-            failed_step = kwargs.get('failed_step', 'unknown')
+        elif event_type == "pipeline_failed":
+            failed_step = kwargs.get("failed_step", "unknown")
             print(f"\n[FAILED] Pipeline failed at step: {failed_step}")
 
     try:
@@ -388,7 +411,7 @@ def deploy(
             project_name=project_name,
             environment=env_vars or {},
             version=version,
-            deployed_by='ecs-deploy-script',
+            deployed_by="ecs-deploy-script",
             desired_count=desired_count,
             cpu=cpu,
             memory=memory,
@@ -404,19 +427,25 @@ def deploy(
         )
 
         print(f"\n{'=' * 60}")
-        if deployment and deployment.status == 'success':
+        if deployment and deployment.status == "success":
             print("DEPLOYMENT SUCCESSFUL!")
             print(f"{'=' * 60}")
             if deployment.id:
                 print(f"  Deployment ID: {deployment.id}")
-            duration = deployment.duration if deployment.duration else getattr(deployment, '_duration', None)
+            duration = (
+                deployment.duration
+                if deployment.duration
+                else getattr(deployment, "_duration", None)
+            )
             if duration:
                 print(f"  Duration: {duration:.1f}s")
-            if deployment.metadata.get('service_arn'):
+            if deployment.metadata.get("service_arn"):
                 print(f"  Service ARN: {deployment.metadata['service_arn']}")
-            if deployment.metadata.get('task_definition_arn'):
-                print(f"  Task Definition: {deployment.metadata['task_definition_arn']}")
-            if deployment.metadata.get('running_count'):
+            if deployment.metadata.get("task_definition_arn"):
+                print(
+                    f"  Task Definition: {deployment.metadata['task_definition_arn']}"
+                )
+            if deployment.metadata.get("running_count"):
                 print(f"  Running Tasks: {deployment.metadata['running_count']}")
         elif deployment:
             print("DEPLOYMENT COMPLETED!")
@@ -435,13 +464,14 @@ def deploy(
         print(f"{'=' * 60}")
         print(f"  {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Deploy docker-compose applications to AWS ECS',
+        description="Deploy docker-compose applications to AWS ECS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -494,136 +524,113 @@ Examples:
         --cluster my-app-cluster \\
         --strict \\
         --env-file .django
-        """
+        """,
     )
 
     parser.add_argument(
-        'repo_path',
-        nargs='?',
-        help='Path to the repository containing docker-compose.yml'
+        "repo_path",
+        nargs="?",
+        help="Path to the repository containing docker-compose.yml",
     )
     parser.add_argument(
-        '--env-file',
-        default='.django',
-        help='Path to .env file with AWS credentials (default: .django)'
+        "--env-file",
+        default=".django",
+        help="Path to .env file with AWS credentials (default: .django)",
     )
     parser.add_argument(
-        '--list-clusters',
-        action='store_true',
-        help='List available ECS clusters and exit'
+        "--list-clusters",
+        action="store_true",
+        help="List available ECS clusters and exit",
     )
     parser.add_argument(
-        '--create-cluster',
-        metavar='NAME',
-        help='Create a new ECS cluster with this name'
+        "--create-cluster",
+        metavar="NAME",
+        help="Create a new ECS cluster with this name",
+    )
+    parser.add_argument("--cluster", help="Existing ECS cluster name to deploy to")
+    parser.add_argument("--region", help="AWS region (default: from env or us-east-1)")
+    parser.add_argument(
+        "--launch-type",
+        choices=["fargate", "ec2"],
+        default="fargate",
+        help="ECS launch type (default: fargate)",
     )
     parser.add_argument(
-        '--cluster',
-        help='Existing ECS cluster name to deploy to'
+        "-f", "--compose-file", help="Docker compose file name (default: auto-detect)"
     )
     parser.add_argument(
-        '--region',
-        help='AWS region (default: from env or us-east-1)'
+        "-p",
+        "--project-name",
+        help="Docker Compose project name (default: directory name)",
+    )
+    parser.add_argument("--version", default="", help="Version tag for this deployment")
+    parser.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        dest="deploy_env_vars",
+        help="Environment variables for deployment (KEY=VALUE)",
     )
     parser.add_argument(
-        '--launch-type',
-        choices=['fargate', 'ec2'],
-        default='fargate',
-        help='ECS launch type (default: fargate)'
-    )
-    parser.add_argument(
-        '-f', '--compose-file',
-        help='Docker compose file name (default: auto-detect)'
-    )
-    parser.add_argument(
-        '-p', '--project-name',
-        help='Docker Compose project name (default: directory name)'
-    )
-    parser.add_argument(
-        '--version',
-        default='',
-        help='Version tag for this deployment'
-    )
-    parser.add_argument(
-        '-e', '--env',
-        action='append',
-        dest='deploy_env_vars',
-        help='Environment variables for deployment (KEY=VALUE)'
-    )
-    parser.add_argument(
-        '--desired-count',
+        "--desired-count",
         type=int,
         default=1,
-        help='Number of tasks to run (default: 1)'
+        help="Number of tasks to run (default: 1)",
+    )
+    parser.add_argument("--cpu", help="CPU units (256, 512, 1024, 2048, 4096)")
+    parser.add_argument("--memory", help="Memory in MB (512, 1024, 2048, etc.)")
+    parser.add_argument(
+        "--no-wait", action="store_true", help="Do not wait for deployment to stabilize"
     )
     parser.add_argument(
-        '--cpu',
-        help='CPU units (256, 512, 1024, 2048, 4096)'
-    )
-    parser.add_argument(
-        '--memory',
-        help='Memory in MB (512, 1024, 2048, etc.)'
-    )
-    parser.add_argument(
-        '--no-wait',
-        action='store_true',
-        help='Do not wait for deployment to stabilize'
-    )
-    parser.add_argument(
-        '--timeout',
+        "--timeout",
         type=int,
         default=300,
-        help='Timeout waiting for stability in seconds (default: 300)'
+        help="Timeout waiting for stability in seconds (default: 300)",
     )
 
     # Build options
     parser.add_argument(
-        '--build',
-        action='store_true',
+        "--build",
+        action="store_true",
         default=True,
-        help='Build images for services with build contexts (default: True)'
+        help="Build images for services with build contexts (default: True)",
     )
     parser.add_argument(
-        '--no-build',
-        action='store_false',
-        dest='build',
-        help='Skip image building, use existing images'
+        "--no-build",
+        action="store_false",
+        dest="build",
+        help="Skip image building, use existing images",
     )
     parser.add_argument(
-        '--force-rebuild',
-        action='store_true',
-        help='Force rebuild images even if they exist in ECR'
+        "--force-rebuild",
+        action="store_true",
+        help="Force rebuild images even if they exist in ECR",
     )
     parser.add_argument(
-        '--image-tag',
-        default='latest',
-        help='Tag for built images (default: latest)'
+        "--image-tag", default="latest", help="Tag for built images (default: latest)"
     )
 
     # EFS options
     parser.add_argument(
-        '--create-efs',
-        action='store_true',
+        "--create-efs",
+        action="store_true",
         default=True,
-        help='Create EFS for named volumes (default: True)'
+        help="Create EFS for named volumes (default: True)",
     )
     parser.add_argument(
-        '--no-efs',
-        action='store_false',
-        dest='create_efs',
-        help='Skip EFS creation, named volumes will be empty'
+        "--no-efs",
+        action="store_false",
+        dest="create_efs",
+        help="Skip EFS creation, named volumes will be empty",
     )
 
     # Behavior
     parser.add_argument(
-        '--strict',
-        action='store_true',
-        help='Fail on any compatibility warnings'
+        "--strict", action="store_true", help="Fail on any compatibility warnings"
     )
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Preview deployment without executing'
+        "--dry-run", action="store_true", help="Preview deployment without executing"
     )
 
     args = parser.parse_args()
@@ -695,10 +702,10 @@ Examples:
     deploy_env = {}
     if args.deploy_env_vars:
         for env_var in args.deploy_env_vars:
-            if '=' not in env_var:
+            if "=" not in env_var:
                 print(f"Error: Invalid environment variable: {env_var}")
                 sys.exit(1)
-            key, value = env_var.split('=', 1)
+            key, value = env_var.split("=", 1)
             deploy_env[key] = value
 
     # Deploy
@@ -723,5 +730,5 @@ Examples:
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

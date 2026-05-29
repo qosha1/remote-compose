@@ -15,8 +15,8 @@ class TestCountPgRestoreErrors:
     def test_clean_run_returns_zero(self):
         stdout = (
             "pg_restore: connecting to database for restore\n"
-            "pg_restore: creating TABLE \"public.users\"\n"
-            "pg_restore: processing data for table \"public.users\"\n"
+            'pg_restore: creating TABLE "public.users"\n'
+            'pg_restore: processing data for table "public.users"\n'
         )
         assert _count_pg_restore_errors(stdout, "") == 0
 
@@ -32,7 +32,7 @@ class TestCountPgRestoreErrors:
     def test_single_error_line_in_stderr(self):
         stderr = (
             "pg_restore: error: could not execute query: ERROR: "
-            "table \"workflows_pagecapture\" does not exist\n"
+            'table "workflows_pagecapture" does not exist\n'
         )
         assert _count_pg_restore_errors("", stderr) == 1
 

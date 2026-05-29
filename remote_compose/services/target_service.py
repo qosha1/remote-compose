@@ -19,7 +19,9 @@ class TargetService(BaseService):
     Service for managing deployment targets.
     """
 
-    def __init__(self, credential_service: Optional[CredentialService] = None, **kwargs):
+    def __init__(
+        self, credential_service: Optional[CredentialService] = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
 
@@ -27,14 +29,14 @@ class TargetService(BaseService):
         self,
         name: str,
         host: str,
-        username: str = 'ubuntu',
+        username: str = "ubuntu",
         port: int = 22,
         ssh_key: Optional[SecureCredential] = None,
         ssh_key_path: Optional[str] = None,
         ssh_key_name: Optional[str] = None,
         target_type: str = DeploymentTarget.TargetType.SSH,
         environment: str = DeploymentTarget.Environment.DEVELOPMENT,
-        description: str = '',
+        description: str = "",
         aws_instance_id: Optional[str] = None,
         aws_region: Optional[str] = None,
         validate_connection: bool = True,
@@ -86,9 +88,7 @@ class TargetService(BaseService):
             )
             if not success:
                 raise SSHConnectionError(
-                    f"Connection validation failed: {message}",
-                    host=host,
-                    port=port
+                    f"Connection validation failed: {message}", host=host, port=port
                 )
 
         target = DeploymentTarget.objects.create(
@@ -103,12 +103,16 @@ class TargetService(BaseService):
             aws_instance_id=aws_instance_id,
             aws_region=aws_region,
             metadata=metadata or {},
-            health_status=DeploymentTarget.HealthStatus.HEALTHY if validate_connection else DeploymentTarget.HealthStatus.UNKNOWN,
+            health_status=(
+                DeploymentTarget.HealthStatus.HEALTHY
+                if validate_connection
+                else DeploymentTarget.HealthStatus.UNKNOWN
+            ),
             last_health_check=timezone.now() if validate_connection else None,
         )
 
         self.log_info(f"Created deployment target: {name}")
-        self.notify_observers('target_created', target=target)
+        self.notify_observers("target_created", target=target)
 
         return target
 
@@ -126,11 +130,7 @@ class TargetService(BaseService):
         except DeploymentTarget.DoesNotExist:
             raise ValidationError(f"Target not found: {name}")
 
-    def update_target(
-        self,
-        target: DeploymentTarget,
-        **kwargs
-    ) -> DeploymentTarget:
+    def update_target(self, target: DeploymentTarget, **kwargs) -> DeploymentTarget:
         """
         Update a deployment target.
 
@@ -142,9 +142,18 @@ class TargetService(BaseService):
             Updated DeploymentTarget instance
         """
         allowed_fields = [
-            'name', 'host', 'port', 'username', 'ssh_key',
-            'target_type', 'environment', 'description',
-            'aws_instance_id', 'aws_region', 'is_active', 'metadata'
+            "name",
+            "host",
+            "port",
+            "username",
+            "ssh_key",
+            "target_type",
+            "environment",
+            "description",
+            "aws_instance_id",
+            "aws_region",
+            "is_active",
+            "metadata",
         ]
 
         for field, value in kwargs.items():
@@ -154,7 +163,7 @@ class TargetService(BaseService):
         target.save()
 
         self.log_info(f"Updated target: {target.name}")
-        self.notify_observers('target_updated', target=target)
+        self.notify_observers("target_updated", target=target)
 
         return target
 
@@ -170,7 +179,7 @@ class TargetService(BaseService):
             True if deleted successfully
         """
         # Check for active deployments
-        active_statuses = ['pending', 'running']
+        active_statuses = ["pending", "running"]
         if target.deployments.filter(status__in=active_statuses).exists():
             if not force:
                 raise ValidationError(
@@ -182,7 +191,7 @@ class TargetService(BaseService):
         target.delete()
 
         self.log_info(f"Deleted target: {name}")
-        self.notify_observers('target_deleted', target_name=name)
+        self.notify_observers("target_deleted", target_name=name)
 
         return True
 
@@ -242,16 +251,13 @@ class TargetService(BaseService):
             target.mark_unhealthy()
 
         self.notify_observers(
-            'target_health_checked',
-            target=target,
-            success=success,
-            message=message
+            "target_health_checked", target=target, success=success, message=message
         )
 
         return {
-            'success': success,
-            'message': message,
-            'health_status': target.health_status,
+            "success": success,
+            "message": message,
+            "health_status": target.health_status,
         }
 
     def check_health(self, target: DeploymentTarget) -> dict:
@@ -268,7 +274,7 @@ class TargetService(BaseService):
         results = []
         for target in self.list_targets(is_active=True):
             result = self.test_connection(target)
-            result['target_name'] = target.name
+            result["target_name"] = target.name
             results.append(result)
         return results
 

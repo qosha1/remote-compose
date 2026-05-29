@@ -25,7 +25,6 @@ import pytest
 from remote_compose.provider import DeployContext, SecretRef, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 
-
 GOLDEN_DIR = Path(__file__).parent.parent.parent / "fixtures" / "golden" / "ecs_minimal"
 
 
@@ -42,44 +41,68 @@ def _canonical_ctx(working_dir: Path) -> DeployContext:
         project="golden",
         compose_path=working_dir / "docker-compose.yml",
         rc_yml_v2={
-            "version": 2, "project": "golden",
+            "version": 2,
+            "project": "golden",
             "domain": "api.example.com",
             "tls": {"mode": "acm"},
         },
-        provider_config={"ecs": {
-            "region": "us-west-2", "cluster": "golden-cluster",
-            "vpc_cidr": "10.0.0.0/16", "aws_profile": "golden",
-            "ec2_capacity": {"capacity_type": "ON_DEMAND"},
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "golden-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+                "aws_profile": "golden",
+                "ec2_capacity": {"capacity_type": "ON_DEMAND"},
+            }
+        },
         tf_backend_config={
-            "type": "s3", "bucket": "golden-tf-state",
-            "key": "golden/ecs.tfstate", "region": "us-west-2",
+            "type": "s3",
+            "bucket": "golden-tf-state",
+            "key": "golden/ecs.tfstate",
+            "region": "us-west-2",
         },
         working_dir=working_dir,
         services={
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512, type="proxy",
-                public=True, port=80, health_check_path="/health",
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/health",
             ),
             "api": ServiceSpec(
-                name="api", cpu=512, memory=1024, replicas=2,
-                type="application", health_check_path="/api/health/",
+                name="api",
+                cpu=512,
+                memory=1024,
+                replicas=2,
+                type="application",
+                health_check_path="/api/health/",
             ),
             "db": ServiceSpec(
-                name="db", cpu=512, memory=1024, type="infrastructure",
+                name="db",
+                cpu=512,
+                memory=1024,
+                type="infrastructure",
                 volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
             ),
             "worker": ServiceSpec(
-                name="worker", cpu=1024, memory=2048, type="worker",
+                name="worker",
+                cpu=1024,
+                memory=2048,
+                type="worker",
                 launch_type="EC2",
             ),
         },
         secrets=[
-            SecretRef(name="django", source="file",
-                      path=".envs/.production/.django"),
-            SecretRef(name="db_password", source="aws_sm",
-                      arn="arn:aws:secretsmanager:us-west-2:111122223333:"
-                          "secret:golden/db-AbCdEf"),
+            SecretRef(name="django", source="file", path=".envs/.production/.django"),
+            SecretRef(
+                name="db_password",
+                source="aws_sm",
+                arn="arn:aws:secretsmanager:us-west-2:111122223333:"
+                "secret:golden/db-AbCdEf",
+            ),
         ],
     )
 
@@ -101,9 +124,14 @@ class TestGoldenFixtureMatches:
             f"only-in-fixture: {fixture_names - emitted_names}"
         )
 
-    @pytest.mark.parametrize("filename", sorted(
-        p.name for p in GOLDEN_DIR.iterdir() if p.is_file()
-    ) if GOLDEN_DIR.exists() else [])
+    @pytest.mark.parametrize(
+        "filename",
+        (
+            sorted(p.name for p in GOLDEN_DIR.iterdir() if p.is_file())
+            if GOLDEN_DIR.exists()
+            else []
+        ),
+    )
     def test_file_is_byte_identical(self, tmp_path, filename):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(_canonical_ctx(tmp_path), out)
@@ -119,6 +147,7 @@ class TestGoldenFixtureMatches:
 def _regenerate() -> None:
     """Overwrite the golden fixture with a fresh emit. Human-invoked only."""
     import tempfile
+
     if GOLDEN_DIR.exists():
         shutil.rmtree(GOLDEN_DIR)
     GOLDEN_DIR.mkdir(parents=True)

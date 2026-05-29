@@ -10,11 +10,15 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
+if TYPE_CHECKING:
+    from remote_compose.terraform.runner import TerraformRunner
 
-@click.group(name='dev')
+
+@click.group(name="dev")
 def dev_group():
     """Dev-host lifecycle: spin per-agent EC2 boxes with docker + your repo + claude.
 
@@ -64,8 +68,9 @@ def _build_service():
     )
 
 
-def _runner_for(host_name: str, aws_profile: str | None = None,
-                region: str | None = None) -> "TerraformRunner":
+def _runner_for(
+    host_name: str, aws_profile: str | None = None, region: str | None = None
+) -> "TerraformRunner":
     """Materialize the per-host terraform working dir and return a runner."""
     from shutil import copy2
 
@@ -108,46 +113,127 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
 # ---------- new EC2 dev-host commands ----------
 
 
-@dev_group.command(name='up')
-@click.argument('name')
-@click.option('--repo', 'repos', multiple=True,
-              help='Git repo URL (repeatable). With 2+ → MultiGitSource (multi-repo deploy). '
-                   'With 1 → GitSource. With 0 → auto-detect from cwd.')
-@click.option('--branch', 'branch', default=None,
-              help='Branch / ref applied to all --repos (default: cwd HEAD or main).')
-@click.option('--compose', 'compose_files', type=click.Path(exists=True), multiple=True,
-              help='Top-level compose file(s) to SCP onto the host (repeatable). '
-                   'Each runs as a separate `docker compose -p <basename>` project '
-                   'so service-name conflicts across repos are avoided.')
-@click.option('--image', 'image', default=None, help='Docker image to run (alternative to --repo).')
-@click.option('--instance-type', 'instance_type', default='t4g.medium',
-              help='EC2 instance type (default: t4g.medium ARM).')
-@click.option('--region', 'region', default=None, help='AWS region (default: rc.yml region).')
-@click.option('--ebs-size-gb', 'ebs_size_gb', type=int, default=30,
-              help='Root EBS size in GiB (default: 30).')
-@click.option('--aws-profile', 'aws_profile', default=None,
-              help='AWS profile (default: $AWS_PROFILE or rc.yml aws_profile).')
-@click.option('--gh-token', 'gh_token', default=None, envvar='GH_TOKEN',
-              help='GitHub PAT for cloning private repos (default: $GH_TOKEN). '
-                   'WARNING: lands in EC2 user-data.')
-@click.option('--anthropic-key', 'anthropic_key', default=None, envvar='ANTHROPIC_API_KEY',
-              help='Pre-authenticate the in-box claude agent (default: $ANTHROPIC_API_KEY).')
-@click.option('--env', 'env_files', multiple=True, type=click.Path(exists=True),
-              help='Env file(s) to copy into the dev host (.envs/.local/.django etc). Repeatable.')
-@click.option('--port', 'extra_ports', multiple=True, type=int,
-              help='Extra TCP port(s) to open in the security group. Repeatable.')
-@click.option('--skip-permissions', 'skip_permissions', is_flag=True,
-              help='Boot the in-box claude with --dangerously-skip-permissions '
-                   '(autonomous mode, no per-tool confirmations).')
-@click.option('--no-claude-config', 'no_claude_config', is_flag=True,
-              help='Skip auto-copy of local ~/.claude config + auth (default: copy).')
-@click.option('--claude-config-from', 'claude_config_from', type=click.Path(exists=True),
-              default=None,
-              help='Path to a custom .claude/ directory to copy (default: $HOME/.claude).')
+@dev_group.command(name="up")
+@click.argument("name")
+@click.option(
+    "--repo",
+    "repos",
+    multiple=True,
+    help="Git repo URL (repeatable). With 2+ → MultiGitSource (multi-repo deploy). "
+    "With 1 → GitSource. With 0 → auto-detect from cwd.",
+)
+@click.option(
+    "--branch",
+    "branch",
+    default=None,
+    help="Branch / ref applied to all --repos (default: cwd HEAD or main).",
+)
+@click.option(
+    "--compose",
+    "compose_files",
+    type=click.Path(exists=True),
+    multiple=True,
+    help="Top-level compose file(s) to SCP onto the host (repeatable). "
+    "Each runs as a separate `docker compose -p <basename>` project "
+    "so service-name conflicts across repos are avoided.",
+)
+@click.option(
+    "--image",
+    "image",
+    default=None,
+    help="Docker image to run (alternative to --repo).",
+)
+@click.option(
+    "--instance-type",
+    "instance_type",
+    default="t4g.medium",
+    help="EC2 instance type (default: t4g.medium ARM).",
+)
+@click.option(
+    "--region", "region", default=None, help="AWS region (default: rc.yml region)."
+)
+@click.option(
+    "--ebs-size-gb",
+    "ebs_size_gb",
+    type=int,
+    default=30,
+    help="Root EBS size in GiB (default: 30).",
+)
+@click.option(
+    "--aws-profile",
+    "aws_profile",
+    default=None,
+    help="AWS profile (default: $AWS_PROFILE or rc.yml aws_profile).",
+)
+@click.option(
+    "--gh-token",
+    "gh_token",
+    default=None,
+    envvar="GH_TOKEN",
+    help="GitHub PAT for cloning private repos (default: $GH_TOKEN). "
+    "WARNING: lands in EC2 user-data.",
+)
+@click.option(
+    "--anthropic-key",
+    "anthropic_key",
+    default=None,
+    envvar="ANTHROPIC_API_KEY",
+    help="Pre-authenticate the in-box claude agent (default: $ANTHROPIC_API_KEY).",
+)
+@click.option(
+    "--env",
+    "env_files",
+    multiple=True,
+    type=click.Path(exists=True),
+    help="Env file(s) to copy into the dev host (.envs/.local/.django etc). Repeatable.",
+)
+@click.option(
+    "--port",
+    "extra_ports",
+    multiple=True,
+    type=int,
+    help="Extra TCP port(s) to open in the security group. Repeatable.",
+)
+@click.option(
+    "--skip-permissions",
+    "skip_permissions",
+    is_flag=True,
+    help="Boot the in-box claude with --dangerously-skip-permissions "
+    "(autonomous mode, no per-tool confirmations).",
+)
+@click.option(
+    "--no-claude-config",
+    "no_claude_config",
+    is_flag=True,
+    help="Skip auto-copy of local ~/.claude config + auth (default: copy).",
+)
+@click.option(
+    "--claude-config-from",
+    "claude_config_from",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a custom .claude/ directory to copy (default: $HOME/.claude).",
+)
 @click.pass_context
-def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, region,
-               ebs_size_gb, aws_profile, gh_token, anthropic_key, env_files, extra_ports,
-               skip_permissions, no_claude_config, claude_config_from):
+def dev_up_cmd(
+    ctx,
+    name,
+    repos,
+    branch,
+    compose_files,
+    image,
+    instance_type,
+    region,
+    ebs_size_gb,
+    aws_profile,
+    gh_token,
+    anthropic_key,
+    env_files,
+    extra_ports,
+    skip_permissions,
+    no_claude_config,
+    claude_config_from,
+):
     """Provision an EC2 dev-host and start the source's docker compose."""
     from remote_compose.exceptions import RemoteComposeError
     from remote_compose.dev_host.bootstrap import (
@@ -161,7 +247,10 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
     # 0 + nothing → autodetect from cwd.
     if len(repos) >= 2:
         if not compose_files:
-            click.echo("Error: at least one --compose <file> is required when passing 2+ --repo flags.", err=True)
+            click.echo(
+                "Error: at least one --compose <file> is required when passing 2+ --repo flags.",
+                err=True,
+            )
             sys.exit(1)
         source = MultiGitSource(
             repos=[{"url": u, "ref": branch or "main"} for u in repos],
@@ -170,7 +259,7 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
     elif image:
         source = ImageSource(image=image)
     elif len(repos) == 1:
-        source = GitSource(url=repos[0], ref=branch or 'main')
+        source = GitSource(url=repos[0], ref=branch or "main")
     else:
         try:
             source = detect_source_from_cwd()
@@ -192,7 +281,8 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
                     "  ⚠️  --gh-token was passed as a flag — leaks into shell "
                     "history and any wrapper-script logs. Prefer "
                     "'GH_TOKEN=$(gh auth token) rc dev up ...' (envvar is "
-                    "auto-picked up).", err=True,
+                    "auto-picked up).",
+                    err=True,
                 )
         if anthropic_key:
             source.extra_env = dict(source.extra_env or {})
@@ -202,7 +292,11 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
 
     # Resolve region
     if not region:
-        region = _region_from_rc_yml(ctx) or os.environ.get('AWS_DEFAULT_REGION') or 'us-west-1'
+        region = (
+            _region_from_rc_yml(ctx)
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-west-1"
+        )
 
     click.echo(f"Provisioning dev-host '{name}' in {region} ({instance_type})...")
     # rc-h40: sanitize source repr so secrets (gh_token, ANTHROPIC_API_KEY)
@@ -212,7 +306,7 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
         click.echo("  claude: --dangerously-skip-permissions (autonomous mode)")
 
     if not aws_profile:
-        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get('AWS_PROFILE')
+        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get("AWS_PROFILE")
 
     service = _build_service()
     service.terraform_runner = _runner_for(name, aws_profile=aws_profile, region=region)
@@ -258,7 +352,9 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
     # Copy env files into the box (requires SSH to be up — wait for it)
     if env_files or compose_files:
         click.echo("\n  Copying files into the box — waiting for SSH...")
-        keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
+        keypair = service.credential_service.get_credential(
+            record.ssh_key_credential_id
+        )
         priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
         repo_name = ""
         if isinstance(source, GitSource):
@@ -266,28 +362,40 @@ def dev_up_cmd(ctx, name, repos, branch, compose_files, image, instance_type, re
         elif isinstance(source, MultiGitSource):
             repo_name = "_envs"
         if env_files:
-            _wait_for_ssh_and_copy_env(record.public_ip, priv_pem, env_files, repo_name or "workspace")
-            click.echo(f"  ✓ env files staged in /tmp/rc-dev-envs/ — bootstrap places them post-clone")
+            _wait_for_ssh_and_copy_env(
+                record.public_ip, priv_pem, env_files, repo_name or "workspace"
+            )
+            click.echo(
+                "  ✓ env files staged in /tmp/rc-dev-envs/ — bootstrap places them post-clone"
+            )
         for cf in compose_files:
             _scp_compose_file(record.public_ip, priv_pem, cf)
             click.echo(f"  ✓ compose file copied to /home/ec2-user/{Path(cf).name}")
 
     # Auto-copy local Claude config + auth (default ON; --no-claude-config to opt out)
     if not no_claude_config:
-        keypair = service.credential_service.get_credential(record.ssh_key_credential_id)
+        keypair = service.credential_service.get_credential(
+            record.ssh_key_credential_id
+        )
         priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
         click.echo("\n  Copying local Claude config (~/.claude + ~/.claude.json)...")
         try:
             _copy_claude_config(
-                record.public_ip, priv_pem,
+                record.public_ip,
+                priv_pem,
                 claude_dir=Path(claude_config_from) if claude_config_from else None,
             )
-            click.echo("  ✓ in-box claude is pre-authenticated — `rc dev attach` lands ready")
+            click.echo(
+                "  ✓ in-box claude is pre-authenticated — `rc dev attach` lands ready"
+            )
         except Exception as exc:
-            click.echo(f"  ! claude config copy failed: {exc} — you'll need to login on first attach", err=True)
+            click.echo(
+                f"  ! claude config copy failed: {exc} — you'll need to login on first attach",
+                err=True,
+            )
 
 
-@dev_group.command(name='list')
+@dev_group.command(name="list")
 def dev_list_cmd():
     """List all dev hosts in this project."""
     service = _build_service()
@@ -303,10 +411,14 @@ def dev_list_cmd():
         )
 
 
-@dev_group.command(name='attach')
-@click.argument('name')
-@click.option('--session', 'session', default='claude',
-              help='tmux session name to attach to (default: claude).')
+@dev_group.command(name="attach")
+@click.argument("name")
+@click.option(
+    "--session",
+    "session",
+    default="claude",
+    help="tmux session name to attach to (default: claude).",
+)
 def dev_attach_cmd(name, session):
     """Attach to the in-box claude tmux session (or create one)."""
     from remote_compose.exceptions import RemoteComposeError
@@ -326,8 +438,9 @@ def dev_attach_cmd(name, session):
     private_pem, _ = service.credential_service.get_ssh_keypair(cred)
 
     import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
-        keyfile.write(private_pem.encode('utf-8'))
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as keyfile:
+        keyfile.write(private_pem.encode("utf-8"))
         keypath = keyfile.name
     os.chmod(keypath, 0o600)
 
@@ -336,15 +449,24 @@ def dev_attach_cmd(name, session):
         f"tmux attach -t {session} 2>/dev/null || "
         f"tmux new-session -s {session} 'cd ~/$(ls ~ | head -1) 2>/dev/null; claude'"
     )
-    cmd = ['ssh', '-t', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
-           '-o', 'UserKnownHostsFile=/dev/null',
-           f'ec2-user@{record.public_ip}', remote_cmd]
+    cmd = [
+        "ssh",
+        "-t",
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"ec2-user@{record.public_ip}",
+        remote_cmd,
+    ]
     click.echo(f"$ {' '.join(cmd[:8])} ...")
-    os.execvp('ssh', cmd)
+    os.execvp("ssh", cmd)
 
 
-@dev_group.command(name='ssh')
-@click.argument('name')
+@dev_group.command(name="ssh")
+@click.argument("name")
 def dev_ssh_cmd(name):
     """SSH into a dev host (uses the auto-generated key)."""
     from remote_compose.exceptions import RemoteComposeError
@@ -369,19 +491,28 @@ def dev_ssh_cmd(name):
     private_pem, _ = service.credential_service.get_ssh_keypair(cred)
 
     import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
-        keyfile.write(private_pem.encode('utf-8'))
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as keyfile:
+        keyfile.write(private_pem.encode("utf-8"))
         keypath = keyfile.name
     os.chmod(keypath, 0o600)
 
-    cmd = ['ssh', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
-           '-o', 'UserKnownHostsFile=/dev/null', f'ec2-user@{record.public_ip}']
+    cmd = [
+        "ssh",
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"ec2-user@{record.public_ip}",
+    ]
     click.echo(f"$ {' '.join(cmd)}")
-    os.execvp('ssh', cmd)
+    os.execvp("ssh", cmd)
 
 
-@dev_group.command(name='stop')
-@click.argument('name')
+@dev_group.command(name="stop")
+@click.argument("name")
 def dev_stop_cmd(name):
     """Stop the EC2 instance (EBS preserved)."""
     from remote_compose.exceptions import RemoteComposeError
@@ -395,8 +526,8 @@ def dev_stop_cmd(name):
     click.echo(f"  ✓ stopped '{name}'")
 
 
-@dev_group.command(name='start')
-@click.argument('name')
+@dev_group.command(name="start")
+@click.argument("name")
 def dev_start_cmd(name):
     """Start a previously stopped EC2 dev host."""
     from remote_compose.exceptions import RemoteComposeError
@@ -410,17 +541,17 @@ def dev_start_cmd(name):
     click.echo(f"  ✓ started '{name}'")
 
 
-@dev_group.command(name='destroy')
-@click.argument('name')
-@click.option('--force', is_flag=True, help='Tear down even if not in state.')
-@click.option('--aws-profile', 'aws_profile', default=None, help='AWS profile.')
+@dev_group.command(name="destroy")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Tear down even if not in state.")
+@click.option("--aws-profile", "aws_profile", default=None, help="AWS profile.")
 @click.pass_context
 def dev_destroy_cmd(ctx, name, force, aws_profile):
     """Tear down the dev host (instance, SG, EIP, key)."""
     from remote_compose.exceptions import RemoteComposeError
 
     if not aws_profile:
-        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get('AWS_PROFILE')
+        aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get("AWS_PROFILE")
 
     service = _build_service()
     try:
@@ -438,12 +569,18 @@ def dev_destroy_cmd(ctx, name, force, aws_profile):
     click.echo(f"  ✓ destroyed '{name}'")
 
 
-@dev_group.command(name='logs')
-@click.argument('name')
-@click.option('--service', 'service_name', default=None,
-              help='Tail logs for one compose service (default: all).')
-@click.option('--follow', '-f', is_flag=True, help='Stream logs continuously.')
-@click.option('--tail', 'tail_n', type=int, default=100, help='Lines per service (default 100).')
+@dev_group.command(name="logs")
+@click.argument("name")
+@click.option(
+    "--service",
+    "service_name",
+    default=None,
+    help="Tail logs for one compose service (default: all).",
+)
+@click.option("--follow", "-f", is_flag=True, help="Stream logs continuously.")
+@click.option(
+    "--tail", "tail_n", type=int, default=100, help="Lines per service (default 100)."
+)
 def dev_logs_cmd(name, service_name, follow, tail_n):
     """Tail docker compose logs from the dev host."""
     from remote_compose.exceptions import RemoteComposeError
@@ -463,8 +600,9 @@ def dev_logs_cmd(name, service_name, follow, tail_n):
     private_pem, _ = service.credential_service.get_ssh_keypair(cred)
 
     import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pem', delete=False) as keyfile:
-        keyfile.write(private_pem.encode('utf-8'))
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as keyfile:
+        keyfile.write(private_pem.encode("utf-8"))
         keypath = keyfile.name
     os.chmod(keypath, 0o600)
 
@@ -477,14 +615,23 @@ def dev_logs_cmd(name, service_name, follow, tail_n):
         f"sudo docker compose -f $(ls docker-compose.yml local.yml compose.yml 2>/dev/null | head -1) "
         f"logs {flags} {svc_arg}"
     )
-    cmd = ['ssh', '-t', '-i', keypath, '-o', 'StrictHostKeyChecking=no',
-           '-o', 'UserKnownHostsFile=/dev/null',
-           f'ec2-user@{record.public_ip}', remote]
-    os.execvp('ssh', cmd)
+    cmd = [
+        "ssh",
+        "-t",
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"ec2-user@{record.public_ip}",
+        remote,
+    ]
+    os.execvp("ssh", cmd)
 
 
-@dev_group.command(name='status')
-@click.argument('name')
+@dev_group.command(name="status")
+@click.argument("name")
 def dev_status_cmd(name):
     """Show dev-host status, IP, source, uptime."""
     from remote_compose.exceptions import RemoteComposeError
@@ -515,7 +662,7 @@ def _region_from_rc_yml(ctx) -> str | None:
     """Best-effort load region from rc.yml — returns None if unavailable."""
     import yaml
 
-    config_path = (ctx.obj or {}).get('config_path') or 'rc.yml'
+    config_path = (ctx.obj or {}).get("config_path") or "rc.yml"
     p = Path(config_path)
     if not p.exists():
         return None
@@ -523,10 +670,12 @@ def _region_from_rc_yml(ctx) -> str | None:
         cfg = yaml.safe_load(p.read_text()) or {}
     except yaml.YAMLError:
         return None
-    return cfg.get('region') or (cfg.get('aws') or {}).get('region')
+    return cfg.get("region") or (cfg.get("aws") or {}).get("region")
 
 
-def _sg_id_for_instance(instance_id: str | None, region: str, aws_profile: str | None) -> str | None:
+def _sg_id_for_instance(
+    instance_id: str | None, region: str, aws_profile: str | None
+) -> str | None:
     """Look up the SG attached to a dev-host instance."""
     if not instance_id:
         return None
@@ -541,7 +690,9 @@ def _sg_id_for_instance(instance_id: str | None, region: str, aws_profile: str |
         return None
 
 
-def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | None) -> None:
+def _authorize_sg_port(
+    sg_id: str, port: int, region: str, aws_profile: str | None
+) -> None:
     """Best-effort open one TCP port in a security group; ignore "already exists"."""
     import boto3
     from botocore.exceptions import ClientError
@@ -551,12 +702,14 @@ def _authorize_sg_port(sg_id: str, port: int, region: str, aws_profile: str | No
     try:
         ec2.authorize_security_group_ingress(
             GroupId=sg_id,
-            IpPermissions=[{
-                "IpProtocol": "tcp",
-                "FromPort": port,
-                "ToPort": port,
-                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-            }],
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": port,
+                    "ToPort": port,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                }
+            ],
         )
     except ClientError as exc:
         if "InvalidPermission.Duplicate" in str(exc):
@@ -581,8 +734,16 @@ def _read_claude_credentials() -> str | None:
     if sys.platform == "darwin":
         try:
             result = subprocess.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-                capture_output=True, text=True, check=True,
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             return result.stdout.strip()
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -621,7 +782,9 @@ def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
         # Without them the in-box claude shows 'Not logged in'.
         creds = _read_claude_credentials()
         if creds:
-            creds_fd, creds_tmp = tempfile.mkstemp(suffix=".json", prefix="rc-claude-creds-")
+            creds_fd, creds_tmp = tempfile.mkstemp(
+                suffix=".json", prefix="rc-claude-creds-"
+            )
             try:
                 with os.fdopen(creds_fd, "w") as fh:
                     fh.write(creds)
@@ -637,9 +800,12 @@ def _build_claude_config_tarball(claude_dir: Path, claude_json: Path) -> Path:
     return Path(tarpath)
 
 
-def _copy_claude_config(public_ip: str, private_pem: str,
-                        claude_dir: Path | None = None,
-                        claude_json: Path | None = None) -> None:
+def _copy_claude_config(
+    public_ip: str,
+    private_pem: str,
+    claude_dir: Path | None = None,
+    claude_json: Path | None = None,
+) -> None:
     """Stage local claude auth + minimal config onto the box and restart its tmux.
 
     Default sources: ~/.claude/ and ~/.claude.json. Override via the kwargs
@@ -666,37 +832,55 @@ def _copy_claude_config(public_ip: str, private_pem: str,
         kf.write(private_pem.encode("utf-8"))
         keypath = kf.name
     os.chmod(keypath, 0o600)
-    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+    ssh_opts = [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=5",
+    ]
 
     try:
         # Stage the tarball
         subprocess.run(
-            ["scp"] + ssh_opts + [str(tarball),
-                                  f"ec2-user@{public_ip}:/tmp/rc-claude-cfg.tar.gz"],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ["scp"]
+            + ssh_opts
+            + [str(tarball), f"ec2-user@{public_ip}:/tmp/rc-claude-cfg.tar.gz"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         # Extract + chown — done via sudo so it works regardless of /home/ec2-user perm state
         subprocess.run(
-            ["ssh"] + ssh_opts + [
+            ["ssh"]
+            + ssh_opts
+            + [
                 f"ec2-user@{public_ip}",
                 "sudo tar -xzf /tmp/rc-claude-cfg.tar.gz -C /home/ec2-user/ && "
                 "sudo chown -R ec2-user:ec2-user /home/ec2-user/.claude /home/ec2-user/.claude.json 2>/dev/null || true && "
                 "sudo chmod 600 /home/ec2-user/.claude.json 2>/dev/null || true && "
-                "rm -f /tmp/rc-claude-cfg.tar.gz"
+                "rm -f /tmp/rc-claude-cfg.tar.gz",
             ],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         # Restart the in-box claude tmux so it picks up the new config (cloud-init
         # may have started a session earlier with no auth — that one is killed).
         # Best-effort: the start script may not exist yet if cloud-init hasn't
         # finished; the user will get a fresh session on first `rc dev attach`.
         subprocess.run(
-            ["ssh"] + ssh_opts + [
+            ["ssh"]
+            + ssh_opts
+            + [
                 f"ec2-user@{public_ip}",
-                "sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh 2>/dev/null || true"
+                "sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh 2>/dev/null || true",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     finally:
         try:
@@ -705,7 +889,15 @@ def _copy_claude_config(public_ip: str, private_pem: str,
             pass
 
 
-_SECRET_FIELDS = ("gh_token", "anthropic_key", "anthropic_api_key", "api_key", "secret", "password", "token")
+_SECRET_FIELDS = (
+    "gh_token",
+    "anthropic_key",
+    "anthropic_api_key",
+    "api_key",
+    "secret",
+    "password",
+    "token",
+)
 
 
 def _sanitized_source_repr(source) -> str:
@@ -723,7 +915,9 @@ def _sanitized_source_repr(source) -> str:
             safe[k] = "<redacted>" if v else ""
         elif k == "extra_env" and isinstance(v, dict):
             safe[k] = {
-                kk: ("<redacted>" if any(s in kk.lower() for s in _SECRET_FIELDS) else vv)
+                kk: (
+                    "<redacted>" if any(s in kk.lower() for s in _SECRET_FIELDS) else vv
+                )
                 for kk, vv in v.items()
             }
         else:
@@ -748,7 +942,7 @@ def _ports_from_compose(compose_paths) -> list[int]:
             data = yaml.safe_load(path.read_text()) or {}
         except (OSError, yaml.YAMLError):
             return
-        for inc in (data.get("include") or []):
+        for inc in data.get("include") or []:
             inc_path = inc.get("path") if isinstance(inc, dict) else inc
             if inc_path:
                 resolved = (path.parent / inc_path).resolve()
@@ -757,7 +951,7 @@ def _ports_from_compose(compose_paths) -> list[int]:
         for _, svc in (data.get("services") or {}).items():
             if not isinstance(svc, dict):
                 continue
-            for p in (svc.get("ports") or []):
+            for p in svc.get("ports") or []:
                 if isinstance(p, str):
                     # "host:container" or "host:container/proto" or "host"
                     host = p.split(":")[0].split("/")[0]
@@ -773,6 +967,7 @@ def _ports_from_compose(compose_paths) -> list[int]:
                         pass
                 elif isinstance(p, int):
                     seen.add(p)
+
     for cp in compose_paths:
         _scan(Path(cp).resolve())
     return sorted(seen)
@@ -791,21 +986,42 @@ def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> No
         kf.write(private_pem.encode("utf-8"))
         keypath = kf.name
     os.chmod(keypath, 0o600)
-    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+    ssh_opts = [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=5",
+    ]
     basename = Path(compose_path).name
     # Stage to /tmp first (always writable) then sudo cp + chown — same race
     # as env files: /home/ec2-user might still be root-owned at this point.
-    subprocess.run(["scp"] + ssh_opts + [compose_path, f"ec2-user@{public_ip}:/tmp/{basename}"],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}",
-                    f"sudo cp /tmp/{basename} /home/ec2-user/{basename} && "
-                    f"sudo chown ec2-user:ec2-user /home/ec2-user/{basename}"],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["scp"] + ssh_opts + [compose_path, f"ec2-user@{public_ip}:/tmp/{basename}"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["ssh"]
+        + ssh_opts
+        + [
+            f"ec2-user@{public_ip}",
+            f"sudo cp /tmp/{basename} /home/ec2-user/{basename} && "
+            f"sudo chown ec2-user:ec2-user /home/ec2-user/{basename}",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
-                               env_files: tuple, repo_name: str) -> None:
+def _wait_for_ssh_and_copy_env(
+    public_ip: str, private_pem: str, env_files: tuple, repo_name: str
+) -> None:
     """Wait for SSH, then SCP each env file under /home/ec2-user/<repo_name>.
 
     Uses sudo mkdir+chown for the destination because /home/ec2-user may
@@ -821,12 +1037,26 @@ def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
         keypath = kf.name
     os.chmod(keypath, 0o600)
 
-    ssh_opts = ["-i", keypath, "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+    ssh_opts = [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=5",
+    ]
     deadline = time.time() + 180
     while time.time() < deadline:
-        if subprocess.call(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "true"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        if (
+            subprocess.call(
+                ["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            == 0
+        ):
             break
         time.sleep(5)
     else:
@@ -834,9 +1064,12 @@ def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
 
     # Stage to /tmp/rc-dev-envs first (always writable), then sudo-cp into the
     # repo dir. This avoids racing the cloud-init chown of /home/ec2-user.
-    subprocess.run(["ssh"] + ssh_opts + [f"ec2-user@{public_ip}",
-                    "mkdir -p /tmp/rc-dev-envs"], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "mkdir -p /tmp/rc-dev-envs"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
     # Stage every env file in /tmp/rc-dev-envs/ ONLY. The bootstrap script
     # picks them up AFTER cloning the repos and places them into the right
@@ -857,8 +1090,12 @@ def _wait_for_ssh_and_copy_env(public_ip: str, private_pem: str,
         # to the original subpath in the bootstrap script's placement loop.
         flat = str(rel).replace("/", "__")
         subprocess.run(
-            ["scp"] + ssh_opts + [str(abs_f), f"ec2-user@{public_ip}:/tmp/rc-dev-envs/{flat}"],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ["scp"]
+            + ssh_opts
+            + [str(abs_f), f"ec2-user@{public_ip}:/tmp/rc-dev-envs/{flat}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
 
@@ -866,7 +1103,7 @@ def _aws_profile_from_rc_yml(ctx) -> str | None:
     """Best-effort load aws_profile from rc.yml."""
     import yaml
 
-    config_path = (ctx.obj or {}).get('config_path') or 'rc.yml'
+    config_path = (ctx.obj or {}).get("config_path") or "rc.yml"
     p = Path(config_path)
     if not p.exists():
         return None
@@ -874,18 +1111,22 @@ def _aws_profile_from_rc_yml(ctx) -> str | None:
         cfg = yaml.safe_load(p.read_text()) or {}
     except yaml.YAMLError:
         return None
-    return cfg.get('aws_profile') or (cfg.get('aws') or {}).get('profile')
+    return cfg.get("aws_profile") or (cfg.get("aws") or {}).get("profile")
 
 
 # ---------- legacy ECS dev push (kept for backwards compat) ----------
 
 
-@dev_group.command(name='push')
-@click.argument('service', required=False)
-@click.option('--watch', 'watch', is_flag=True,
-              help='Watch local sources and re-push on every change '
-                   '(debounced ~250ms). Requires fswatch (macOS) or '
-                   'inotifywait (Linux).')
+@dev_group.command(name="push")
+@click.argument("service", required=False)
+@click.option(
+    "--watch",
+    "watch",
+    is_flag=True,
+    help="Watch local sources and re-push on every change "
+    "(debounced ~250ms). Requires fswatch (macOS) or "
+    "inotifywait (Linux).",
+)
 @click.pass_context
 def dev_push_cmd(ctx, service, watch):
     """[Legacy ECS] Push local dev_volume source(s) to a running ECS task via EFS.
@@ -894,10 +1135,12 @@ def dev_push_cmd(ctx, service, watch):
     in place for stacks that already use the ECS dev_volume path.
     """
     from remote_compose.dev_push import (
-        DevPushError, push_all, watch_and_push,
+        DevPushError,
+        push_all,
+        watch_and_push,
     )
 
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     rc_path = Path(config_path)
     if not rc_path.exists():
         click.echo(f"Error: {rc_path} not found.", err=True)
@@ -912,9 +1155,7 @@ def dev_push_cmd(ctx, service, watch):
         else:
             results = push_all(rc_path, service, progress=_progress)
             total = sum(r["elapsed_s"] for r in results)
-            click.echo(
-                f"\n  pushed {len(results)} dev_volume(s) in {total:.1f}s."
-            )
+            click.echo(f"\n  pushed {len(results)} dev_volume(s) in {total:.1f}s.")
     except DevPushError as exc:
         click.echo(f"\n  rc dev push: {exc}", err=True)
         sys.exit(1)

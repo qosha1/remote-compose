@@ -7,9 +7,9 @@ from pathlib import Path
 import click
 
 
-@click.command(name='lifecycle')
-@click.argument('hook')
-@click.argument('service', required=False, default=None)
+@click.command(name="lifecycle")
+@click.argument("hook")
+@click.argument("service", required=False, default=None)
 @click.pass_context
 def lifecycle_cmd(ctx, hook, service):
     """Run a named lifecycle hook declared on a service in rc.yml.
@@ -20,15 +20,18 @@ def lifecycle_cmd(ctx, hook, service):
       rc lifecycle migrate django           # disambiguate explicitly
       rc lifecycle createsuperuser
     """
-    config_path = ctx.obj.get('config_path')
-    path = Path(config_path) if config_path else Path.cwd() / 'rc.yml'
+    config_path = ctx.obj.get("config_path")
+    path = Path(config_path) if config_path else Path.cwd() / "rc.yml"
     if not path.exists():
         click.echo(f"rc lifecycle: {path} not found.", err=True)
         raise click.exceptions.Exit(1)
 
     from remote_compose.cli_v2 import (
-        build_deploy_context, load_rc_yml, resolve_provider,
+        build_deploy_context,
+        load_rc_yml,
+        resolve_provider,
     )
+
     try:
         version, raw, v2 = load_rc_yml(path)
     except Exception as exc:
@@ -87,7 +90,9 @@ def lifecycle_cmd(ctx, hook, service):
 
     click.echo(f"rc lifecycle: running {hook} on {target}...")
     result = provider.exec(
-        deploy_ctx, target, list(spec.command),
+        deploy_ctx,
+        target,
+        list(spec.command),
         interactive=spec.interactive,
     )
     if result.stdout:

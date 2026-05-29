@@ -1,0 +1,18 @@
+# rc-nq6.2: flake8 config aligned to black (line-length 88).
+# flake8 does not read pyproject.toml without a plugin, so config lives here.
+[flake8]
+max-line-length = 88
+# black compatibility:
+#   E203 (whitespace before ':') and W503 (line break before binary operator)
+#     conflict with black's formatting.
+#   E501 (line too long) — black owns line length (88); the only lines black
+#     leaves long are unsplittable string literals/URLs, so E501 here is pure
+#     noise. Let the formatter be the single authority on width.
+extend-ignore = E203, W503, E501
+exclude =
+    .git,
+    .venv,
+    __pycache__,
+    build,
+    dist,
+    */migrations/*

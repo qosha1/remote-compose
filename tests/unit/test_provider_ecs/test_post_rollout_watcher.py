@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
@@ -24,16 +23,21 @@ def _ctx(tmp_path: Path) -> DeployContext:
         project="watch-test",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-1",
-            "cluster": "watch-test-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-1",
+                "cluster": "watch-test-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "django": ServiceSpec(
-                name="django", cpu=256, memory=512, type="application",
+                name="django",
+                cpu=256,
+                memory=512,
+                type="application",
                 image="x:latest",
             ),
         },
@@ -57,10 +61,12 @@ def _setup_client(*, pre_events=None, post_events=None):
         else:
             events = post_events or []
         return {
-            "services": [{
-                "serviceName": services[0],
-                "events": events,
-            }],
+            "services": [
+                {
+                    "serviceName": services[0],
+                    "events": events,
+                }
+            ],
         }
 
     client.describe_services.side_effect = fake_describe
@@ -76,13 +82,16 @@ class TestPostRolloutWatcher:
             pre_events=[{"id": "old-1", "message": "task started"}],
             post_events=[
                 {"id": "old-1", "message": "task started"},
-                {"id": "new-1", "message": (
-                    "ResourceInitializationError: unable to retrieve secret "
-                    "from asm: User: arn:aws:sts::111:assumed-role/"
-                    "ecsTaskExecutionRole is not authorized to perform: "
-                    "secretsmanager:GetSecretValue on resource: "
-                    "watch-test/django"
-                )},
+                {
+                    "id": "new-1",
+                    "message": (
+                        "ResourceInitializationError: unable to retrieve secret "
+                        "from asm: User: arn:aws:sts::111:assumed-role/"
+                        "ecsTaskExecutionRole is not authorized to perform: "
+                        "secretsmanager:GetSecretValue on resource: "
+                        "watch-test/django"
+                    ),
+                },
             ],
         )
         provider = ECSProvider(
@@ -144,24 +153,39 @@ class TestPostRolloutWatcher:
         client = _setup_client(
             pre_events=[],
             post_events=[
-                {"id": "ev-1", "message": (
-                    "(service django) (task abc) (port 8000) is unhealthy in "
-                    "(target-group arn:aws:...) due to (reason Health checks failed)."
-                )},
-                {"id": "ev-2", "message": (
-                    "(service django) has stopped 1 running tasks: (task abc)."
-                )},
-                {"id": "ev-3", "message": (
-                    "(service django) (task def) (port 8000) is unhealthy in "
-                    "(target-group arn:aws:...) due to (reason Health checks failed)."
-                )},
-                {"id": "ev-4", "message": (
-                    "(service django) has stopped 1 running tasks: (task def)."
-                )},
-                {"id": "ev-5", "message": (
-                    "(service django) (task ghi) (port 8000) is unhealthy in "
-                    "(target-group arn:aws:...) due to (reason Health checks failed)."
-                )},
+                {
+                    "id": "ev-1",
+                    "message": (
+                        "(service django) (task abc) (port 8000) is unhealthy in "
+                        "(target-group arn:aws:...) due to (reason Health checks failed)."
+                    ),
+                },
+                {
+                    "id": "ev-2",
+                    "message": (
+                        "(service django) has stopped 1 running tasks: (task abc)."
+                    ),
+                },
+                {
+                    "id": "ev-3",
+                    "message": (
+                        "(service django) (task def) (port 8000) is unhealthy in "
+                        "(target-group arn:aws:...) due to (reason Health checks failed)."
+                    ),
+                },
+                {
+                    "id": "ev-4",
+                    "message": (
+                        "(service django) has stopped 1 running tasks: (task def)."
+                    ),
+                },
+                {
+                    "id": "ev-5",
+                    "message": (
+                        "(service django) (task ghi) (port 8000) is unhealthy in "
+                        "(target-group arn:aws:...) due to (reason Health checks failed)."
+                    ),
+                },
             ],
         )
         provider = ECSProvider(
@@ -174,7 +198,9 @@ class TestPostRolloutWatcher:
         assert "django" in joined
         assert "health_check_grace_period" in joined or "grace period" in joined
 
-    def test_single_health_check_failure_not_flagged_as_flap(self, tmp_path, monkeypatch):
+    def test_single_health_check_failure_not_flagged_as_flap(
+        self, tmp_path, monkeypatch
+    ):
         """One unhealthy event during a normal rolling deploy isn't a
         flap — could be a stale task draining. Need 3+ to declare flap."""
         monkeypatch.setenv("RC_POST_ROLLOUT_WATCH_S", "2")
@@ -182,12 +208,18 @@ class TestPostRolloutWatcher:
         client = _setup_client(
             pre_events=[],
             post_events=[
-                {"id": "ev-1", "message": (
-                    "(service django) (task abc) is unhealthy in (target-group ...)."
-                )},
-                {"id": "ev-2", "message": (
-                    "(service django) registered 1 targets in (target-group ...)."
-                )},
+                {
+                    "id": "ev-1",
+                    "message": (
+                        "(service django) (task abc) is unhealthy in (target-group ...)."
+                    ),
+                },
+                {
+                    "id": "ev-2",
+                    "message": (
+                        "(service django) registered 1 targets in (target-group ...)."
+                    ),
+                },
             ],
         )
         provider = ECSProvider(
@@ -252,14 +284,16 @@ class TestPostRolloutWatcher:
         events: list[str] = []
         client = _setup_client(
             pre_events=[
-                {"id": "stale-1", "message": (
-                    "ResourceInitializationError: ancient failure"
-                )},
+                {
+                    "id": "stale-1",
+                    "message": ("ResourceInitializationError: ancient failure"),
+                },
             ],
             post_events=[
-                {"id": "stale-1", "message": (
-                    "ResourceInitializationError: ancient failure"
-                )},
+                {
+                    "id": "stale-1",
+                    "message": ("ResourceInitializationError: ancient failure"),
+                },
                 {"id": "new-1", "message": "task started ok"},
             ],
         )

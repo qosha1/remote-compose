@@ -9,16 +9,13 @@ re-emits the task def.
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from remote_compose.cli_commands._dispatchers import (
     _detect_orphan_secret_keys_v2,
 )
-
 
 _DEFAULT_SVC = object()
 
@@ -45,10 +42,12 @@ def _make_ecs_mock(*, td_secrets):
     }
     ecs.describe_task_definition.return_value = {
         "taskDefinition": {
-            "containerDefinitions": [{
-                "name": "django",
-                "secrets": td_secrets,
-            }],
+            "containerDefinitions": [
+                {
+                    "name": "django",
+                    "secrets": td_secrets,
+                }
+            ],
         },
     }
     return ecs
@@ -68,12 +67,15 @@ class TestDetectOrphanKeys:
     def test_no_orphans_when_all_keys_referenced(self, tmp_path):
         env_file = tmp_path / ".django"
         env_file.write_text("FOO=bar\nBAZ=qux\n")
-        ecs = _make_ecs_mock(td_secrets=[
-            _td_secret("FOO", "myproj/django", "FOO"),
-            _td_secret("BAZ", "myproj/django", "BAZ"),
-        ])
+        ecs = _make_ecs_mock(
+            td_secrets=[
+                _td_secret("FOO", "myproj/django", "FOO"),
+                _td_secret("BAZ", "myproj/django", "BAZ"),
+            ]
+        )
         orphans = _detect_orphan_secret_keys_v2(
-            ecs, "cluster",
+            ecs,
+            "cluster",
             _v2(),
             [_file_secret("django", str(env_file))],
             tmp_path,
@@ -84,11 +86,14 @@ class TestDetectOrphanKeys:
         env_file = tmp_path / ".django"
         env_file.write_text("FOO=bar\nNEWKEY=newval\n")
         # Task def only references FOO — NEWKEY is orphan.
-        ecs = _make_ecs_mock(td_secrets=[
-            _td_secret("FOO", "myproj/django", "FOO"),
-        ])
+        ecs = _make_ecs_mock(
+            td_secrets=[
+                _td_secret("FOO", "myproj/django", "FOO"),
+            ]
+        )
         orphans = _detect_orphan_secret_keys_v2(
-            ecs, "cluster",
+            ecs,
+            "cluster",
             _v2(),
             [_file_secret("django", str(env_file))],
             tmp_path,
@@ -98,11 +103,14 @@ class TestDetectOrphanKeys:
     def test_multiple_orphan_keys(self, tmp_path):
         env_file = tmp_path / ".django"
         env_file.write_text("A=1\nB=2\nC=3\n")
-        ecs = _make_ecs_mock(td_secrets=[
-            _td_secret("A", "myproj/django", "A"),
-        ])
+        ecs = _make_ecs_mock(
+            td_secrets=[
+                _td_secret("A", "myproj/django", "A"),
+            ]
+        )
         orphans = _detect_orphan_secret_keys_v2(
-            ecs, "cluster",
+            ecs,
+            "cluster",
             _v2(),
             [_file_secret("django", str(env_file))],
             tmp_path,
@@ -114,12 +122,15 @@ class TestDetectOrphanKeys:
         django_env.write_text("D_OLD=1\nD_NEW=2\n")
         postgres_env = tmp_path / ".postgres"
         postgres_env.write_text("P_OLD=1\nP_NEW=2\n")
-        ecs = _make_ecs_mock(td_secrets=[
-            _td_secret("D_OLD", "myproj/django", "D_OLD"),
-            _td_secret("P_OLD", "myproj/postgres", "P_OLD"),
-        ])
+        ecs = _make_ecs_mock(
+            td_secrets=[
+                _td_secret("D_OLD", "myproj/django", "D_OLD"),
+                _td_secret("P_OLD", "myproj/postgres", "P_OLD"),
+            ]
+        )
         orphans = _detect_orphan_secret_keys_v2(
-            ecs, "cluster",
+            ecs,
+            "cluster",
             _v2(),
             [
                 _file_secret("django", str(django_env)),
@@ -139,7 +150,8 @@ class TestDetectOrphanKeys:
         ecs.describe_services.side_effect = RuntimeError("network")
         # Best-effort — does not raise.
         orphans = _detect_orphan_secret_keys_v2(
-            ecs, "cluster",
+            ecs,
+            "cluster",
             _v2(),
             [_file_secret("django", str(env_file))],
             tmp_path,
@@ -150,7 +162,8 @@ class TestDetectOrphanKeys:
         env_file = tmp_path / ".django"
         env_file.write_text("FOO=bar\n")
         orphans = _detect_orphan_secret_keys_v2(
-            MagicMock(), "cluster",
+            MagicMock(),
+            "cluster",
             _v2(services={}),
             [_file_secret("django", str(env_file))],
             tmp_path,
@@ -159,6 +172,10 @@ class TestDetectOrphanKeys:
 
     def test_no_file_secrets_returns_empty(self, tmp_path):
         orphans = _detect_orphan_secret_keys_v2(
-            MagicMock(), "cluster", _v2(), [], tmp_path,
+            MagicMock(),
+            "cluster",
+            _v2(),
+            [],
+            tmp_path,
         )
         assert orphans == {}

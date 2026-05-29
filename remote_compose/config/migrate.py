@@ -12,7 +12,6 @@ from typing import Any
 
 from . import v1_schema
 
-
 # Common stateful images — used to generate friendlier warnings when the
 # migrator sees a type=infrastructure service with no volumes, so users see
 # a concrete suggestion instead of a generic "add volumes:" nag.
@@ -31,9 +30,7 @@ def _stateful_hint(name: str) -> str:
     lower = name.lower()
     for key, (vol, mount) in _STATEFUL_HINTS.items():
         if key in lower:
-            return (
-                f" (suggested: volumes: [{{name: {vol}, mount: {mount}}}])"
-            )
+            return f" (suggested: volumes: [{{name: {vol}, mount: {mount}}}])"
     return ""
 
 
@@ -73,7 +70,9 @@ def migrate(v1: dict[str, Any], strict: bool = False) -> MigrationResult:
     services_v2: dict[str, dict[str, Any]] = {}
     for name, raw in (v1.get("services") or {}).items():
         if not isinstance(raw, dict):
-            warnings.append(f"service {name!r}: expected mapping, got {type(raw).__name__}")
+            warnings.append(
+                f"service {name!r}: expected mapping, got {type(raw).__name__}"
+            )
             continue
         svc: dict[str, Any] = {}
         for key in v1_schema.V1_SERVICE_KEYS:
@@ -97,11 +96,13 @@ def migrate(v1: dict[str, Any], strict: bool = False) -> MigrationResult:
     secrets_v2: list[dict[str, Any]] = []
     for item in v1.get("secrets") or []:
         if isinstance(item, str):
-            secrets_v2.append({
-                "name": _derive_secret_name(item),
-                "source": "file",
-                "path": item,
-            })
+            secrets_v2.append(
+                {
+                    "name": _derive_secret_name(item),
+                    "source": "file",
+                    "path": item,
+                }
+            )
         elif isinstance(item, dict) and "name" in item and "source" in item:
             secrets_v2.append(item)
         else:

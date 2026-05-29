@@ -151,17 +151,17 @@ class TestImportFailureFallsBackToDelete:
         )
         runner = MagicMock()
         runner.import_resource.side_effect = TerraformError(
-            cmd=["terraform", "import"], returncode=1,
-            stdout="", stderr="Error: Invalid for_each argument",
+            cmd=["terraform", "import"],
+            returncode=1,
+            stdout="",
+            stderr="Error: Invalid for_each argument",
         )
 
         provider._reconcile_orphan_log_groups(ctx, runner)
 
         assert any("AccessDenied" in m for m in progress_msgs)
         # Surfaces a copy-pasteable manual recovery command.
-        assert any(
-            "aws logs delete-log-group" in m for m in progress_msgs
-        )
+        assert any("aws logs delete-log-group" in m for m in progress_msgs)
 
 
 class TestOrphanAlreadyImported:
@@ -219,9 +219,7 @@ class TestAWSDescribeFailureSurfaces:
         provider._reconcile_orphan_log_groups(ctx, runner)
 
         # Visible warning + does NOT raise (so apply still gets a chance).
-        assert any(
-            "orphan log-group reconcile skipped" in m for m in progress_msgs
-        )
+        assert any("orphan log-group reconcile skipped" in m for m in progress_msgs)
         assert any("Unable to locate credentials" in m for m in progress_msgs)
         runner.import_resource.assert_not_called()
 

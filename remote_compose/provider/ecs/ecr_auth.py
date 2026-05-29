@@ -36,17 +36,22 @@ class ECRAuthenticator:
         _user, password = decoded.split(":", 1)
 
         login = subprocess.run(
-            [self.docker_bin, "login",
-             "--username", "AWS",
-             "--password-stdin",
-             f"https://{registry}"],
-            input=password, text=True,
-            capture_output=True, timeout=60,
+            [
+                self.docker_bin,
+                "login",
+                "--username",
+                "AWS",
+                "--password-stdin",
+                f"https://{registry}",
+            ],
+            input=password,
+            text=True,
+            capture_output=True,
+            timeout=60,
         )
         if login.returncode != 0:
             raise ECRAuthError(
-                f"docker login failed for {registry}: "
-                f"{login.stderr.strip()[:200]}"
+                f"docker login failed for {registry}: " f"{login.stderr.strip()[:200]}"
             )
         self._authed.add(registry)
         return {"registry": registry, "cached": False}

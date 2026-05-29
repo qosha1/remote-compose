@@ -26,7 +26,6 @@ from remote_compose.fix_nginx_conf import (
     write_ecs_nginx,
 )
 
-
 # ---------------------------------------------------------------------------
 # Pure-template rendering
 # ---------------------------------------------------------------------------
@@ -35,7 +34,9 @@ from remote_compose.fix_nginx_conf import (
 class TestRenderNginxConf:
     def test_includes_resolver_directive_at_http_level(self):
         out = render_nginx_conf(
-            [Upstream("django", 8000)], project="myapp", vpc_cidr="10.42.0.0/16",
+            [Upstream("django", 8000)],
+            project="myapp",
+            vpc_cidr="10.42.0.0/16",
         )
         # The .2 of the VPC CIDR; the only resolver reachable from a
         # Fargate ENI.
@@ -51,10 +52,13 @@ class TestRenderNginxConf:
         # generator must NOT emit an `upstream NAME { ... }` directive.
         # (Comments mentioning the word "upstream" are fine.)
         out = render_nginx_conf(
-            [Upstream("django", 8000)], project="myapp", vpc_cidr="10.42.0.0/16",
+            [Upstream("django", 8000)],
+            project="myapp",
+            vpc_cidr="10.42.0.0/16",
         )
         # The literal "upstream X {" syntax must not appear.
         import re
+
         assert re.search(r"^\s*upstream\s+\S+\s*\{", out, re.MULTILINE) is None
         # And no `server django:8000;` outside server{} blocks
         # (the upstream-block antipattern).
@@ -62,7 +66,9 @@ class TestRenderNginxConf:
 
     def test_proxy_pass_uses_variable_form_with_fqdn(self):
         out = render_nginx_conf(
-            [Upstream("django", 8000)], project="myapp", vpc_cidr="10.42.0.0/16",
+            [Upstream("django", 8000)],
+            project="myapp",
+            vpc_cidr="10.42.0.0/16",
         )
         # FQDN form because nginx's resolver doesn't follow the
         # /etc/resolv.conf search domain.
@@ -299,8 +305,16 @@ class TestFixNginxConfCommand:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["-c", str(rc), "fix", "nginx-conf",
-             "--upstream", "django:8000", "--django", "django"],
+            [
+                "-c",
+                str(rc),
+                "fix",
+                "nginx-conf",
+                "--upstream",
+                "django:8000",
+                "--django",
+                "django",
+            ],
         )
         assert result.exit_code == 0, result.output
         nginx_path = tmp_path / "compose/ecs/nginx/nginx.conf"
@@ -316,25 +330,30 @@ class TestFixNginxConfCommand:
 
     def test_falls_back_to_rc_yml_services(self, tmp_path):
         # No --upstream → use rc.yml services with port set.
-        rc = self._write_rc(tmp_path, services={
-            "django": {"port": 8000, "public": True},
-            "redis": {"port": 6379},
-        })
+        rc = self._write_rc(
+            tmp_path,
+            services={
+                "django": {"port": 8000, "public": True},
+                "redis": {"port": 6379},
+            },
+        )
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["-c", str(rc), "fix", "nginx-conf"],
+            cli,
+            ["-c", str(rc), "fix", "nginx-conf"],
         )
         assert result.exit_code == 0, result.output
         content = (tmp_path / "compose/ecs/nginx/nginx.conf").read_text()
         # Both services appear as upstreams in the generated conf.
-        assert 'django.myapp.local:8000' in content
-        assert 'redis.myapp.local:6379' in content
+        assert "django.myapp.local:8000" in content
+        assert "redis.myapp.local:6379" in content
 
     def test_no_upstreams_anywhere_errors(self, tmp_path):
         rc = self._write_rc(tmp_path, services={})
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["-c", str(rc), "fix", "nginx-conf"],
+            cli,
+            ["-c", str(rc), "fix", "nginx-conf"],
         )
         assert result.exit_code != 0
         assert "no --upstream" in result.output
@@ -343,8 +362,14 @@ class TestFixNginxConfCommand:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["-c", str(tmp_path / "missing.yml"), "fix", "nginx-conf",
-             "--upstream", "django:8000"],
+            [
+                "-c",
+                str(tmp_path / "missing.yml"),
+                "fix",
+                "nginx-conf",
+                "--upstream",
+                "django:8000",
+            ],
         )
         assert result.exit_code != 0
         assert "not found" in result.output
@@ -357,16 +382,22 @@ class TestFixNginxConfCommand:
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["-c", str(rc), "fix", "nginx-conf",
-             "--upstream", "django:8000"],
+            ["-c", str(rc), "fix", "nginx-conf", "--upstream", "django:8000"],
         )
         assert result.exit_code != 0
         assert "already exists" in result.output
         # Run with --force succeeds.
         result = runner.invoke(
             cli,
-            ["-c", str(rc), "fix", "nginx-conf",
-             "--upstream", "django:8000", "--force"],
+            [
+                "-c",
+                str(rc),
+                "fix",
+                "nginx-conf",
+                "--upstream",
+                "django:8000",
+                "--force",
+            ],
         )
         assert result.exit_code == 0, result.output
 

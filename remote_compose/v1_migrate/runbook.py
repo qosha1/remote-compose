@@ -47,7 +47,8 @@ def write_runbook_json(entries: list[RunbookEntry], path: Path) -> None:
 
 
 def find_undo_for_phase(
-    entries: list[RunbookEntry], phase_name: str,
+    entries: list[RunbookEntry],
+    phase_name: str,
 ) -> str | None:
     for e in entries:
         if e.phase == phase_name:

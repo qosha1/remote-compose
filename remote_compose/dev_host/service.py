@@ -11,10 +11,10 @@ aws_client_factory; production wires the real ones via the constructor.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -24,7 +24,7 @@ from ..exceptions import (
 )
 from ..utils.ec2_instance_types import get_arch
 from ..utils.ami_catalog import get_ami_id
-from .bootstrap import SourceSpec, source_from_dict
+from .bootstrap import SourceSpec
 
 
 # Minimal local stand-in for BaseService — avoids the from-django import
@@ -34,6 +34,7 @@ from .bootstrap import SourceSpec, source_from_dict
 class _StandaloneBase:
     def __init__(self):
         import logging
+
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def log_info(self, msg, **_):
@@ -71,13 +72,18 @@ class FilesystemKeyStore:
 
         # SimpleNamespace gives a generic credential-like object with .id and .name.
         from types import SimpleNamespace
+
         return SimpleNamespace(id=str(priv_path), name=name)
 
     def get_credential(self, credential_id):
         """Look up by either path or name; returns a credential-like object."""
         from types import SimpleNamespace
 
-        path = Path(credential_id) if str(credential_id).endswith(".pem") else self.root / f"{credential_id}.pem"
+        path = (
+            Path(credential_id)
+            if str(credential_id).endswith(".pem")
+            else self.root / f"{credential_id}.pem"
+        )
         return SimpleNamespace(id=str(path))
 
     def get_ssh_keypair(self, credential) -> tuple[str, str]:
@@ -248,7 +254,9 @@ class DevHostService(BaseService):
         )
 
         # render cloud-init for the source
-        user_data = source.render_user_data() if hasattr(source, "render_user_data") else ""
+        user_data = (
+            source.render_user_data() if hasattr(source, "render_user_data") else ""
+        )
 
         tags = {
             "DevHost": name,

@@ -5,7 +5,6 @@ the ALB terminates TLS.
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -114,7 +113,8 @@ class TestPatchAppend:
     def test_explicit_settings_module_dotted(self, tmp_path):
         _scaffold(tmp_path, "backend/config/settings/production.py")
         result = fix_django_tls(
-            tmp_path, settings_module="config.settings.production",
+            tmp_path,
+            settings_module="config.settings.production",
         )
         assert result.appended is True
         prod = (tmp_path / "backend/config/settings/production.py").read_text()
@@ -144,6 +144,7 @@ class TestRendersValidPython:
 
     def test_patched_settings_imports_clean(self, tmp_path):
         import ast
+
         _scaffold(tmp_path)
         fix_django_tls(tmp_path)
         content = (tmp_path / "backend/config/settings/local.py").read_text()
@@ -152,6 +153,7 @@ class TestRendersValidPython:
 
     def test_patched_settings_with_secure_cookies_imports_clean(self, tmp_path):
         import ast
+
         _scaffold(tmp_path)
         fix_django_tls(tmp_path, secure_cookies=True)
         content = (tmp_path / "backend/config/settings/local.py").read_text()
@@ -191,9 +193,13 @@ class TestHasRcJ08Marker:
     def test_explicit_settings_module_without_marker(self, tmp_path):
         _scaffold(tmp_path, "backend/config/settings/production.py")
         # Don't apply the patch.
-        assert has_rc_j08_marker(
-            tmp_path, settings_module="config.settings.production",
-        ) is None
+        assert (
+            has_rc_j08_marker(
+                tmp_path,
+                settings_module="config.settings.production",
+            )
+            is None
+        )
 
     def test_unknown_settings_module_returns_none_silently(self, tmp_path):
         _scaffold(tmp_path)
@@ -222,7 +228,8 @@ class TestPatchExecutionApplied:
             "https://www.example.com",
         ]
         assert ns["SECURE_PROXY_SSL_HEADER"] == (
-            "HTTP_X_FORWARDED_PROTO", "https",
+            "HTTP_X_FORWARDED_PROTO",
+            "https",
         )
         assert ns["USE_X_FORWARDED_HOST"] is True
 
@@ -236,5 +243,7 @@ class TestPatchExecutionApplied:
         # Without the env var set, the patch leaves CSRF_TRUSTED_ORIGINS
         # at whatever Django's default would be (not set in the patched
         # block). The other two settings always apply.
-        assert "CSRF_TRUSTED_ORIGINS" not in ns or ns.get("CSRF_TRUSTED_ORIGINS") is None
+        assert (
+            "CSRF_TRUSTED_ORIGINS" not in ns or ns.get("CSRF_TRUSTED_ORIGINS") is None
+        )
         assert ns["SECURE_PROXY_SSL_HEADER"] is not None

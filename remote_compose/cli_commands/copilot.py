@@ -11,28 +11,49 @@ from pathlib import Path
 import click
 
 
-@click.group(name='copilot')
+@click.group(name="copilot")
 def copilot_group():
     """AWS Copilot migration. (Copilot is end-of-support 2026-06-12.)"""
     pass
 
 
-@copilot_group.command(name='import')
-@click.option('--from', 'from_dir', default='./copilot', show_default=True,
-              type=click.Path(exists=True, file_okay=False),
-              help='Path to the source copilot/ directory.')
-@click.option('--out', 'out_dir', default='.', show_default=True,
-              type=click.Path(file_okay=False),
-              help='Where to write rc.yml + docker-compose.yml + IMPORT_SUMMARY.md.')
-@click.option('--env', 'env_name', default=None,
-              help="Copilot environment to pin (production/staging/dev). "
-                   "If unset, base manifest values are used and "
-                   "${COPILOT_ENVIRONMENT_NAME} stays literal in secret ARNs.")
-@click.option('--project', 'project_name', default=None,
-              help='rc.yml v2 project field. Defaults to the parent dir name '
-                   'of the copilot/ tree.')
-@click.option('--force', is_flag=True,
-              help='Overwrite existing rc.yml / docker-compose.yml in --out.')
+@copilot_group.command(name="import")
+@click.option(
+    "--from",
+    "from_dir",
+    default="./copilot",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Path to the source copilot/ directory.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default=".",
+    show_default=True,
+    type=click.Path(file_okay=False),
+    help="Where to write rc.yml + docker-compose.yml + IMPORT_SUMMARY.md.",
+)
+@click.option(
+    "--env",
+    "env_name",
+    default=None,
+    help="Copilot environment to pin (production/staging/dev). "
+    "If unset, base manifest values are used and "
+    "${COPILOT_ENVIRONMENT_NAME} stays literal in secret ARNs.",
+)
+@click.option(
+    "--project",
+    "project_name",
+    default=None,
+    help="rc.yml v2 project field. Defaults to the parent dir name "
+    "of the copilot/ tree.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing rc.yml / docker-compose.yml in --out.",
+)
 def copilot_import(from_dir, out_dir, env_name, project_name, force):
     """Translate a copilot/ tree to rc.yml v2 + docker-compose.yml.
 
@@ -54,9 +75,9 @@ def copilot_import(from_dir, out_dir, env_name, project_name, force):
     target = Path(out_dir).resolve()
     target.mkdir(parents=True, exist_ok=True)
 
-    rc_path = target / 'rc.yml'
-    compose_path = target / 'docker-compose.yml'
-    summary_path = target / 'IMPORT_SUMMARY.md'
+    rc_path = target / "rc.yml"
+    compose_path = target / "docker-compose.yml"
+    summary_path = target / "IMPORT_SUMMARY.md"
 
     for p in (rc_path, compose_path):
         if p.exists() and not force:

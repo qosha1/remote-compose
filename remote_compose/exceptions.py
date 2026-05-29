@@ -43,11 +43,13 @@ class RemoteComposeError(Exception):
 # Validation Errors (1000-1999)
 class ValidationError(RemoteComposeError):
     """Raised when validation fails."""
+
     code = 1000
 
 
 class ConfigurationError(ValidationError):
     """Raised when configuration is invalid."""
+
     code = 1001
 
 
@@ -61,359 +63,421 @@ class RemoteConnectionError(RemoteComposeError):
     OS-level errors (refused / reset / aborted) as if they were rc-domain
     errors. New code should always use this name.
     """
+
     code = 2000
 
 
 class SSHConnectionError(RemoteConnectionError):
     """Raised when SSH connection fails."""
+
     code = 2001
 
     def __init__(self, message, host=None, port=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['host'] = host
-        self.details['port'] = port
+        self.details["host"] = host
+        self.details["port"] = port
 
 
 class SSHAuthenticationError(SSHConnectionError):
     """Raised when SSH authentication fails."""
+
     code = 2002
 
 
 class SSHTimeoutError(SSHConnectionError):
     """Raised when SSH connection times out."""
+
     code = 2003
 
 
 class SSHHostKeyError(SSHConnectionError):
     """Raised when SSH host key verification fails."""
+
     code = 2004
 
 
 # Docker Errors (3000-3999)
 class DockerError(RemoteComposeError):
     """Base class for Docker-related errors."""
+
     code = 3000
 
 
 class DockerContextError(DockerError):
     """Raised when Docker context operations fail."""
+
     code = 3001
 
 
 class DockerComposeError(DockerError):
     """Raised when docker-compose operations fail."""
+
     code = 3002
 
 
 class ComposeFileError(DockerComposeError):
     """Raised when compose file is invalid or missing."""
+
     code = 3003
 
 
 # Deployment Errors (4000-4999)
 class DeploymentError(RemoteComposeError):
     """Raised when deployment execution fails."""
+
     code = 4000
 
 
 class DeploymentTimeoutError(DeploymentError):
     """Raised when deployment times out."""
+
     code = 4001
 
 
 class RollbackError(DeploymentError):
     """Raised when rollback fails."""
+
     code = 4002
 
 
 class DeploymentInProgressError(DeploymentError):
     """Raised when attempting concurrent deployments on same target."""
+
     code = 4003
 
 
 # Credential Errors (5000-5999)
 class CredentialError(RemoteComposeError):
     """Raised when credential operations fail."""
+
     code = 5000
 
 
 class EncryptionError(CredentialError):
     """Raised when encryption/decryption fails."""
+
     code = 5001
 
 
 # AWS Errors (6000-6999)
 class AWSError(RemoteComposeError):
     """Raised when AWS operations fail."""
+
     code = 6000
 
 
 class EC2Error(AWSError):
     """Raised when EC2 operations fail."""
+
     code = 6001
 
 
 class AWSCredentialError(AWSError):
     """Raised when AWS credentials are invalid."""
+
     code = 6002
 
 
 # ECS Errors (7000-7999)
 class ECSError(AWSError):
     """Base class for ECS-related errors."""
+
     code = 7000
 
 
 class ECSClusterError(ECSError):
     """Raised when ECS cluster operations fail."""
+
     code = 7001
 
     def __init__(self, message, cluster_name=None, region=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['cluster_name'] = cluster_name
-        self.details['region'] = region
+        self.details["cluster_name"] = cluster_name
+        self.details["region"] = region
 
 
 class ECSClusterNotFoundError(ECSClusterError):
     """Raised when ECS cluster is not found."""
+
     code = 7002
 
 
 class ECSServiceError(ECSError):
     """Raised when ECS service operations fail."""
+
     code = 7003
 
     def __init__(self, message, service_name=None, cluster_name=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['service_name'] = service_name
-        self.details['cluster_name'] = cluster_name
+        self.details["service_name"] = service_name
+        self.details["cluster_name"] = cluster_name
 
 
 class ECSServiceNotFoundError(ECSServiceError):
     """Raised when ECS service is not found."""
+
     code = 7004
 
 
 class ECSTaskDefinitionError(ECSError):
     """Raised when task definition operations fail."""
+
     code = 7005
 
     def __init__(self, message, task_definition=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['task_definition'] = task_definition
+        self.details["task_definition"] = task_definition
 
 
 class ECSTaskError(ECSError):
     """Raised when ECS task operations fail."""
+
     code = 7006
 
     def __init__(self, message, task_arn=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['task_arn'] = task_arn
+        self.details["task_arn"] = task_arn
 
 
 class ECSDeploymentError(ECSError):
     """Raised when ECS deployment fails."""
+
     code = 7007
 
 
 class ECSDeploymentTimeoutError(ECSDeploymentError):
     """Raised when ECS deployment times out waiting for stability."""
+
     code = 7008
 
 
 class ComposeConversionError(ECSError):
     """Raised when converting docker-compose to ECS format fails."""
+
     code = 7009
 
     def __init__(self, message, compose_file=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['compose_file'] = compose_file
+        self.details["compose_file"] = compose_file
 
 
 # ECR Errors (8000-8999)
 class ECRError(AWSError):
     """Base class for ECR-related errors."""
+
     code = 8000
 
 
 class ECRRepositoryError(ECRError):
     """Raised when ECR repository operations fail."""
+
     code = 8001
 
     def __init__(self, message, repository_name=None, region=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['repository_name'] = repository_name
-        self.details['region'] = region
+        self.details["repository_name"] = repository_name
+        self.details["region"] = region
 
 
 class ECRAuthenticationError(ECRError):
     """Raised when ECR authentication fails."""
+
     code = 8002
 
     def __init__(self, message, region=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['region'] = region
+        self.details["region"] = region
 
 
 class ECRImageError(ECRError):
     """Raised when ECR image operations fail."""
+
     code = 8003
 
     def __init__(self, message, repository_name=None, image_tag=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['repository_name'] = repository_name
-        self.details['image_tag'] = image_tag
+        self.details["repository_name"] = repository_name
+        self.details["image_tag"] = image_tag
 
 
 # EFS Errors (9000-9999)
 class EFSError(AWSError):
     """Base class for EFS-related errors."""
+
     code = 9000
 
 
 class EFSFileSystemError(EFSError):
     """Raised when EFS file system operations fail."""
+
     code = 9001
 
     def __init__(self, message, file_system_id=None, file_system_name=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['file_system_id'] = file_system_id
-        self.details['file_system_name'] = file_system_name
+        self.details["file_system_id"] = file_system_id
+        self.details["file_system_name"] = file_system_name
 
 
 class EFSAccessPointError(EFSError):
     """Raised when EFS access point operations fail."""
+
     code = 9002
 
-    def __init__(self, message, access_point_id=None, file_system_id=None, path=None, **kwargs):
+    def __init__(
+        self, message, access_point_id=None, file_system_id=None, path=None, **kwargs
+    ):
         super().__init__(message, **kwargs)
-        self.details['access_point_id'] = access_point_id
-        self.details['file_system_id'] = file_system_id
-        self.details['path'] = path
+        self.details["access_point_id"] = access_point_id
+        self.details["file_system_id"] = file_system_id
+        self.details["path"] = path
 
 
 class EFSMountTargetError(EFSError):
     """Raised when EFS mount target operations fail."""
+
     code = 9003
 
-    def __init__(self, message, file_system_id=None, mount_target_id=None, subnet_id=None, **kwargs):
+    def __init__(
+        self,
+        message,
+        file_system_id=None,
+        mount_target_id=None,
+        subnet_id=None,
+        **kwargs,
+    ):
         super().__init__(message, **kwargs)
-        self.details['file_system_id'] = file_system_id
-        self.details['mount_target_id'] = mount_target_id
-        self.details['subnet_id'] = subnet_id
+        self.details["file_system_id"] = file_system_id
+        self.details["mount_target_id"] = mount_target_id
+        self.details["subnet_id"] = subnet_id
 
 
 # VPC Errors (10000-10999)
 class VPCError(AWSError):
     """Base class for VPC-related errors."""
+
     code = 10000
 
 
 class VPCProvisioningError(VPCError):
     """Raised when VPC provisioning fails."""
+
     code = 10001
 
     def __init__(self, message, vpc_id=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['vpc_id'] = vpc_id
+        self.details["vpc_id"] = vpc_id
 
 
 class SubnetError(VPCError):
     """Raised when subnet operations fail."""
+
     code = 10002
 
 
 # ALB Errors (11000-11999)
 class ALBError(AWSError):
     """Base class for Application Load Balancer errors."""
+
     code = 11000
 
 
 class ALBProvisioningError(ALBError):
     """Raised when ALB provisioning fails."""
+
     code = 11001
 
     def __init__(self, message, alb_arn=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['alb_arn'] = alb_arn
+        self.details["alb_arn"] = alb_arn
 
 
 class TargetGroupError(ALBError):
     """Raised when target group operations fail."""
+
     code = 11002
 
     def __init__(self, message, target_group_arn=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['target_group_arn'] = target_group_arn
+        self.details["target_group_arn"] = target_group_arn
 
 
 # Secrets Manager Errors (12000-12999)
 class SecretsManagerError(AWSError):
     """Base class for Secrets Manager errors."""
+
     code = 12000
 
 
 class SecretProvisioningError(SecretsManagerError):
     """Raised when secret creation/update fails."""
+
     code = 12001
 
     def __init__(self, message, secret_name=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['secret_name'] = secret_name
+        self.details["secret_name"] = secret_name
 
 
 # Service Connect Errors (13000-13999)
 class ServiceConnectError(AWSError):
     """Base class for Service Connect errors."""
+
     code = 13000
 
 
 class NamespaceError(ServiceConnectError):
     """Raised when Cloud Map namespace operations fail."""
+
     code = 13001
 
     def __init__(self, message, namespace_name=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['namespace_name'] = namespace_name
+        self.details["namespace_name"] = namespace_name
 
 
 # Security Group Errors (14000-14999)
 class SecurityGroupError(AWSError):
     """Base class for Security Group errors."""
+
     code = 14000
 
 
 class SecurityGroupProvisioningError(SecurityGroupError):
     """Raised when security group creation/configuration fails."""
+
     code = 14001
 
     def __init__(self, message, security_group_id=None, **kwargs):
         super().__init__(message, **kwargs)
-        self.details['security_group_id'] = security_group_id
+        self.details["security_group_id"] = security_group_id
 
 
 # DevHost Errors (15000-15999) — `rc dev` EC2 dev-host system
 class DevHostError(RemoteComposeError):
     """Base class for `rc dev` errors."""
+
     code = 15000
 
 
 class DevHostAlreadyExistsError(ValidationError):
     """Raised when creating a dev host with a name already in state."""
+
     code = 15001
 
 
 class DevHostNotFoundError(ValidationError):
     """Raised when looking up a dev host that isn't in state."""
+
     code = 15002
 
 
 class SourceDetectionError(ValidationError):
     """Raised when auto-detecting a source from cwd fails (no git repo, etc.)."""
+
     code = 15003
 
 
 class CloudInitRenderError(DevHostError):
     """Raised when a SourceSpec.render_user_data() can't produce valid cloud-init."""
+
     code = 15004

@@ -20,15 +20,15 @@ from .notification_tasks import (
 
 __all__ = [
     # Deployment tasks
-    'deploy_async',
-    'rollback_async',
-    'check_deployment_health',
-    'cleanup_old_deployments',
+    "deploy_async",
+    "rollback_async",
+    "check_deployment_health",
+    "cleanup_old_deployments",
     # Health tasks
-    'check_target_health',
-    'check_all_targets_health',
-    'run_health_checks',
+    "check_target_health",
+    "check_all_targets_health",
+    "run_health_checks",
     # Notification tasks
-    'send_deployment_notification',
-    'send_webhook',
+    "send_deployment_notification",
+    "send_webhook",
 ]

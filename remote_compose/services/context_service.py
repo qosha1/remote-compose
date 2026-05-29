@@ -22,13 +22,13 @@ class ContextService(BaseService):
     def __init__(self, target_service: Optional[TargetService] = None, **kwargs):
         super().__init__(**kwargs)
         self.target_service = target_service or TargetService()
-        self.docker_command = get_setting('DOCKER_COMMAND', 'docker')
+        self.docker_command = get_setting("DOCKER_COMMAND", "docker")
 
     def create_context(
         self,
         name: str,
         target: DeploymentTarget,
-        description: str = '',
+        description: str = "",
         is_default: bool = False,
         sync_to_docker: bool = True,
     ) -> DockerContext:
@@ -72,13 +72,13 @@ class ContextService(BaseService):
             try:
                 self._create_docker_context(context)
                 context.is_synced = True
-                context.save(update_fields=['is_synced', 'updated_at'])
+                context.save(update_fields=["is_synced", "updated_at"])
             except Exception as e:
                 self.log_warning(f"Failed to sync context to Docker: {e}")
                 # Context is still usable, just not synced to Docker daemon
 
         self.log_info(f"Created Docker context: {name}")
-        self.notify_observers('context_created', context=context)
+        self.notify_observers("context_created", context=context)
 
         return context
 
@@ -120,11 +120,7 @@ class ContextService(BaseService):
         except DockerContext.DoesNotExist:
             raise ValidationError(f"Context not found: {name}")
 
-    def update_context(
-        self,
-        context: DockerContext,
-        **kwargs
-    ) -> DockerContext:
+    def update_context(self, context: DockerContext, **kwargs) -> DockerContext:
         """
         Update a Docker context.
 
@@ -135,7 +131,7 @@ class ContextService(BaseService):
         Returns:
             Updated DockerContext instance
         """
-        allowed_fields = ['name', 'description', 'is_default', 'metadata']
+        allowed_fields = ["name", "description", "is_default", "metadata"]
 
         for field, value in kwargs.items():
             if field in allowed_fields:
@@ -144,7 +140,7 @@ class ContextService(BaseService):
         context.save()
 
         self.log_info(f"Updated context: {context.name}")
-        self.notify_observers('context_updated', context=context)
+        self.notify_observers("context_updated", context=context)
 
         return context
 
@@ -166,7 +162,7 @@ class ContextService(BaseService):
             True if deleted successfully
         """
         # Check for active deployments
-        active_statuses = ['pending', 'running']
+        active_statuses = ["pending", "running"]
         if context.deployments.filter(status__in=active_statuses).exists():
             if not force:
                 raise ValidationError(
@@ -185,7 +181,7 @@ class ContextService(BaseService):
         context.delete()
 
         self.log_info(f"Deleted context: {name}")
-        self.notify_observers('context_deleted', context_name=name)
+        self.notify_observers("context_deleted", context_name=name)
 
         return True
 
@@ -204,7 +200,7 @@ class ContextService(BaseService):
         Returns:
             QuerySet of DockerContext instances
         """
-        qs = DockerContext.objects.select_related('target').all()
+        qs = DockerContext.objects.select_related("target").all()
 
         if target:
             qs = qs.filter(target=target)
@@ -227,7 +223,7 @@ class ContextService(BaseService):
         context.save()
 
         self.log_info(f"Set default context: {context.name}")
-        self.notify_observers('context_set_default', context=context)
+        self.notify_observers("context_set_default", context=context)
 
         return context
 
@@ -244,16 +240,16 @@ class ContextService(BaseService):
         # Test underlying target connection
         result = self.target_service.test_connection(context.target)
 
-        if result['success']:
+        if result["success"]:
             # Also test docker command through context
             try:
                 docker_result = self._test_docker_context(context)
-                result['docker_accessible'] = docker_result['success']
-                if not docker_result['success']:
-                    result['docker_message'] = docker_result['message']
+                result["docker_accessible"] = docker_result["success"]
+                if not docker_result["success"]:
+                    result["docker_message"] = docker_result["message"]
             except Exception as e:
-                result['docker_accessible'] = False
-                result['docker_message'] = str(e)
+                result["docker_accessible"] = False
+                result["docker_message"] = str(e)
 
         return result
 
@@ -274,7 +270,7 @@ class ContextService(BaseService):
 
             self._create_docker_context(context)
             context.is_synced = True
-            context.save(update_fields=['is_synced', 'updated_at'])
+            context.save(update_fields=["is_synced", "updated_at"])
 
             self.log_info(f"Synced context to Docker: {context.name}")
             return True
@@ -291,18 +287,21 @@ class ContextService(BaseService):
         """
         try:
             result = subprocess.run(
-                [self.docker_command, 'context', 'ls', '--format', '{{json .}}'],
+                [self.docker_command, "context", "ls", "--format", "{{json .}}"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
 
             if result.returncode != 0:
-                raise DockerContextError(f"Failed to list Docker contexts: {result.stderr}")
+                raise DockerContextError(
+                    f"Failed to list Docker contexts: {result.stderr}"
+                )
 
             import json
+
             contexts = []
-            for line in result.stdout.strip().split('\n'):
+            for line in result.stdout.strip().split("\n"):
                 if line:
                     contexts.append(json.loads(line))
 
@@ -317,15 +316,15 @@ class ContextService(BaseService):
         """Create context in Docker daemon."""
         cmd = [
             self.docker_command,
-            'context',
-            'create',
+            "context",
+            "create",
             context.name,
-            '--docker',
-            f'host={context.endpoint}',
+            "--docker",
+            f"host={context.endpoint}",
         ]
 
         if context.description:
-            cmd.extend(['--description', context.description])
+            cmd.extend(["--description", context.description])
 
         result = subprocess.run(
             cmd,
@@ -336,7 +335,7 @@ class ContextService(BaseService):
 
         if result.returncode != 0:
             # Check if context already exists
-            if 'already exists' in result.stderr.lower():
+            if "already exists" in result.stderr.lower():
                 self.log_warning(f"Context {context.name} already exists in Docker")
                 return
 
@@ -347,7 +346,7 @@ class ContextService(BaseService):
     def _delete_docker_context(self, context_name: str):
         """Delete context from Docker daemon."""
         result = subprocess.run(
-            [self.docker_command, 'context', 'rm', context_name],
+            [self.docker_command, "context", "rm", context_name],
             capture_output=True,
             text=True,
             timeout=30,
@@ -355,7 +354,7 @@ class ContextService(BaseService):
 
         if result.returncode != 0:
             # Ignore if context doesn't exist
-            if 'not found' not in result.stderr.lower():
+            if "not found" not in result.stderr.lower():
                 raise DockerContextError(
                     f"Failed to delete Docker context: {result.stderr}"
                 )
@@ -364,7 +363,14 @@ class ContextService(BaseService):
         """Test Docker context by running docker info."""
         try:
             result = subprocess.run(
-                [self.docker_command, '--context', context.name, 'info', '--format', '{{.ServerVersion}}'],
+                [
+                    self.docker_command,
+                    "--context",
+                    context.name,
+                    "info",
+                    "--format",
+                    "{{.ServerVersion}}",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -372,22 +378,22 @@ class ContextService(BaseService):
 
             if result.returncode == 0:
                 return {
-                    'success': True,
-                    'message': f"Docker version: {result.stdout.strip()}",
+                    "success": True,
+                    "message": f"Docker version: {result.stdout.strip()}",
                 }
             else:
                 return {
-                    'success': False,
-                    'message': result.stderr.strip(),
+                    "success": False,
+                    "message": result.stderr.strip(),
                 }
 
         except subprocess.TimeoutExpired:
             return {
-                'success': False,
-                'message': "Docker command timed out",
+                "success": False,
+                "message": "Docker command timed out",
             }
         except Exception as e:
             return {
-                'success': False,
-                'message': str(e),
+                "success": False,
+                "message": str(e),
             }

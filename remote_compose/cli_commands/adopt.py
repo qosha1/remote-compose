@@ -18,12 +18,16 @@ from pathlib import Path
 import click
 
 
-@click.command(name='adopt')
-@click.option('--from-local-tfstate', 'from_local_tfstate',
-              type=click.Path(exists=True, dir_okay=False), default=None,
-              help='Path to an existing terraform.tfstate to copy into the '
-                   'configured s3 backend. Use when migrating a stack that '
-                   'was previously deployed under backend.type=local.')
+@click.command(name="adopt")
+@click.option(
+    "--from-local-tfstate",
+    "from_local_tfstate",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to an existing terraform.tfstate to copy into the "
+    "configured s3 backend. Use when migrating a stack that "
+    "was previously deployed under backend.type=local.",
+)
 @click.pass_context
 def adopt_cmd(ctx, from_local_tfstate):
     """Bring a live AWS stack under terraform management.
@@ -41,7 +45,7 @@ def adopt_cmd(ctx, from_local_tfstate):
     """
     from remote_compose.state_backend.adopt import adopt_v1_to_v2
 
-    config_path = ctx.obj.get('config_path') or 'rc.yml'
+    config_path = ctx.obj.get("config_path") or "rc.yml"
     rc_path = Path(config_path).resolve()
     if not rc_path.exists():
         click.echo(f"Error: {rc_path} not found.", err=True)
@@ -55,12 +59,12 @@ def adopt_cmd(ctx, from_local_tfstate):
             "drop the flag to use default from-scratch adoption."
         )
 
-    working_dir = rc_path.parent / 'terraform' / 'ecs'
+    working_dir = rc_path.parent / "terraform" / "ecs"
     working_dir.mkdir(parents=True, exist_ok=True)
 
     click.echo(f"\nrc adopt — {rc_path}")
     click.echo(f"  working_dir: {working_dir}")
-    click.echo(f"  walking AWS + generating imports...")
+    click.echo("  walking AWS + generating imports...")
 
     result = adopt_v1_to_v2(rc_yml_path=rc_path, working_dir=working_dir)
 
@@ -81,5 +85,4 @@ def adopt_cmd(ctx, from_local_tfstate):
         raise click.exceptions.Exit(1)
 
     click.echo("\n  Stack is now under terraform management.")
-    click.echo("  Run `rc plan` to verify no drift, then `rc deploy` "
-               "as needed.")
+    click.echo("  Run `rc plan` to verify no drift, then `rc deploy` " "as needed.")

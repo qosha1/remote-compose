@@ -13,7 +13,6 @@ explicitly in rc.yml.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.base import SecretRef
@@ -33,11 +32,13 @@ def _ctx(tmp_path, services, secrets):
         project="rc-test-z30",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "rc-test-z30",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "rc-test-z30",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -51,11 +52,17 @@ def test_env_override_drops_collision_from_per_service_secrets(tmp_path):
     # Service 'celery' has NO override — gets the full secrets list.
     services = {
         "django": ServiceSpec(
-            name="django", cpu=512, memory=1024, type="application",
+            name="django",
+            cpu=512,
+            memory=1024,
+            type="application",
             env={"DJANGO_ALLOWED_HOSTS": "api.example.com,localhost"},
         ),
         "celery": ServiceSpec(
-            name="celery", cpu=512, memory=1024, type="worker",
+            name="celery",
+            cpu=512,
+            memory=1024,
+            type="worker",
         ),
     }
     secrets = [
@@ -77,15 +84,14 @@ def test_env_override_drops_collision_from_per_service_secrets(tmp_path):
     )
     # Take the django task def slice up to the next aws_ecs_task_definition.
     next_td = services_tf.find("aws_ecs_task_definition", django_td_idx + 50)
-    django_block = services_tf[django_td_idx:next_td if next_td > 0 else None]
+    django_block = services_tf[django_td_idx : next_td if next_td > 0 else None]
 
     # Suppression: DJANGO_ALLOWED_HOSTS must NOT appear inside a
     # `name = "..."` line within a secrets[] entry. Cheapest check:
     # find the secrets[] block and assert it doesn't list the suppressed key.
     secrets_start = django_block.find("secrets = [")
     assert secrets_start > 0, (
-        "expected secrets[] block in django task def; got:\n"
-        + django_block
+        "expected secrets[] block in django task def; got:\n" + django_block
     )
     secrets_end = django_block.find("]", secrets_start)
     secrets_block = django_block[secrets_start:secrets_end]
@@ -100,10 +106,10 @@ def test_env_override_drops_collision_from_per_service_secrets(tmp_path):
     # Celery task def: NO override → full secrets list (collision-free).
     celery_td_idx = services_tf.find('aws_ecs_task_definition" "celery"')
     next_td = services_tf.find("aws_ecs_task_definition", celery_td_idx + 50)
-    celery_block = services_tf[celery_td_idx:next_td if next_td > 0 else None]
+    celery_block = services_tf[celery_td_idx : next_td if next_td > 0 else None]
     celery_secrets_start = celery_block.find("secrets = [")
     celery_secrets_block = celery_block[
-        celery_secrets_start:celery_block.find("]", celery_secrets_start)
+        celery_secrets_start : celery_block.find("]", celery_secrets_start)
     ]
     assert "DJANGO_ALLOWED_HOSTS" in celery_secrets_block
     assert "POSTGRES_PASSWORD" in celery_secrets_block

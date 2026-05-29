@@ -8,58 +8,49 @@ from remote_compose.models import ECSCluster
 
 
 class Command(BaseCommand):
-    help = 'Tear down ECS services and optionally infrastructure'
+    help = "Tear down ECS services and optionally infrastructure"
 
     def add_arguments(self, parser):
+        parser.add_argument("--cluster", required=True, help="ECS cluster name")
         parser.add_argument(
-            '--cluster',
-            required=True,
-            help='ECS cluster name'
+            "--services-only",
+            action="store_true",
+            help="Only tear down ECS services (preserve infrastructure)",
         )
         parser.add_argument(
-            '--services-only',
-            action='store_true',
-            help='Only tear down ECS services (preserve infrastructure)'
+            "--include-infrastructure",
+            action="store_true",
+            help="Also destroy VPC, ALB, security groups, etc.",
         )
         parser.add_argument(
-            '--include-infrastructure',
-            action='store_true',
-            help='Also destroy VPC, ALB, security groups, etc.'
+            "--confirm",
+            action="store_true",
+            help="Required flag to confirm destructive operation",
         )
         parser.add_argument(
-            '--confirm',
-            action='store_true',
-            help='Required flag to confirm destructive operation'
-        )
-        parser.add_argument(
-            '--project-name',
-            '-p',
-            help='Only tear down services for this project'
+            "--project-name", "-p", help="Only tear down services for this project"
         )
 
     def handle(self, *args, **options):
-        if not options['confirm']:
+        if not options["confirm"]:
             raise CommandError(
-                "This is a destructive operation. "
-                "Add --confirm flag to proceed."
+                "This is a destructive operation. " "Add --confirm flag to proceed."
             )
 
         try:
-            cluster = ECSCluster.objects.get(name=options['cluster'])
+            cluster = ECSCluster.objects.get(name=options["cluster"])
         except ECSCluster.DoesNotExist:
             raise CommandError(f"Cluster not found: {options['cluster']}")
 
         self.stdout.write(
-            self.style.WARNING(
-                f"Tearing down resources for cluster: {cluster.name}"
-            )
+            self.style.WARNING(f"Tearing down resources for cluster: {cluster.name}")
         )
 
         # Tear down ECS services
-        self._teardown_services(cluster, options.get('project_name'))
+        self._teardown_services(cluster, options.get("project_name"))
 
         # Tear down infrastructure if requested
-        if options['include_infrastructure'] and not options['services_only']:
+        if options["include_infrastructure"] and not options["services_only"]:
             self._teardown_infrastructure(cluster)
 
         self.stdout.write(self.style.SUCCESS("Teardown complete."))
@@ -122,10 +113,13 @@ class Command(BaseCommand):
 
         if tgs.exists():
             self.stdout.write(f"  Removing {tgs.count()} target groups...")
-            from remote_compose.services.aws_client_factory import get_aws_client_factory
+            from remote_compose.services.aws_client_factory import (
+                get_aws_client_factory,
+            )
 
             factory = get_aws_client_factory()
-            elbv2 = factory.get_client('elbv2',
+            elbv2 = factory.get_client(
+                "elbv2",
                 region=cluster.aws_region,
                 credential=cluster.aws_credential,
             )
@@ -149,10 +143,13 @@ class Command(BaseCommand):
             lb = cluster.load_balancer
             if lb:
                 self.stdout.write(f"    Deleting ALB: {lb.alb_dns_name}")
-                from remote_compose.services.aws_client_factory import get_aws_client_factory
+                from remote_compose.services.aws_client_factory import (
+                    get_aws_client_factory,
+                )
 
                 factory = get_aws_client_factory()
-                elbv2 = factory.get_client('elbv2',
+                elbv2 = factory.get_client(
+                    "elbv2",
                     region=cluster.aws_region,
                     credential=cluster.aws_credential,
                 )
@@ -183,10 +180,13 @@ class Command(BaseCommand):
             ns = cluster.service_connect_namespace
             if ns:
                 self.stdout.write(f"    Deleting namespace: {ns.namespace_name}")
-                from remote_compose.services.aws_client_factory import get_aws_client_factory
+                from remote_compose.services.aws_client_factory import (
+                    get_aws_client_factory,
+                )
 
                 factory = get_aws_client_factory()
-                sd = factory.get_client('servicediscovery',
+                sd = factory.get_client(
+                    "servicediscovery",
                     region=cluster.aws_region,
                     credential=cluster.aws_credential,
                 )
@@ -209,10 +209,13 @@ class Command(BaseCommand):
         sgs = SecurityGroupConfig.objects.filter(cluster=cluster)
         if sgs.exists():
             self.stdout.write(f"    Deleting {sgs.count()} security groups...")
-            from remote_compose.services.aws_client_factory import get_aws_client_factory
+            from remote_compose.services.aws_client_factory import (
+                get_aws_client_factory,
+            )
 
             factory = get_aws_client_factory()
-            ec2 = factory.get_client('ec2',
+            ec2 = factory.get_client(
+                "ec2",
                 region=cluster.aws_region,
                 credential=cluster.aws_credential,
             )
@@ -253,10 +256,13 @@ class Command(BaseCommand):
         secrets = SecretConfig.objects.filter(cluster=cluster)
         if secrets.exists():
             self.stdout.write(f"    Deleting {secrets.count()} managed secrets...")
-            from remote_compose.services.aws_client_factory import get_aws_client_factory
+            from remote_compose.services.aws_client_factory import (
+                get_aws_client_factory,
+            )
 
             factory = get_aws_client_factory()
-            sm = factory.get_client('secretsmanager',
+            sm = factory.get_client(
+                "secretsmanager",
                 region=cluster.aws_region,
                 credential=cluster.aws_credential,
             )

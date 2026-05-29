@@ -10,16 +10,15 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 import yaml
 
-from remote_compose.config.v2_schema import ServiceV2, parse as parse_v2
+from remote_compose.config.v2_schema import parse as parse_v2
 from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-
 
 # ---------------------------------------------------------------------------
 # Schema parsing
 # ---------------------------------------------------------------------------
+
 
 def _v2_yaml_with(services_yaml: str) -> dict:
     return yaml.safe_load(textwrap.dedent(f"""
@@ -62,6 +61,7 @@ def test_service_with_dockerfile_override_parses():
 # ---------------------------------------------------------------------------
 # build_deploy_context: rc.yml dockerfile WINS over compose's build.dockerfile
 # ---------------------------------------------------------------------------
+
 
 class TestBuildDeployContextOverride:
     def _setup(self, tmp_path, compose_yaml: str, rc_yaml: str):
@@ -186,6 +186,7 @@ class TestBuildDeployContextOverride:
 # ---------------------------------------------------------------------------
 # Integration: ServiceSpec.dockerfile makes it to ImageBuildSpec
 # ---------------------------------------------------------------------------
+
 
 def test_image_build_spec_uses_overridden_dockerfile_path(tmp_path):
     """End-to-end: rc.yml dockerfile flows through ServiceSpec into the

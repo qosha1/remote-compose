@@ -30,7 +30,6 @@ import pytest
 from remote_compose.v1_migrate.discover import ResourceInventory, V1Stack
 from remote_compose.v1_migrate.translate import (
     TerraformImportBlock,
-    TranslationWarning,
     translate_acm_in_place,
     translate_alb_in_place,
     translate_ecr_reuse,
@@ -41,7 +40,6 @@ from remote_compose.v1_migrate.translate import (
     translate_v1_to_v2_schema,
     translate_vpc_in_place,
 )
-
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "v1_migrate"
 V1_RC_YML = FIXTURES / "ss-debuggai-prod.rc.yml"
@@ -61,6 +59,7 @@ def inv() -> ResourceInventory:
 # ---------------------------------------------------------------------
 # v1 → v2 schema (the rc.yml shape change)
 # ---------------------------------------------------------------------
+
 
 class TestTranslateV1V2Schema:
     def test_emits_v2_top_level(self, stack):
@@ -105,6 +104,7 @@ class TestTranslateV1V2Schema:
 # EFS — IMPORT (preserve 133GB volume in-place)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateEfsInPlace:
     def test_emits_import_block_not_recreate(self, inv):
         overrides, imports, warnings = translate_efs_in_place(inv)
@@ -138,6 +138,7 @@ class TestTranslateEfsInPlace:
 # ALB — IMPORT (preserves DNS chain to api.startsimpli.com)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateAlbInPlace:
     def test_alb_imported(self, inv):
         _, imports, _ = translate_alb_in_place(inv)
@@ -161,6 +162,7 @@ class TestTranslateAlbInPlace:
 # ACM — IMPORT (cert ARN is referenced in HTTPS listener; recreate breaks SSL)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateAcmInPlace:
     def test_cert_imported_not_recreated(self, inv):
         _, imports, _ = translate_acm_in_place(inv)
@@ -171,6 +173,7 @@ class TestTranslateAcmInPlace:
 # ---------------------------------------------------------------------
 # Secrets — REFERENCE BY ARN (zero SM mutation, preserves 30d name lock)
 # ---------------------------------------------------------------------
+
 
 class TestTranslateSecretsKeepArn:
     def test_emits_arn_source_not_env_file_auto(self, inv):
@@ -208,6 +211,7 @@ class TestTranslateSecretsKeepArn:
 # VPC — IMPORT (already remote-compose:managed=true, friendly to import)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateVpcInPlace:
     def test_vpc_imported(self, inv):
         _, imports, _ = translate_vpc_in_place(inv)
@@ -228,21 +232,21 @@ class TestTranslateVpcInPlace:
 # IAM — REFERENCE BY ARN (account-wide, NOT project-managed)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateIamKeepExternal:
     def test_no_imports_emitted(self, inv):
         # IAM roles are external — v2 references by ARN, never imports.
         result = translate_iam_keep_external(inv)
         # Tuple shape distinguishes external translators from in-place ones.
         overrides, warnings = result
-        assert overrides["task_execution_role_arn"].endswith(
-            "/ecsTaskExecutionRole"
-        )
+        assert overrides["task_execution_role_arn"].endswith("/ecsTaskExecutionRole")
         assert overrides["task_role_arn"].endswith("/ecsTaskRole")
 
 
 # ---------------------------------------------------------------------
 # ECR — REUSE (same repo names work across rc v1/v2)
 # ---------------------------------------------------------------------
+
 
 class TestTranslateEcrReuse:
     def test_emits_repo_uris_for_reuse(self, inv):
@@ -251,35 +255,31 @@ class TestTranslateEcrReuse:
         # The 6 prod ECR repos must be carried forward by URI.
         assert "ss-debuggai/django" in repos
         assert "ss-debuggai/celery-worker" in repos
-        assert repos["ss-debuggai/django"].endswith(
-            "amazonaws.com/ss-debuggai/django"
-        )
+        assert repos["ss-debuggai/django"].endswith("amazonaws.com/ss-debuggai/django")
 
 
 # ---------------------------------------------------------------------
 # ECS cluster — IMPORT (preserves Service Connect namespace, log groups)
 # ---------------------------------------------------------------------
 
+
 class TestTranslateEcsClusterInPlace:
     def test_cluster_imported(self, inv):
         _, imports, _ = translate_ecs_cluster_in_place(inv)
-        assert any(
-            i.id == inv.ecs_cluster.arn for i in imports
-        )
+        assert any(i.id == inv.ecs_cluster.arn for i in imports)
 
     def test_warns_if_running_tasks_will_drain_during_cutover(self, inv):
         _, _, warnings = translate_ecs_cluster_in_place(inv)
         # 7 running tasks; cutover replaces task defs → 7 brief
         # restarts. That MUST surface as an explicit warning so the
         # operator factors it into the maintenance window budget.
-        assert any(
-            "running task" in w.message.lower() for w in warnings
-        )
+        assert any("running task" in w.message.lower() for w in warnings)
 
 
 # ---------------------------------------------------------------------
 # TerraformImportBlock dataclass shape
 # ---------------------------------------------------------------------
+
 
 class TestTerraformImportBlockShape:
     def test_block_has_id_and_to(self):
@@ -291,5 +291,7 @@ class TestTerraformImportBlockShape:
         rendered = block.render_hcl()
         assert "import {" in rendered
         assert 'id = "fs-0e8a2f9d1e006af95"' in rendered
-        assert "to  = module.efs.aws_efs_file_system.this" in rendered or \
-               "to = module.efs.aws_efs_file_system.this" in rendered
+        assert (
+            "to  = module.efs.aws_efs_file_system.this" in rendered
+            or "to = module.efs.aws_efs_file_system.this" in rendered
+        )

@@ -10,7 +10,6 @@ import textwrap
 from pathlib import Path
 from unittest import mock
 
-import pytest
 from click.testing import CliRunner
 
 from remote_compose.cli import cli
@@ -61,12 +60,12 @@ def test_dry_run_routes_to_plan_not_deploy(tmp_path):
     assert result.exit_code == 0, result.output
     # Critical: plan was dispatched, deploy was NOT.
     commands_called = [c for c, _ in calls]
-    assert "plan" in commands_called, (
-        f"--dry-run should route to plan; got {commands_called}"
-    )
-    assert "deploy" not in commands_called, (
-        f"--dry-run must NOT trigger deploy; got {commands_called}"
-    )
+    assert (
+        "plan" in commands_called
+    ), f"--dry-run should route to plan; got {commands_called}"
+    assert (
+        "deploy" not in commands_called
+    ), f"--dry-run must NOT trigger deploy; got {commands_called}"
     assert "--dry-run" in result.output or "dry-run" in result.output.lower()
 
 
@@ -84,7 +83,9 @@ def test_no_dry_run_still_deploys(tmp_path):
         side_effect=fake_dispatch,
     ):
         result = runner.invoke(
-            cli, ["-c", str(rc), "deploy"], catch_exceptions=False,
+            cli,
+            ["-c", str(rc), "deploy"],
+            catch_exceptions=False,
         )
     assert result.exit_code == 0, result.output
     assert "deploy" in calls

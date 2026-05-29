@@ -10,12 +10,10 @@ remote_compose/templates/cloud_init/.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Union
-from urllib.parse import urlparse
 
 import jinja2
 
@@ -24,7 +22,6 @@ from ..exceptions import (
     SourceDetectionError,
     ValidationError,
 )
-
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "cloud_init"
 
@@ -87,7 +84,9 @@ class GitSource:
             docker_arch=docker_arch,
             rc_dev_env_content=rc_dev_env_content,
             has_env=bool(env_lines),
-            claude_flags="--dangerously-skip-permissions" if self.skip_permissions else "",
+            claude_flags=(
+                "--dangerously-skip-permissions" if self.skip_permissions else ""
+            ),
         )
 
 
@@ -152,11 +151,13 @@ class MultiGitSource:
         normalized = []
         for r in self.repos:
             url = r["url"]
-            normalized.append({
-                "url": url,
-                "ref": r.get("ref", "main"),
-                "target": r.get("target") or _repo_name_from_url(url),
-            })
+            normalized.append(
+                {
+                    "url": url,
+                    "ref": r.get("ref", "main"),
+                    "target": r.get("target") or _repo_name_from_url(url),
+                }
+            )
         env_lines = []
         if self.gh_token:
             env_lines.append(f"export GH_TOKEN={self.gh_token!r}")
@@ -169,7 +170,9 @@ class MultiGitSource:
             docker_arch=docker_arch,
             rc_dev_env_content="\n".join(env_lines),
             has_env=bool(env_lines),
-            claude_flags="--dangerously-skip-permissions" if self.skip_permissions else "",
+            claude_flags=(
+                "--dangerously-skip-permissions" if self.skip_permissions else ""
+            ),
         )
 
 

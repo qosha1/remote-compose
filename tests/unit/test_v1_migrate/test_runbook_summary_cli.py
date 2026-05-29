@@ -18,7 +18,6 @@ from remote_compose.v1_migrate.runbook import (
     write_runbook_json,
 )
 
-
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "v1_migrate"
 V1_RC_YML = FIXTURES / "ss-debuggai-prod.rc.yml"
 INVENTORY_JSON = FIXTURES / "inventory.json"
@@ -34,6 +33,7 @@ def plan():
 # ---------------------------------------------------------------------
 # RunbookEntry + write_runbook_json
 # ---------------------------------------------------------------------
+
 
 class TestRunbook:
     def test_begin_finish_lifecycle(self):
@@ -59,10 +59,22 @@ class TestRunbook:
 
     def test_find_undo_for_phase(self):
         entries = [
-            RunbookEntry(phase="validate", started_at="t0", finished_at="t1",
-                         ok=True, undo_command="", details="ok"),
-            RunbookEntry(phase="import_state", started_at="t2", finished_at="t3",
-                         ok=True, undo_command="cp bak orig", details="ok"),
+            RunbookEntry(
+                phase="validate",
+                started_at="t0",
+                finished_at="t1",
+                ok=True,
+                undo_command="",
+                details="ok",
+            ),
+            RunbookEntry(
+                phase="import_state",
+                started_at="t2",
+                finished_at="t3",
+                ok=True,
+                undo_command="cp bak orig",
+                details="ok",
+            ),
         ]
         assert find_undo_for_phase(entries, "import_state") == "cp bak orig"
         assert find_undo_for_phase(entries, "validate") is None  # empty undo
@@ -70,12 +82,22 @@ class TestRunbook:
 
     def test_format_undo_runbook_reverse_order(self):
         entries = [
-            RunbookEntry(phase="emit_v2_terraform", started_at="t0",
-                         finished_at="t1", ok=True,
-                         undo_command="rm -rf out", details="ok"),
-            RunbookEntry(phase="import_state", started_at="t2",
-                         finished_at="t3", ok=True,
-                         undo_command="cp bak orig", details="ok"),
+            RunbookEntry(
+                phase="emit_v2_terraform",
+                started_at="t0",
+                finished_at="t1",
+                ok=True,
+                undo_command="rm -rf out",
+                details="ok",
+            ),
+            RunbookEntry(
+                phase="import_state",
+                started_at="t2",
+                finished_at="t3",
+                ok=True,
+                undo_command="cp bak orig",
+                details="ok",
+            ),
         ]
         out = format_undo_runbook(entries)
         # Reverse order: import_state should appear before emit_v2_terraform
@@ -85,6 +107,7 @@ class TestRunbook:
 # ---------------------------------------------------------------------
 # MigrationPlan.render_summary_md
 # ---------------------------------------------------------------------
+
 
 class TestRenderSummaryMd:
     def test_summary_includes_all_sections(self, plan):
@@ -125,16 +148,24 @@ class TestRenderSummaryMd:
 # CLI smoke — `rc v1 migrate plan`
 # ---------------------------------------------------------------------
 
+
 class TestCliPlan:
     def test_plan_against_inventory_snapshot(self, tmp_path):
         runner = CliRunner()
         out_dir = tmp_path / "out"
-        result = runner.invoke(cli, [
-            "v1", "migrate", "plan",
-            str(V1_RC_YML),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-            "--out", str(out_dir),
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "v1",
+                "migrate",
+                "plan",
+                str(V1_RC_YML),
+                "--inventory-snapshot",
+                str(INVENTORY_JSON),
+                "--out",
+                str(out_dir),
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert (out_dir / "main.tf").exists()
         assert (out_dir / "imports.tf").exists()
@@ -146,8 +177,11 @@ class TestCliPlan:
         assert len(seeded) == 5
         names = [e["phase"] for e in seeded]
         assert names == [
-            "validate", "emit_v2_terraform", "import_state",
-            "services_cutover", "decommission_v1",
+            "validate",
+            "emit_v2_terraform",
+            "import_state",
+            "services_cutover",
+            "decommission_v1",
         ]
 
     def test_plan_refuses_overwrite_without_force(self, tmp_path):
@@ -155,12 +189,19 @@ class TestCliPlan:
         out_dir = tmp_path / "out"
         out_dir.mkdir()
         (out_dir / "rc.yml.v2").write_text("# stale")
-        result = runner.invoke(cli, [
-            "v1", "migrate", "plan",
-            str(V1_RC_YML),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-            "--out", str(out_dir),
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "v1",
+                "migrate",
+                "plan",
+                str(V1_RC_YML),
+                "--inventory-snapshot",
+                str(INVENTORY_JSON),
+                "--out",
+                str(out_dir),
+            ],
+        )
         assert result.exit_code == 1
         assert "refusing to overwrite" in result.output.lower()
 
@@ -169,13 +210,20 @@ class TestCliPlan:
         out_dir = tmp_path / "out"
         out_dir.mkdir()
         (out_dir / "rc.yml.v2").write_text("# stale")
-        result = runner.invoke(cli, [
-            "v1", "migrate", "plan",
-            str(V1_RC_YML),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-            "--out", str(out_dir),
-            "--force",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "v1",
+                "migrate",
+                "plan",
+                str(V1_RC_YML),
+                "--inventory-snapshot",
+                str(INVENTORY_JSON),
+                "--out",
+                str(out_dir),
+                "--force",
+            ],
+        )
         assert result.exit_code == 0, result.output
         # Stale content replaced with v2 content.
         assert "# stale" not in (out_dir / "rc.yml.v2").read_text()
@@ -185,6 +233,7 @@ class TestCliPlan:
 # CLI smoke — `rc v1 migrate apply`
 # ---------------------------------------------------------------------
 
+
 class TestCliApply:
     def test_apply_import_state_requires_sandbox_tfstate(self, tmp_path):
         # The terraform-import phase is opt-in and refuses without a
@@ -192,14 +241,22 @@ class TestCliApply:
         runner = CliRunner()
         out_dir = tmp_path / "out"
         out_dir.mkdir()
-        result = runner.invoke(cli, [
-            "v1", "migrate", "apply",
-            str(V1_RC_YML),
-            "--out", str(out_dir),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-            "--phase", "import_state",
-            "--auto-approve",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "v1",
+                "migrate",
+                "apply",
+                str(V1_RC_YML),
+                "--out",
+                str(out_dir),
+                "--inventory-snapshot",
+                str(INVENTORY_JSON),
+                "--phase",
+                "import_state",
+                "--auto-approve",
+            ],
+        )
         assert result.exit_code == 3
         assert "sandbox-tfstate" in result.output.lower()
 
@@ -209,14 +266,22 @@ class TestCliApply:
         runner = CliRunner()
         out_dir = tmp_path / "out"
         out_dir.mkdir()
-        result = runner.invoke(cli, [
-            "v1", "migrate", "apply",
-            str(V1_RC_YML),
-            "--out", str(out_dir),
-            "--inventory-snapshot", str(INVENTORY_JSON),
-            "--phase", "validate",
-            "--auto-approve",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "v1",
+                "migrate",
+                "apply",
+                str(V1_RC_YML),
+                "--out",
+                str(out_dir),
+                "--inventory-snapshot",
+                str(INVENTORY_JSON),
+                "--phase",
+                "validate",
+                "--auto-approve",
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert "[validate] OK" in result.output
         assert (out_dir / "runbook.json").exists()

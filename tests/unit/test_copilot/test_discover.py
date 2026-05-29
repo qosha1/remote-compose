@@ -20,7 +20,6 @@ from remote_compose.copilot.discover import (
     discover,
 )
 
-
 CORPUS = Path(__file__).parent.parent.parent / "fixtures" / "copilot"
 
 
@@ -34,6 +33,7 @@ def _fixture(name: str) -> Path:
 # ---------------------------------------------------------------------
 # discover() returns CopilotApp on a real fixture
 # ---------------------------------------------------------------------
+
 
 class TestDiscoverSentinal:
     """sentinal: 15 services, 3 envs, addons, pipelines."""
@@ -72,14 +72,15 @@ class TestDiscoverSentinal:
         app = discover(_fixture("sentinal"))
         by_name = {s.name: s for s in app.services}
         addons = by_name["backend-celery-browser"].addons
-        assert any("s3-browser-mgr-media" in a.name for a in addons), (
-            f"expected an s3-browser-mgr-media addon, got {[a.name for a in addons]}"
-        )
+        assert any(
+            "s3-browser-mgr-media" in a.name for a in addons
+        ), f"expected an s3-browser-mgr-media addon, got {[a.name for a in addons]}"
 
 
 # ---------------------------------------------------------------------
 # discover() handles a small external real-world app
 # ---------------------------------------------------------------------
+
 
 class TestDiscoverShanika:
     def test_two_services_two_envs_one_pipeline(self):
@@ -91,6 +92,7 @@ class TestDiscoverShanika:
 # ---------------------------------------------------------------------
 # discover() handles aws/copilot-cli e2e fixtures (canonical shapes)
 # ---------------------------------------------------------------------
+
 
 class TestDiscoverCanonicalShapes:
     def test_app_with_domain_lbws_pair(self):
@@ -109,6 +111,7 @@ class TestDiscoverCanonicalShapes:
 # ---------------------------------------------------------------------
 # discover() error handling
 # ---------------------------------------------------------------------
+
 
 class TestDiscoveryErrors:
     def test_missing_dir(self, tmp_path):
@@ -155,6 +158,7 @@ class TestDiscoveryErrors:
 # CopilotApp model accessors
 # ---------------------------------------------------------------------
 
+
 class TestCopilotAppModel:
     def test_app_dataclass_shape(self, tmp_path):
         (tmp_path / "svc").mkdir()
@@ -175,13 +179,9 @@ class TestCopilotAppModel:
 
     def test_service_lookup_by_name(self, tmp_path):
         (tmp_path / "a").mkdir()
-        (tmp_path / "a" / "manifest.yml").write_text(
-            "name: a\ntype: Backend Service\n"
-        )
+        (tmp_path / "a" / "manifest.yml").write_text("name: a\ntype: Backend Service\n")
         (tmp_path / "b").mkdir()
-        (tmp_path / "b" / "manifest.yml").write_text(
-            "name: b\ntype: Worker Service\n"
-        )
+        (tmp_path / "b" / "manifest.yml").write_text("name: b\ntype: Worker Service\n")
         app = discover(tmp_path)
         assert app.service("a").type == "Backend Service"
         assert app.service("b").type == "Worker Service"

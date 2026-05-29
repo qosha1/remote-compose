@@ -22,7 +22,6 @@ import pytest
 
 from remote_compose import ephemeral
 
-
 # ---------------------------------------------------------------------------
 # parse_duration
 # ---------------------------------------------------------------------------
@@ -120,7 +119,8 @@ def test_register_stack_creates_file_and_record(registry):
 
 def test_register_stack_idempotent_updates_expires_at_preserves_created_at(registry):
     first = ephemeral.register_stack(
-        project="myapp", region="us-east-1",
+        project="myapp",
+        region="us-east-1",
         expires_at="2026-04-25T18:00:00Z",
         rc_yml_path="/tmp/rc.yml",
         terraform_dir="/tmp/tf",
@@ -128,7 +128,8 @@ def test_register_stack_idempotent_updates_expires_at_preserves_created_at(regis
         now=datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
     )
     second = ephemeral.register_stack(
-        project="myapp", region="us-east-1",
+        project="myapp",
+        region="us-east-1",
         expires_at="2026-04-26T18:00:00Z",
         rc_yml_path="/tmp/rc.yml",
         terraform_dir="/tmp/tf",
@@ -146,30 +147,46 @@ def test_register_stack_idempotent_updates_expires_at_preserves_created_at(regis
 
 def test_register_stack_two_distinct_stacks_coexist(registry):
     ephemeral.register_stack(
-        project="a", region="us-east-1", expires_at="2026-04-25T18:00:00Z",
-        rc_yml_path="/p/a/rc.yml", terraform_dir="/p/a/tf", path=registry,
+        project="a",
+        region="us-east-1",
+        expires_at="2026-04-25T18:00:00Z",
+        rc_yml_path="/p/a/rc.yml",
+        terraform_dir="/p/a/tf",
+        path=registry,
     )
     ephemeral.register_stack(
-        project="b", region="us-east-1", expires_at="2026-04-25T19:00:00Z",
-        rc_yml_path="/p/b/rc.yml", terraform_dir="/p/b/tf", path=registry,
+        project="b",
+        region="us-east-1",
+        expires_at="2026-04-25T19:00:00Z",
+        rc_yml_path="/p/b/rc.yml",
+        terraform_dir="/p/b/tf",
+        path=registry,
     )
     # Same project, different region -> distinct
     ephemeral.register_stack(
-        project="a", region="us-west-2", expires_at="2026-04-25T20:00:00Z",
-        rc_yml_path="/p/a/rc.yml", terraform_dir="/p/a/tf", path=registry,
+        project="a",
+        region="us-west-2",
+        expires_at="2026-04-25T20:00:00Z",
+        rc_yml_path="/p/a/rc.yml",
+        terraform_dir="/p/a/tf",
+        path=registry,
     )
     records = ephemeral.list_records(path=registry)
     assert {r.key for r in records} == {
-        ("a", "us-east-1"), ("b", "us-east-1"), ("a", "us-west-2"),
+        ("a", "us-east-1"),
+        ("b", "us-east-1"),
+        ("a", "us-west-2"),
     }
 
 
 def test_remove_stack_drops_only_matching_record(registry):
     for proj in ("a", "b", "c"):
         ephemeral.register_stack(
-            project=proj, region="us-east-1",
+            project=proj,
+            region="us-east-1",
             expires_at="2026-04-25T18:00:00Z",
-            rc_yml_path="/p/rc.yml", terraform_dir="/p/tf",
+            rc_yml_path="/p/rc.yml",
+            terraform_dir="/p/tf",
             path=registry,
         )
     assert ephemeral.remove_stack(project="b", region="us-east-1", path=registry)
@@ -179,28 +196,44 @@ def test_remove_stack_drops_only_matching_record(registry):
 
 def test_remove_stack_returns_false_when_no_match(registry):
     ephemeral.register_stack(
-        project="a", region="us-east-1", expires_at="2026-04-25T18:00:00Z",
-        rc_yml_path="/p/rc.yml", terraform_dir="/p/tf", path=registry,
+        project="a",
+        region="us-east-1",
+        expires_at="2026-04-25T18:00:00Z",
+        rc_yml_path="/p/rc.yml",
+        terraform_dir="/p/tf",
+        path=registry,
     )
-    assert ephemeral.remove_stack(
-        project="missing", region="us-east-1", path=registry,
-    ) is False
+    assert (
+        ephemeral.remove_stack(
+            project="missing",
+            region="us-east-1",
+            path=registry,
+        )
+        is False
+    )
     assert len(ephemeral.list_records(path=registry)) == 1
 
 
 def test_find_expired_partitions_by_now(registry):
     ephemeral.register_stack(
-        project="past", region="us-east-1",
+        project="past",
+        region="us-east-1",
         expires_at="2020-01-01T00:00:00Z",
-        rc_yml_path="/p/rc.yml", terraform_dir="/p/tf", path=registry,
+        rc_yml_path="/p/rc.yml",
+        terraform_dir="/p/tf",
+        path=registry,
     )
     ephemeral.register_stack(
-        project="future", region="us-east-1",
+        project="future",
+        region="us-east-1",
         expires_at="2099-01-01T00:00:00Z",
-        rc_yml_path="/p/rc.yml", terraform_dir="/p/tf", path=registry,
+        rc_yml_path="/p/rc.yml",
+        terraform_dir="/p/tf",
+        path=registry,
     )
     expired = ephemeral.find_expired(
-        now=datetime(2026, 4, 25, tzinfo=timezone.utc), path=registry,
+        now=datetime(2026, 4, 25, tzinfo=timezone.utc),
+        path=registry,
     )
     assert {r.project for r in expired} == {"past"}
 
@@ -222,9 +255,11 @@ def test_non_list_registry_raises_clear_error(registry):
 def test_register_stack_creates_parent_dir(tmp_path):
     nested = tmp_path / "deep" / "nest" / "ephemeral.json"
     ephemeral.register_stack(
-        project="a", region="us-east-1",
+        project="a",
+        region="us-east-1",
         expires_at="2026-04-25T18:00:00Z",
-        rc_yml_path="/p/rc.yml", terraform_dir="/p/tf",
+        rc_yml_path="/p/rc.yml",
+        terraform_dir="/p/tf",
         path=nested,
     )
     assert nested.exists()
@@ -244,16 +279,25 @@ def test_expires_at_emits_ephemeral_tags_in_providers_tf(tmp_path):
         project="ttl-demo",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1", "cluster": "ttl-demo-cluster",
-            "vpc_cidr": "10.99.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "ttl-demo-cluster",
+                "vpc_cidr": "10.99.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
-        services={"web": ServiceSpec(
-            name="web", cpu=256, memory=512, type="proxy",
-            public=True, port=80,
-        )},
+        services={
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+            )
+        },
         secrets=[],
         expires_at="2026-04-25T22:00:00Z",
     )
@@ -272,16 +316,25 @@ def test_no_expires_at_means_no_ephemeral_tags(tmp_path):
         project="prod-app",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1", "cluster": "prod-app-cluster",
-            "vpc_cidr": "10.99.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "prod-app-cluster",
+                "vpc_cidr": "10.99.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
-        services={"web": ServiceSpec(
-            name="web", cpu=256, memory=512, type="proxy",
-            public=True, port=80,
-        )},
+        services={
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+            )
+        },
         secrets=[],
     )
     out = tmp_path / "tf"
@@ -340,11 +393,12 @@ def test_deploy_ttl_then_reap_round_trip_via_fake_provider(tmp_path, monkeypatch
     )
 
     from remote_compose.cli import cli
+
     runner = CliRunner()
 
     deploy_result = runner.invoke(
         cli,
-        ['-c', str(project_dir / 'rc.yml'), 'deploy', '--ttl', '0s'],
+        ["-c", str(project_dir / "rc.yml"), "deploy", "--ttl", "0s"],
     )
     assert deploy_result.exit_code == 0, deploy_result.output
     assert "Ephemeral: stack expires at" in deploy_result.output
@@ -354,7 +408,7 @@ def test_deploy_ttl_then_reap_round_trip_via_fake_provider(tmp_path, monkeypatch
     assert records[0].project == "ttl-demo"
 
     # Past-due (expires_at == now since ttl=0s). Reap should destroy + clear.
-    reap_result = runner.invoke(cli, ['reap', '--yes'])
+    reap_result = runner.invoke(cli, ["reap", "--yes"])
     assert reap_result.exit_code == 0, reap_result.output
     assert "destroyed, 0 failed" in reap_result.output
     assert ephemeral.list_records(path=registry) == []
@@ -366,7 +420,8 @@ def test_reap_dry_run_lists_without_destroying(tmp_path, monkeypatch):
     registry = tmp_path / "ephemeral.json"
     monkeypatch.setattr(ephemeral, "DEFAULT_REGISTRY_PATH", registry)
     ephemeral.register_stack(
-        project="past-due", region="us-east-1",
+        project="past-due",
+        region="us-east-1",
         expires_at="2020-01-01T00:00:00Z",
         rc_yml_path=str(tmp_path / "missing.yml"),
         terraform_dir=str(tmp_path / "tf"),
@@ -374,7 +429,8 @@ def test_reap_dry_run_lists_without_destroying(tmp_path, monkeypatch):
     )
 
     from remote_compose.cli import cli
-    result = CliRunner().invoke(cli, ['reap', '--dry-run'])
+
+    result = CliRunner().invoke(cli, ["reap", "--dry-run"])
     assert result.exit_code == 0
     assert "past-due" in result.output
     assert "nothing destroyed" in result.output
@@ -391,14 +447,17 @@ def test_reap_skips_non_v2_rc_yml_with_clear_failure(tmp_path, monkeypatch):
     rc = tmp_path / "rc.yml"
     rc.write_text("cluster: foo\nregion: us-east-1\nproject_name: legacy\n")
     ephemeral.register_stack(
-        project="legacy", region="us-east-1",
+        project="legacy",
+        region="us-east-1",
         expires_at="2020-01-01T00:00:00Z",
-        rc_yml_path=str(rc), terraform_dir=str(tmp_path / "tf"),
+        rc_yml_path=str(rc),
+        terraform_dir=str(tmp_path / "tf"),
         path=registry,
     )
 
     from remote_compose.cli import cli
-    result = CliRunner().invoke(cli, ['reap', '--yes'])
+
+    result = CliRunner().invoke(cli, ["reap", "--yes"])
     assert result.exit_code == 1
     assert "not v2" in result.output
     # Registry preserved so the user can investigate.

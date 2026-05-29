@@ -39,9 +39,7 @@ class TestImageBuilder:
 
     def test_build_missing_tags_raises(self, tmp_path):
         with pytest.raises(ImageBuildError, match="no tags"):
-            ImageBuilder().build(
-                ImageBuildSpec(service="w", context=tmp_path, tags=[])
-            )
+            ImageBuilder().build(ImageBuildSpec(service="w", context=tmp_path, tags=[]))
 
     def test_build_nonzero_exit_raises(self, spec):
         with mock.patch("subprocess.run") as run:

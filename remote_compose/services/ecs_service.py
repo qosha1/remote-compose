@@ -12,7 +12,12 @@ import time
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from ..models import ECSCluster, ECSTaskDefinition, ECSService as ECSServiceModel, SecureCredential
+from ..models import (
+    ECSCluster,
+    ECSTaskDefinition,
+    ECSService as ECSServiceModel,
+    SecureCredential,
+)
 from ..conf import get_setting
 from ..exceptions import (
     AWSError,
@@ -29,7 +34,7 @@ from ..exceptions import (
 )
 from .base import BaseService
 from .credential_service import CredentialService
-from .aws_client_factory import AWSClientFactory, get_aws_client_factory
+from .aws_client_factory import get_aws_client_factory
 
 
 class ECSService(BaseService):
@@ -41,13 +46,11 @@ class ECSService(BaseService):
     """
 
     def __init__(
-        self,
-        credential_service: Optional[CredentialService] = None,
-        **kwargs
+        self, credential_service: Optional[CredentialService] = None, **kwargs
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
-        self.default_region = get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        self.default_region = get_setting("AWS_DEFAULT_REGION", "us-east-1")
 
     def _get_ecs_client(
         self,
@@ -58,16 +61,20 @@ class ECSService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'ecs',
+                    "ecs",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('ecs', region_name=region)
+                return boto3.client("ecs", region_name=region)
 
         except NoCredentialsError:
             raise AWSCredentialError(
@@ -86,16 +93,20 @@ class ECSService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'ec2',
+                    "ec2",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('ec2', region_name=region)
+                return boto3.client("ec2", region_name=region)
         except Exception as e:
             raise AWSError(f"Failed to create EC2 client: {e}")
 
@@ -130,7 +141,8 @@ class ECSService(BaseService):
 
         try:
             ec2 = self._get_ec2_client(
-                cluster.aws_region, cluster.aws_credential,
+                cluster.aws_region,
+                cluster.aws_credential,
             )
             resp = ec2.describe_subnets(SubnetIds=list(subnet_ids))
             subnets = resp.get("Subnets") or []
@@ -170,25 +182,27 @@ class ECSService(BaseService):
 
         try:
             cluster_arns = []
-            paginator = client.get_paginator('list_clusters')
+            paginator = client.get_paginator("list_clusters")
             for page in paginator.paginate():
-                cluster_arns.extend(page.get('clusterArns', []))
+                cluster_arns.extend(page.get("clusterArns", []))
 
             if not cluster_arns:
                 return []
 
             response = client.describe_clusters(clusters=cluster_arns)
             clusters = []
-            for cluster in response.get('clusters', []):
-                clusters.append({
-                    'arn': cluster['clusterArn'],
-                    'name': cluster['clusterName'],
-                    'status': cluster['status'],
-                    'running_tasks': cluster.get('runningTasksCount', 0),
-                    'pending_tasks': cluster.get('pendingTasksCount', 0),
-                    'active_services': cluster.get('activeServicesCount', 0),
-                    'capacity_providers': cluster.get('capacityProviders', []),
-                })
+            for cluster in response.get("clusters", []):
+                clusters.append(
+                    {
+                        "arn": cluster["clusterArn"],
+                        "name": cluster["clusterName"],
+                        "status": cluster["status"],
+                        "running_tasks": cluster.get("runningTasksCount", 0),
+                        "pending_tasks": cluster.get("pendingTasksCount", 0),
+                        "active_services": cluster.get("activeServicesCount", 0),
+                        "capacity_providers": cluster.get("capacityProviders", []),
+                    }
+                )
 
             return clusters
 
@@ -206,32 +220,34 @@ class ECSService(BaseService):
 
         try:
             response = client.describe_clusters(clusters=[cluster_name])
-            clusters = response.get('clusters', [])
+            clusters = response.get("clusters", [])
 
             if not clusters:
-                failures = response.get('failures', [])
+                failures = response.get("failures", [])
                 if failures:
                     raise ECSClusterNotFoundError(
                         f"Cluster not found: {cluster_name}",
                         cluster_name=cluster_name,
-                        region=region
+                        region=region,
                     )
                 raise ECSClusterNotFoundError(f"Cluster not found: {cluster_name}")
 
             cluster = clusters[0]
             return {
-                'arn': cluster['clusterArn'],
-                'name': cluster['clusterName'],
-                'status': cluster['status'],
-                'running_tasks': cluster.get('runningTasksCount', 0),
-                'pending_tasks': cluster.get('pendingTasksCount', 0),
-                'active_services': cluster.get('activeServicesCount', 0),
-                'capacity_providers': cluster.get('capacityProviders', []),
-                'settings': cluster.get('settings', []),
+                "arn": cluster["clusterArn"],
+                "name": cluster["clusterName"],
+                "status": cluster["status"],
+                "running_tasks": cluster.get("runningTasksCount", 0),
+                "pending_tasks": cluster.get("pendingTasksCount", 0),
+                "active_services": cluster.get("activeServicesCount", 0),
+                "capacity_providers": cluster.get("capacityProviders", []),
+                "settings": cluster.get("settings", []),
             }
 
         except ClientError as e:
-            raise ECSClusterError(f"Failed to get cluster: {e}", cluster_name=cluster_name)
+            raise ECSClusterError(
+                f"Failed to get cluster: {e}", cluster_name=cluster_name
+            )
 
     def create_cluster(
         self,
@@ -258,45 +274,45 @@ class ECSService(BaseService):
         region = region or self.default_region
 
         try:
-            create_params = {'clusterName': name}
+            create_params = {"clusterName": name}
 
             if capacity_providers:
-                create_params['capacityProviders'] = capacity_providers
-                create_params['defaultCapacityProviderStrategy'] = [
-                    {'capacityProvider': cp, 'weight': 1}
-                    for cp in capacity_providers
+                create_params["capacityProviders"] = capacity_providers
+                create_params["defaultCapacityProviderStrategy"] = [
+                    {"capacityProvider": cp, "weight": 1} for cp in capacity_providers
                 ]
 
             if settings:
-                create_params['settings'] = [
-                    {'name': k, 'value': v}
-                    for k, v in settings.items()
+                create_params["settings"] = [
+                    {"name": k, "value": v} for k, v in settings.items()
                 ]
 
             response = client.create_cluster(**create_params)
-            aws_cluster = response['cluster']
+            aws_cluster = response["cluster"]
 
             cluster = ECSCluster.objects.create(
                 name=name,
-                aws_cluster_arn=aws_cluster['clusterArn'],
-                aws_cluster_name=aws_cluster['clusterName'],
+                aws_cluster_arn=aws_cluster["clusterArn"],
+                aws_cluster_name=aws_cluster["clusterName"],
                 aws_region=region,
                 status=ECSCluster.ClusterStatus.ACTIVE,
                 is_managed=True,
                 aws_credential=credential,
                 metadata={
-                    'capacity_providers': aws_cluster.get('capacityProviders', []),
-                    'settings': aws_cluster.get('settings', []),
-                }
+                    "capacity_providers": aws_cluster.get("capacityProviders", []),
+                    "settings": aws_cluster.get("settings", []),
+                },
             )
 
             self.log_info(f"Created ECS cluster: {name} in {region}")
-            self.notify_observers('ecs_cluster_created', cluster=cluster)
+            self.notify_observers("ecs_cluster_created", cluster=cluster)
 
             return cluster
 
         except ClientError as e:
-            raise ECSClusterError(f"Failed to create cluster: {e}", cluster_name=name, region=region)
+            raise ECSClusterError(
+                f"Failed to create cluster: {e}", cluster_name=name, region=region
+            )
 
     def import_cluster(
         self,
@@ -319,22 +335,22 @@ class ECSService(BaseService):
         """
         aws_cluster = self.get_cluster(cluster_name_or_arn, region, credential)
 
-        existing = ECSCluster.objects.filter(aws_cluster_arn=aws_cluster['arn']).first()
+        existing = ECSCluster.objects.filter(aws_cluster_arn=aws_cluster["arn"]).first()
         if existing:
             self.log_info(f"Cluster already imported: {existing.name}")
             return existing
 
         cluster = ECSCluster.objects.create(
-            name=local_name or aws_cluster['name'],
-            aws_cluster_arn=aws_cluster['arn'],
-            aws_cluster_name=aws_cluster['name'],
+            name=local_name or aws_cluster["name"],
+            aws_cluster_arn=aws_cluster["arn"],
+            aws_cluster_name=aws_cluster["name"],
             aws_region=region or self.default_region,
             status=ECSCluster.ClusterStatus.ACTIVE,
             is_managed=False,
             aws_credential=credential,
             metadata={
-                'capacity_providers': aws_cluster.get('capacity_providers', []),
-            }
+                "capacity_providers": aws_cluster.get("capacity_providers", []),
+            },
         )
 
         self.log_info(f"Imported ECS cluster: {cluster.name}")
@@ -362,9 +378,9 @@ class ECSService(BaseService):
                     aws_cluster = self.get_cluster(
                         cluster.aws_cluster_name,
                         cluster.aws_region,
-                        cluster.aws_credential
+                        cluster.aws_credential,
                     )
-                    if aws_cluster['active_services'] > 0:
+                    if aws_cluster["active_services"] > 0:
                         raise ECSClusterError(
                             f"Cluster has {aws_cluster['active_services']} active services. "
                             "Use force=True or delete services first."
@@ -397,45 +413,50 @@ class ECSService(BaseService):
             Updated ECSTaskDefinition with AWS ARN
         """
         client = self._get_ecs_client(
-            task_definition.cluster.aws_region,
-            task_definition.cluster.aws_credential
+            task_definition.cluster.aws_region, task_definition.cluster.aws_credential
         )
 
         try:
             task_def_params = task_definition.to_aws_format()
             response = client.register_task_definition(**task_def_params)
 
-            aws_task_def = response['taskDefinition']
-            new_revision = aws_task_def['revision']
+            aws_task_def = response["taskDefinition"]
+            new_revision = aws_task_def["revision"]
             # Check if a stale record exists with this (cluster, name, revision)
             # from a previous failed deploy, and reclaim its pk.
-            stale = ECSTaskDefinition.objects.filter(
-                cluster=task_definition.cluster,
-                name=task_definition.name,
-                revision=new_revision,
-            ).exclude(pk=task_definition.pk).first()
+            stale = (
+                ECSTaskDefinition.objects.filter(
+                    cluster=task_definition.cluster,
+                    name=task_definition.name,
+                    revision=new_revision,
+                )
+                .exclude(pk=task_definition.pk)
+                .first()
+            )
             if stale:
                 stale.delete()
-            task_definition.aws_task_definition_arn = aws_task_def['taskDefinitionArn']
+            task_definition.aws_task_definition_arn = aws_task_def["taskDefinitionArn"]
             task_definition.revision = new_revision
             task_definition.status = ECSTaskDefinition.Status.REGISTERED
             task_definition.save()
 
             self.log_info(f"Registered task definition: {task_definition.full_arn}")
-            self.notify_observers('task_definition_registered', task_definition=task_definition)
+            self.notify_observers(
+                "task_definition_registered", task_definition=task_definition
+            )
 
             return task_definition
 
         except ClientError as e:
             raise ECSTaskDefinitionError(
                 f"Failed to register task definition: {e}",
-                task_definition=task_definition.name
+                task_definition=task_definition.name,
             )
 
     def list_task_definitions(
         self,
         family_prefix: Optional[str] = None,
-        status: str = 'ACTIVE',
+        status: str = "ACTIVE",
         region: Optional[str] = None,
         credential: Optional[SecureCredential] = None,
     ) -> List[str]:
@@ -443,14 +464,14 @@ class ECSService(BaseService):
         client = self._get_ecs_client(region, credential)
 
         try:
-            params = {'status': status}
+            params = {"status": status}
             if family_prefix:
-                params['familyPrefix'] = family_prefix
+                params["familyPrefix"] = family_prefix
 
             arns = []
-            paginator = client.get_paginator('list_task_definitions')
+            paginator = client.get_paginator("list_task_definitions")
             for page in paginator.paginate(**params):
-                arns.extend(page.get('taskDefinitionArns', []))
+                arns.extend(page.get("taskDefinitionArns", []))
 
             return arns
 
@@ -468,11 +489,11 @@ class ECSService(BaseService):
 
         try:
             response = client.describe_task_definition(taskDefinition=task_definition)
-            return response['taskDefinition']
+            return response["taskDefinition"]
         except ClientError as e:
             raise ECSTaskDefinitionError(
                 f"Failed to describe task definition: {e}",
-                task_definition=task_definition
+                task_definition=task_definition,
             )
 
     def deregister_task_definition(
@@ -481,12 +502,13 @@ class ECSService(BaseService):
     ) -> None:
         """Deregister a task definition in AWS."""
         if not task_definition.aws_task_definition_arn:
-            self.log_warning(f"Task definition {task_definition.name} not registered in AWS")
+            self.log_warning(
+                f"Task definition {task_definition.name} not registered in AWS"
+            )
             return
 
         client = self._get_ecs_client(
-            task_definition.cluster.aws_region,
-            task_definition.cluster.aws_credential
+            task_definition.cluster.aws_region, task_definition.cluster.aws_credential
         )
 
         try:
@@ -501,7 +523,7 @@ class ECSService(BaseService):
         except ClientError as e:
             raise ECSTaskDefinitionError(
                 f"Failed to deregister task definition: {e}",
-                task_definition=task_definition.name
+                task_definition=task_definition.name,
             )
 
     # -------------------------------------------------------------------------
@@ -522,21 +544,20 @@ class ECSService(BaseService):
             Updated ECSService with AWS ARN
         """
         client = self._get_ecs_client(
-            ecs_service.cluster.aws_region,
-            ecs_service.cluster.aws_credential
+            ecs_service.cluster.aws_region, ecs_service.cluster.aws_credential
         )
 
         try:
             service_params = ecs_service.to_aws_create_format()
             response = client.create_service(**service_params)
 
-            aws_service = response['service']
-            ecs_service.aws_service_arn = aws_service['serviceArn']
+            aws_service = response["service"]
+            ecs_service.aws_service_arn = aws_service["serviceArn"]
             ecs_service.status = ECSServiceModel.ServiceStatus.CREATING
             ecs_service.save()
 
             self.log_info(f"Created ECS service: {ecs_service.name}")
-            self.notify_observers('ecs_service_created', service=ecs_service)
+            self.notify_observers("ecs_service_created", service=ecs_service)
 
             return ecs_service
 
@@ -544,7 +565,7 @@ class ECSService(BaseService):
             raise ECSServiceError(
                 f"Failed to create service: {e}",
                 service_name=ecs_service.name,
-                cluster_name=ecs_service.cluster.name
+                cluster_name=ecs_service.cluster.name,
             )
 
     def update_service(
@@ -567,37 +588,37 @@ class ECSService(BaseService):
             Updated ECSService
         """
         client = self._get_ecs_client(
-            ecs_service.cluster.aws_region,
-            ecs_service.cluster.aws_credential
+            ecs_service.cluster.aws_region, ecs_service.cluster.aws_credential
         )
 
         try:
             update_params = {
-                'cluster': ecs_service.cluster.aws_cluster_arn or ecs_service.cluster.aws_cluster_name,
-                'service': ecs_service.name,
+                "cluster": ecs_service.cluster.aws_cluster_arn
+                or ecs_service.cluster.aws_cluster_name,
+                "service": ecs_service.name,
             }
 
             if task_definition:
-                update_params['taskDefinition'] = (
+                update_params["taskDefinition"] = (
                     task_definition.aws_task_definition_arn or task_definition.full_arn
                 )
                 ecs_service.task_definition = task_definition
 
             if desired_count is not None:
-                update_params['desiredCount'] = desired_count
+                update_params["desiredCount"] = desired_count
                 ecs_service.desired_count = desired_count
 
             if force_new_deployment:
-                update_params['forceNewDeployment'] = True
+                update_params["forceNewDeployment"] = True
 
             response = client.update_service(**update_params)
 
-            aws_service = response['service']
+            aws_service = response["service"]
             ecs_service.update_from_aws(aws_service)
             ecs_service.status = ECSServiceModel.ServiceStatus.UPDATING
 
             self.log_info(f"Updated ECS service: {ecs_service.name}")
-            self.notify_observers('ecs_service_updated', service=ecs_service)
+            self.notify_observers("ecs_service_updated", service=ecs_service)
 
             return ecs_service
 
@@ -605,7 +626,7 @@ class ECSService(BaseService):
             raise ECSServiceError(
                 f"Failed to update service: {e}",
                 service_name=ecs_service.name,
-                cluster_name=ecs_service.cluster.name
+                cluster_name=ecs_service.cluster.name,
             )
 
     def describe_service(
@@ -620,18 +641,17 @@ class ECSService(BaseService):
 
         try:
             response = client.describe_services(
-                cluster=cluster_name,
-                services=[service_name]
+                cluster=cluster_name, services=[service_name]
             )
 
-            services = response.get('services', [])
+            services = response.get("services", [])
             if not services:
-                failures = response.get('failures', [])
+                failures = response.get("failures", [])
                 if failures:
                     raise ECSServiceNotFoundError(
                         f"Service not found: {service_name}",
                         service_name=service_name,
-                        cluster_name=cluster_name
+                        cluster_name=cluster_name,
                     )
                 raise ECSServiceNotFoundError(f"Service not found: {service_name}")
 
@@ -641,7 +661,7 @@ class ECSService(BaseService):
             raise ECSServiceError(
                 f"Failed to describe service: {e}",
                 service_name=service_name,
-                cluster_name=cluster_name
+                cluster_name=cluster_name,
             )
 
     def delete_service(
@@ -657,8 +677,7 @@ class ECSService(BaseService):
             force: Force delete without draining
         """
         client = self._get_ecs_client(
-            ecs_service.cluster.aws_region,
-            ecs_service.cluster.aws_credential
+            ecs_service.cluster.aws_region, ecs_service.cluster.aws_credential
         )
 
         try:
@@ -682,13 +701,13 @@ class ECSService(BaseService):
             ecs_service.save()
 
             self.log_info(f"Deleted ECS service: {ecs_service.name}")
-            self.notify_observers('ecs_service_deleted', service=ecs_service)
+            self.notify_observers("ecs_service_deleted", service=ecs_service)
 
         except ClientError as e:
             raise ECSServiceError(
                 f"Failed to delete service: {e}",
                 service_name=ecs_service.name,
-                cluster_name=ecs_service.cluster.name
+                cluster_name=ecs_service.cluster.name,
             )
 
     def wait_for_service_stable(
@@ -711,11 +730,6 @@ class ECSService(BaseService):
         Raises:
             ECSDeploymentTimeoutError: If timeout is reached
         """
-        client = self._get_ecs_client(
-            ecs_service.cluster.aws_region,
-            ecs_service.cluster.aws_credential
-        )
-
         start_time = time.time()
         last_status = None
 
@@ -730,11 +744,13 @@ class ECSService(BaseService):
 
                 ecs_service.update_from_aws(aws_service)
 
-                deployments = aws_service.get('deployments', [])
-                primary = next((d for d in deployments if d.get('status') == 'PRIMARY'), None)
+                deployments = aws_service.get("deployments", [])
+                primary = next(
+                    (d for d in deployments if d.get("status") == "PRIMARY"), None
+                )
 
                 if primary:
-                    rollout_state = primary.get('rolloutState')
+                    rollout_state = primary.get("rolloutState")
                     if rollout_state != last_status:
                         self.log_info(
                             f"Service {ecs_service.name}: {rollout_state} "
@@ -742,16 +758,16 @@ class ECSService(BaseService):
                         )
                         last_status = rollout_state
 
-                    if rollout_state == 'COMPLETED':
+                    if rollout_state == "COMPLETED":
                         ecs_service.status = ECSServiceModel.ServiceStatus.ACTIVE
                         ecs_service.save()
                         self.log_info(f"Service {ecs_service.name} is stable")
                         return ecs_service
-                    elif rollout_state == 'FAILED':
-                        reason = primary.get('rolloutStateReason', 'Unknown reason')
+                    elif rollout_state == "FAILED":
+                        reason = primary.get("rolloutStateReason", "Unknown reason")
                         raise ECSDeploymentError(
                             f"Deployment failed: {reason}",
-                            details={'rollout_reason': reason}
+                            details={"rollout_reason": reason},
                         )
 
                 time.sleep(poll_interval)
@@ -765,10 +781,10 @@ class ECSService(BaseService):
         raise ECSDeploymentTimeoutError(
             f"Timeout waiting for service {ecs_service.name} to stabilize",
             details={
-                'timeout': timeout,
-                'running_count': ecs_service.running_count,
-                'desired_count': ecs_service.desired_count,
-            }
+                "timeout": timeout,
+                "running_count": ecs_service.running_count,
+                "desired_count": ecs_service.desired_count,
+            },
         )
 
     # -------------------------------------------------------------------------
@@ -807,10 +823,11 @@ class ECSService(BaseService):
 
         try:
             run_params = {
-                'cluster': cluster.aws_cluster_arn or cluster.aws_cluster_name,
-                'taskDefinition': task_definition.aws_task_definition_arn or task_definition.full_arn,
-                'count': count,
-                'launchType': launch_type or cluster.launch_type.upper(),
+                "cluster": cluster.aws_cluster_arn or cluster.aws_cluster_name,
+                "taskDefinition": task_definition.aws_task_definition_arn
+                or task_definition.full_arn,
+                "count": count,
+                "launchType": launch_type or cluster.launch_type.upper(),
             }
 
             if cluster.launch_type == ECSCluster.LaunchType.FARGATE:
@@ -822,35 +839,35 @@ class ECSService(BaseService):
                 # callers can override.
                 if assign_public_ip is None:
                     assign_public_ip = self._infer_assign_public_ip(cluster)
-                run_params['networkConfiguration'] = {
-                    'awsvpcConfiguration': {
-                        'subnets': cluster.subnet_ids,
-                        'securityGroups': cluster.security_group_ids,
-                        'assignPublicIp': (
-                            'ENABLED' if assign_public_ip else 'DISABLED'
+                run_params["networkConfiguration"] = {
+                    "awsvpcConfiguration": {
+                        "subnets": cluster.subnet_ids,
+                        "securityGroups": cluster.security_group_ids,
+                        "assignPublicIp": (
+                            "ENABLED" if assign_public_ip else "DISABLED"
                         ),
                     }
                 }
 
             if overrides:
-                run_params['overrides'] = overrides
+                run_params["overrides"] = overrides
 
             response = client.run_task(**run_params)
 
-            failures = response.get('failures', [])
+            failures = response.get("failures", [])
             if failures:
-                reasons = [f['reason'] for f in failures]
+                reasons = [f["reason"] for f in failures]
                 raise ECSTaskError(f"Failed to run tasks: {', '.join(reasons)}")
 
-            tasks = response.get('tasks', [])
+            tasks = response.get("tasks", [])
             self.log_info(f"Started {len(tasks)} task(s) in cluster {cluster.name}")
 
             return [
                 {
-                    'task_arn': t['taskArn'],
-                    'task_definition_arn': t['taskDefinitionArn'],
-                    'last_status': t['lastStatus'],
-                    'desired_status': t['desiredStatus'],
+                    "task_arn": t["taskArn"],
+                    "task_definition_arn": t["taskDefinitionArn"],
+                    "last_status": t["lastStatus"],
+                    "desired_status": t["desiredStatus"],
                 }
                 for t in tasks
             ]
@@ -862,7 +879,7 @@ class ECSService(BaseService):
         self,
         cluster: ECSCluster,
         task_arn: str,
-        reason: str = 'Stopped by remote-compose',
+        reason: str = "Stopped by remote-compose",
     ) -> None:
         """Stop a running task."""
         client = self._get_ecs_client(cluster.aws_region, cluster.aws_credential)
@@ -882,23 +899,23 @@ class ECSService(BaseService):
         self,
         cluster: ECSCluster,
         service_name: Optional[str] = None,
-        status: str = 'RUNNING',
+        status: str = "RUNNING",
     ) -> List[str]:
         """List task ARNs in a cluster."""
         client = self._get_ecs_client(cluster.aws_region, cluster.aws_credential)
 
         try:
             params = {
-                'cluster': cluster.aws_cluster_arn or cluster.aws_cluster_name,
-                'desiredStatus': status,
+                "cluster": cluster.aws_cluster_arn or cluster.aws_cluster_name,
+                "desiredStatus": status,
             }
             if service_name:
-                params['serviceName'] = service_name
+                params["serviceName"] = service_name
 
             task_arns = []
-            paginator = client.get_paginator('list_tasks')
+            paginator = client.get_paginator("list_tasks")
             for page in paginator.paginate(**params):
-                task_arns.extend(page.get('taskArns', []))
+                task_arns.extend(page.get("taskArns", []))
 
             return task_arns
 
@@ -922,7 +939,7 @@ class ECSService(BaseService):
                 tasks=task_arns,
             )
 
-            return response.get('tasks', [])
+            return response.get("tasks", [])
 
         except ClientError as e:
             raise ECSTaskError(f"Failed to describe tasks: {e}")
@@ -945,33 +962,39 @@ class ECSService(BaseService):
         ec2 = self._get_ec2_client(region, credential)
 
         try:
-            vpcs = ec2.describe_vpcs(Filters=[{'Name': 'is-default', 'Values': ['true']}])
+            vpcs = ec2.describe_vpcs(
+                Filters=[{"Name": "is-default", "Values": ["true"]}]
+            )
 
-            if not vpcs.get('Vpcs'):
+            if not vpcs.get("Vpcs"):
                 raise ECSError("No default VPC found. Please specify VPC and subnets.")
 
-            vpc_id = vpcs['Vpcs'][0]['VpcId']
+            vpc_id = vpcs["Vpcs"][0]["VpcId"]
 
             subnets = ec2.describe_subnets(
                 Filters=[
-                    {'Name': 'vpc-id', 'Values': [vpc_id]},
-                    {'Name': 'default-for-az', 'Values': ['true']},
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "default-for-az", "Values": ["true"]},
                 ]
             )
-            subnet_ids = [s['SubnetId'] for s in subnets.get('Subnets', [])]
+            subnet_ids = [s["SubnetId"] for s in subnets.get("Subnets", [])]
 
             sgs = ec2.describe_security_groups(
                 Filters=[
-                    {'Name': 'vpc-id', 'Values': [vpc_id]},
-                    {'Name': 'group-name', 'Values': ['default']},
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "group-name", "Values": ["default"]},
                 ]
             )
-            sg_id = sgs['SecurityGroups'][0]['GroupId'] if sgs.get('SecurityGroups') else None
+            sg_id = (
+                sgs["SecurityGroups"][0]["GroupId"]
+                if sgs.get("SecurityGroups")
+                else None
+            )
 
             return {
-                'vpc_id': vpc_id,
-                'subnet_ids': subnet_ids,
-                'security_group_id': sg_id,
+                "vpc_id": vpc_id,
+                "subnet_ids": subnet_ids,
+                "security_group_id": sg_id,
             }
 
         except ClientError as e:
@@ -991,13 +1014,15 @@ class ECSService(BaseService):
 
         network = self.discover_default_vpc(cluster.aws_region, cluster.aws_credential)
 
-        cluster.vpc_id = network['vpc_id']
-        cluster.subnet_ids = network['subnet_ids']
-        if network.get('security_group_id'):
-            cluster.security_group_ids = [network['security_group_id']]
+        cluster.vpc_id = network["vpc_id"]
+        cluster.subnet_ids = network["subnet_ids"]
+        if network.get("security_group_id"):
+            cluster.security_group_ids = [network["security_group_id"]]
 
         cluster.save()
-        self.log_info(f"Updated cluster {cluster.name} networking from VPC {network['vpc_id']}")
+        self.log_info(
+            f"Updated cluster {cluster.name} networking from VPC {network['vpc_id']}"
+        )
 
         return cluster
 
@@ -1016,19 +1041,19 @@ class ECSService(BaseService):
         try:
             # Use AWS client factory for consistent credential handling
             aws_factory = get_aws_client_factory()
-            iam = aws_factory.get_client('iam', region=region, credential=credential)
+            iam = aws_factory.get_client("iam", region=region, credential=credential)
 
             # Try to get existing role
             try:
-                response = iam.get_role(RoleName='ecsTaskExecutionRole')
-                role_arn = response['Role']['Arn']
+                response = iam.get_role(RoleName="ecsTaskExecutionRole")
+                role_arn = response["Role"]["Arn"]
 
                 # Ensure the CloudWatch Logs policy is attached
                 self._ensure_logs_policy(iam)
 
                 return role_arn
             except ClientError as e:
-                if e.response['Error']['Code'] != 'NoSuchEntity':
+                if e.response["Error"]["Code"] != "NoSuchEntity":
                     raise
 
             # Role doesn't exist, create it
@@ -1040,23 +1065,23 @@ class ECSService(BaseService):
                     {
                         "Effect": "Allow",
                         "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-                        "Action": "sts:AssumeRole"
+                        "Action": "sts:AssumeRole",
                     }
-                ]
+                ],
             }
 
             response = iam.create_role(
-                RoleName='ecsTaskExecutionRole',
+                RoleName="ecsTaskExecutionRole",
                 AssumeRolePolicyDocument=json.dumps(trust_policy),
-                Description='Role for ECS task execution created by remote-compose',
+                Description="Role for ECS task execution created by remote-compose",
             )
 
-            role_arn = response['Role']['Arn']
+            role_arn = response["Role"]["Arn"]
 
             # Attach the managed policy
             iam.attach_role_policy(
-                RoleName='ecsTaskExecutionRole',
-                PolicyArn='arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+                RoleName="ecsTaskExecutionRole",
+                PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
             )
 
             # Add inline policy for CloudWatch Logs CreateLogGroup
@@ -1071,34 +1096,28 @@ class ECSService(BaseService):
 
     def _ensure_logs_policy(self, iam) -> None:
         """Ensure the CloudWatch Logs CreateLogGroup policy is attached to the execution role."""
-        policy_name = 'CloudWatchLogsCreateGroup'
+        policy_name = "CloudWatchLogsCreateGroup"
 
         # Check if policy already exists
         try:
-            iam.get_role_policy(RoleName='ecsTaskExecutionRole', PolicyName=policy_name)
+            iam.get_role_policy(RoleName="ecsTaskExecutionRole", PolicyName=policy_name)
             return  # Policy already exists
         except ClientError as e:
-            if e.response['Error']['Code'] != 'NoSuchEntity':
+            if e.response["Error"]["Code"] != "NoSuchEntity":
                 raise
 
         # Add the policy
         logs_policy = {
             "Version": "2012-10-17",
             "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "logs:CreateLogGroup"
-                    ],
-                    "Resource": "*"
-                }
-            ]
+                {"Effect": "Allow", "Action": ["logs:CreateLogGroup"], "Resource": "*"}
+            ],
         }
 
         iam.put_role_policy(
-            RoleName='ecsTaskExecutionRole',
+            RoleName="ecsTaskExecutionRole",
             PolicyName=policy_name,
-            PolicyDocument=json.dumps(logs_policy)
+            PolicyDocument=json.dumps(logs_policy),
         )
         self.log_info("Added CloudWatchLogsCreateGroup policy to ecsTaskExecutionRole")
 

@@ -1,11 +1,14 @@
 """Shared polling utility for AWS resource wait operations."""
+
 import time
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def poll_until(check_fn, timeout, interval=10, timeout_msg='Operation timed out', on_poll=None):
+def poll_until(
+    check_fn, timeout, interval=10, timeout_msg="Operation timed out", on_poll=None
+):
     """Poll check_fn until it returns a truthy value or timeout is reached.
 
     Args:

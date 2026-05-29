@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -104,9 +103,9 @@ class TestDevHostModuleValidates:
             "ebs_size_gb",
             "tags",
         ):
-            assert f'variable "{var_name}"' in content, (
-                f"dev_host module missing required variable: {var_name}"
-            )
+            assert (
+                f'variable "{var_name}"' in content
+            ), f"dev_host module missing required variable: {var_name}"
 
     def test_outputs_expose_aws_handles(self, tmp_path):
         """Outputs must expose what DevHostService records in state."""
@@ -114,9 +113,9 @@ class TestDevHostModuleValidates:
         content = src.read_text()
 
         for output_name in ("instance_id", "public_ip", "public_dns"):
-            assert f'output "{output_name}"' in content, (
-                f"dev_host module missing required output: {output_name}"
-            )
+            assert (
+                f'output "{output_name}"' in content
+            ), f"dev_host module missing required output: {output_name}"
 
 
 # ---------- cloud-init render contract ----------

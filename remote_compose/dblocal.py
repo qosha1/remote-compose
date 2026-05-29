@@ -39,7 +39,9 @@ def inspect_container_env(container: str) -> dict[str, str]:
     """
     docker = shutil.which("docker") or "docker"
     cmd = [
-        docker, "inspect", "-f",
+        docker,
+        "inspect",
+        "-f",
         "{{range .Config.Env}}{{println .}}{{end}}",
         container,
     ]
@@ -93,17 +95,26 @@ def dump_local(
 
     docker = shutil.which("docker") or "docker"
     cmd = [
-        docker, "exec", container,
-        "pg_dump", "-Fc",
-        "-h", "127.0.0.1",
-        "-p", str(pg_port),
-        "-U", pg_user,
+        docker,
+        "exec",
+        container,
+        "pg_dump",
+        "-Fc",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        str(pg_port),
+        "-U",
+        pg_user,
         pg_db,
     ]
 
     with output_path.open("wb") as out_fh:
         proc = subprocess.run(
-            cmd, stdout=out_fh, stderr=subprocess.PIPE, timeout=timeout,
+            cmd,
+            stdout=out_fh,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
         )
     if proc.returncode != 0:
         raise DumpLocalError(
@@ -112,8 +123,11 @@ def dump_local(
         )
     size = output_path.stat().st_size
     return DumpResult(
-        path=output_path, size_bytes=size,
-        user=pg_user, database=pg_db, port=pg_port,
+        path=output_path,
+        size_bytes=size,
+        user=pg_user,
+        database=pg_db,
+        port=pg_port,
     )
 
 

@@ -5,9 +5,6 @@ mask the user's edits.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
 
 from remote_compose.no_cache_state import (
     consume_no_cache,

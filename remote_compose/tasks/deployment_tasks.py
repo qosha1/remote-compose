@@ -6,7 +6,6 @@ import logging
 from typing import Optional, Dict
 
 from celery import shared_task
-from django.utils import timezone
 
 from ..models import Deployment, DeploymentTarget
 from ..services import DeploymentService
@@ -29,8 +28,8 @@ def deploy_async(
     project_name: Optional[str] = None,
     environment: Optional[Dict[str, str]] = None,
     env_file_path: Optional[str] = None,
-    version: str = '',
-    deployed_by: str = '',
+    version: str = "",
+    deployed_by: str = "",
     timeout: Optional[int] = None,
     pull_images: bool = True,
     build_images: bool = False,
@@ -64,9 +63,9 @@ def deploy_async(
     except DeploymentTarget.DoesNotExist:
         logger.error(f"Target {target_id} not found")
         return {
-            'success': False,
-            'error': f"Target {target_id} not found",
-            'task_id': self.request.id,
+            "success": False,
+            "error": f"Target {target_id} not found",
+            "task_id": self.request.id,
         }
 
     deployment_service = DeploymentService()
@@ -85,24 +84,24 @@ def deploy_async(
             build_images=build_images,
             metadata={
                 **(metadata or {}),
-                'celery_task_id': self.request.id,
+                "celery_task_id": self.request.id,
             },
         )
 
         result = {
-            'success': True,
-            'deployment_id': deployment.id,
-            'status': deployment.status,
-            'project_name': deployment.project_name,
-            'version': deployment.version,
-            'task_id': self.request.id,
+            "success": True,
+            "deployment_id": deployment.id,
+            "status": deployment.status,
+            "project_name": deployment.project_name,
+            "version": deployment.version,
+            "task_id": self.request.id,
         }
 
         # Send webhook notification if configured
         if webhook_url:
             send_webhook.delay(
                 webhook_url=webhook_url,
-                event='deployment.completed',
+                event="deployment.completed",
                 payload=result,
             )
 
@@ -111,15 +110,15 @@ def deploy_async(
     except DeploymentError as e:
         logger.error(f"Deployment failed: {e}")
         result = {
-            'success': False,
-            'error': str(e),
-            'task_id': self.request.id,
+            "success": False,
+            "error": str(e),
+            "task_id": self.request.id,
         }
 
         if webhook_url:
             send_webhook.delay(
                 webhook_url=webhook_url,
-                event='deployment.failed',
+                event="deployment.failed",
                 payload=result,
             )
 
@@ -139,7 +138,7 @@ def deploy_async(
 def rollback_async(
     self,
     deployment_id: int,
-    deployed_by: str = '',
+    deployed_by: str = "",
     timeout: Optional[int] = None,
     webhook_url: Optional[str] = None,
 ) -> dict:
@@ -161,9 +160,9 @@ def rollback_async(
         deployment = Deployment.objects.get(id=deployment_id)
     except Deployment.DoesNotExist:
         return {
-            'success': False,
-            'error': f"Deployment {deployment_id} not found",
-            'task_id': self.request.id,
+            "success": False,
+            "error": f"Deployment {deployment_id} not found",
+            "task_id": self.request.id,
         }
 
     deployment_service = DeploymentService()
@@ -176,17 +175,17 @@ def rollback_async(
         )
 
         result = {
-            'success': True,
-            'rollback_deployment_id': rollback_deployment.id,
-            'original_deployment_id': deployment_id,
-            'status': rollback_deployment.status,
-            'task_id': self.request.id,
+            "success": True,
+            "rollback_deployment_id": rollback_deployment.id,
+            "original_deployment_id": deployment_id,
+            "status": rollback_deployment.status,
+            "task_id": self.request.id,
         }
 
         if webhook_url:
             send_webhook.delay(
                 webhook_url=webhook_url,
-                event='rollback.completed',
+                event="rollback.completed",
                 payload=result,
             )
 
@@ -195,15 +194,15 @@ def rollback_async(
     except RollbackError as e:
         logger.error(f"Rollback failed: {e}")
         result = {
-            'success': False,
-            'error': str(e),
-            'task_id': self.request.id,
+            "success": False,
+            "error": str(e),
+            "task_id": self.request.id,
         }
 
         if webhook_url:
             send_webhook.delay(
                 webhook_url=webhook_url,
-                event='rollback.failed',
+                event="rollback.failed",
                 payload=result,
             )
 
@@ -229,8 +228,8 @@ def check_deployment_health(self, deployment_id: int) -> dict:
         deployment = Deployment.objects.get(id=deployment_id)
     except Deployment.DoesNotExist:
         return {
-            'success': False,
-            'error': f"Deployment {deployment_id} not found",
+            "success": False,
+            "error": f"Deployment {deployment_id} not found",
         }
 
     deployment_service = DeploymentService()
@@ -238,15 +237,15 @@ def check_deployment_health(self, deployment_id: int) -> dict:
     try:
         status = deployment_service.get_status(deployment)
         return {
-            'success': True,
-            'deployment_id': deployment_id,
-            'status': status,
+            "success": True,
+            "deployment_id": deployment_id,
+            "status": status,
         }
     except Exception as e:
         return {
-            'success': False,
-            'deployment_id': deployment_id,
-            'error': str(e),
+            "success": False,
+            "deployment_id": deployment_id,
+            "error": str(e),
         }
 
 
@@ -266,17 +265,17 @@ def cleanup_old_deployments(retention_days: int = 90) -> dict:
     try:
         count = deployment_service.cleanup_old_deployments(retention_days)
         return {
-            'success': True,
-            'deleted_count': count,
-            'retention_days': retention_days,
+            "success": True,
+            "deleted_count": count,
+            "retention_days": retention_days,
         }
     except Exception as e:
         logger.exception(f"Cleanup failed: {e}")
         return {
-            'success': False,
-            'error': str(e),
+            "success": False,
+            "error": str(e),
         }
 
 
 # Import at end to avoid circular imports
-from .notification_tasks import send_webhook
+from .notification_tasks import send_webhook  # noqa: E402  (circular-import guard)

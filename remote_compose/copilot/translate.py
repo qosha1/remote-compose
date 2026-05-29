@@ -19,16 +19,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .discover import CopilotApp, CopilotService
-
+from .discover import CopilotAddon, CopilotApp, CopilotService
 
 # ---------------------------------------------------------------------
 # Warning types — typed so the CLI summary can group/format by kind.
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class TranslationWarning:
     """Base. Subclasses get specific category names."""
+
     service: str
     message: str
 
@@ -106,38 +107,44 @@ def translate_service_type(
         if port is not None:
             out["public"] = True
             out["port"] = int(port)
-        warnings.append(UnsupportedServiceTypeWarning(
-            service=svc.name,
-            message=(
-                f"Request-Driven Web Service uses AWS App Runner, not ECS. "
-                f"Best-effort translated to a public ECS service for review; "
-                f"adjust scaling + cold-start expectations or migrate to a "
-                f"separate App Runner deployment if those matter."
-            ),
-        ))
+        warnings.append(
+            UnsupportedServiceTypeWarning(
+                service=svc.name,
+                message=(
+                    "Request-Driven Web Service uses AWS App Runner, not ECS. "
+                    "Best-effort translated to a public ECS service for review; "
+                    "adjust scaling + cold-start expectations or migrate to a "
+                    "separate App Runner deployment if those matter."
+                ),
+            )
+        )
 
     elif svc.type == "Static Site":
         # CloudFront + S3 — no ECS analogue. Skip emission entirely.
         out["_skip"] = True
-        warnings.append(UnsupportedServiceTypeWarning(
-            service=svc.name,
-            message=(
-                f"Static Site is a CloudFront + S3 stack, not ECS. Skipping "
-                f"emission. Migrate by hosting the built assets on S3 + "
-                f"CloudFront directly (terraform module not provided)."
-            ),
-        ))
+        warnings.append(
+            UnsupportedServiceTypeWarning(
+                service=svc.name,
+                message=(
+                    "Static Site is a CloudFront + S3 stack, not ECS. Skipping "
+                    "emission. Migrate by hosting the built assets on S3 + "
+                    "CloudFront directly (terraform module not provided)."
+                ),
+            )
+        )
 
     else:
         # Future / unknown Copilot type. Don't crash; flag.
-        warnings.append(UnsupportedServiceTypeWarning(
-            service=svc.name,
-            message=(
-                f"Unknown Copilot service type {svc.type!r} (known types: "
-                f"{sorted(_KNOWN_TYPES)}). Manifest emitted with no "
-                f"type-specific defaults; review."
-            ),
-        ))
+        warnings.append(
+            UnsupportedServiceTypeWarning(
+                service=svc.name,
+                message=(
+                    f"Unknown Copilot service type {svc.type!r} (known types: "
+                    f"{sorted(_KNOWN_TYPES)}). Manifest emitted with no "
+                    f"type-specific defaults; review."
+                ),
+            )
+        )
 
     return out, warnings
 
@@ -178,6 +185,7 @@ class PrivateSubnetUnsupportedWarning(TranslationWarning):
 # ---------------------------------------------------------------------
 # image: build / location → compose service entry (rc-e5u.43.3)
 # ---------------------------------------------------------------------
+
 
 def translate_image(
     svc: CopilotService,
@@ -224,6 +232,7 @@ def translate_image(
 # cpu / memory / count / exec → rc.yml service overrides (rc-e5u.43.4)
 # ---------------------------------------------------------------------
 
+
 def translate_resources(
     svc: CopilotService,
 ) -> tuple[dict[str, Any], list[TranslationWarning]]:
@@ -246,16 +255,18 @@ def translate_resources(
     if isinstance(count, int):
         if count <= 0:
             out["replicas"] = 1
-            warnings.append(ScalingNotSupportedWarning(
-                service=svc.name,
-                message=(
-                    f"Copilot count={count} requests scale-to-zero, which "
-                    f"ECS doesn't support at the service level. Emitted "
-                    f"replicas=1; bring the service down explicitly via "
-                    f"`rc destroy` or `aws ecs update-service "
-                    f"--desired-count 0` when needed."
-                ),
-            ))
+            warnings.append(
+                ScalingNotSupportedWarning(
+                    service=svc.name,
+                    message=(
+                        f"Copilot count={count} requests scale-to-zero, which "
+                        f"ECS doesn't support at the service level. Emitted "
+                        f"replicas=1; bring the service down explicitly via "
+                        f"`rc destroy` or `aws ecs update-service "
+                        f"--desired-count 0` when needed."
+                    ),
+                )
+            )
         else:
             out["replicas"] = count
     elif isinstance(count, dict):
@@ -268,26 +279,30 @@ def translate_resources(
             except ValueError:
                 pass
         out["replicas"] = floor
-        warnings.append(ScalingNotSupportedWarning(
-            service=svc.name,
-            message=(
-                f"Copilot count {count!r} requests autoscaling. Provider "
-                f"currently uses a fixed replicas value; emitted "
-                f"replicas={floor} (the lower bound). Revisit once "
-                f"aws_appautoscaling_target wiring lands."
-            ),
-        ))
+        warnings.append(
+            ScalingNotSupportedWarning(
+                service=svc.name,
+                message=(
+                    f"Copilot count {count!r} requests autoscaling. Provider "
+                    f"currently uses a fixed replicas value; emitted "
+                    f"replicas={floor} (the lower bound). Revisit once "
+                    f"aws_appautoscaling_target wiring lands."
+                ),
+            )
+        )
 
     if raw.get("exec") is False:
-        warnings.append(ExecDisabledIgnoredWarning(
-            service=svc.name,
-            message=(
-                f"Copilot manifest sets exec=false (disable ECS Exec). "
-                f"Provider always enables ECS Exec (rc exec / rc lifecycle "
-                f"depend on it). Manual override would require editing the "
-                f"emitted task def or filing a follow-up to make this opt-out."
-            ),
-        ))
+        warnings.append(
+            ExecDisabledIgnoredWarning(
+                service=svc.name,
+                message=(
+                    "Copilot manifest sets exec=false (disable ECS Exec). "
+                    "Provider always enables ECS Exec (rc exec / rc lifecycle "
+                    "depend on it). Manual override would require editing the "
+                    "emitted task def or filing a follow-up to make this opt-out."
+                ),
+            )
+        )
 
     return out, warnings
 
@@ -295,6 +310,7 @@ def translate_resources(
 # ---------------------------------------------------------------------
 # storage.volumes → rc.yml v2 services[*].volumes (rc-e5u.43.5)
 # ---------------------------------------------------------------------
+
 
 def translate_storage(
     svc: CopilotService,
@@ -340,6 +356,7 @@ def translate_storage(
 # network.vpc.placement → warning only (rc-e5u.43.5 sub-part)
 # ---------------------------------------------------------------------
 
+
 def translate_network(
     svc: CopilotService,
 ) -> tuple[dict[str, Any], list[TranslationWarning]]:
@@ -352,22 +369,25 @@ def translate_network(
     placement = (raw.get("network") or {}).get("vpc", {}).get("placement")
     warnings: list[TranslationWarning] = []
     if placement == "private":
-        warnings.append(PrivateSubnetUnsupportedWarning(
-            service=svc.name,
-            message=(
-                f"Copilot network.vpc.placement=private requires NAT-gateway "
-                f"or VPC-endpoint routing. Provider currently uses public "
-                f"subnets for Fargate (no NAT cost) — tracked as rc-e5u.25 "
-                f"to add the private + NAT variant. Test deployment will "
-                f"work as public-subnet; rotate before production."
-            ),
-        ))
+        warnings.append(
+            PrivateSubnetUnsupportedWarning(
+                service=svc.name,
+                message=(
+                    "Copilot network.vpc.placement=private requires NAT-gateway "
+                    "or VPC-endpoint routing. Provider currently uses public "
+                    "subnets for Fargate (no NAT cost) — tracked as rc-e5u.25 "
+                    "to add the private + NAT variant. Test deployment will "
+                    "work as public-subnet; rotate before production."
+                ),
+            )
+        )
     return {}, warnings
 
 
 # ---------------------------------------------------------------------
 # variables + secrets → compose env + rc.yml secrets (rc-e5u.43.6)
 # ---------------------------------------------------------------------
+
 
 def translate_env_and_secrets(
     svc: CopilotService,
@@ -409,11 +429,13 @@ def translate_env_and_secrets(
             continue
         if env is not None:
             arn = arn.replace("${COPILOT_ENVIRONMENT_NAME}", env)
-        rc_secrets.append({
-            "name": str(key),
-            "source": "aws_sm",
-            "arn": arn,
-        })
+        rc_secrets.append(
+            {
+                "name": str(key),
+                "source": "aws_sm",
+                "arn": arn,
+            }
+        )
 
     return compose_env, rc_secrets, warnings
 
@@ -422,8 +444,10 @@ def translate_env_and_secrets(
 # Per-environment overrides (rc-e5u.43.7)
 # ---------------------------------------------------------------------
 
+
 def apply_environment_overrides(
-    svc: CopilotService, env: str | None,
+    svc: CopilotService,
+    env: str | None,
 ) -> CopilotService:
     """Return a new CopilotService with the manifest's environments.<env>
     overrides deep-merged onto the base raw dict.
@@ -462,11 +486,7 @@ def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, An
     for key in base:
         out[key] = base[key] if not isinstance(base[key], dict) else dict(base[key])
     for key, val in overrides.items():
-        if (
-            key in out
-            and isinstance(out[key], dict)
-            and isinstance(val, dict)
-        ):
+        if key in out and isinstance(out[key], dict) and isinstance(val, dict):
             out[key] = _deep_merge(out[key], val)
         else:
             out[key] = val
@@ -496,6 +516,7 @@ def _apply_http_aliases(http: dict[str, Any], out: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------
 # Composer — wires every translator together (rc-e5u.43.9)
 # ---------------------------------------------------------------------
+
 
 @dataclass
 class ImportResult:
@@ -527,12 +548,14 @@ def compose_app(
         "project": project_name,
         "compose_file": "docker-compose.yml",
         "provider": "ecs",
-        "provider_config": {"ecs": {
-            "region": _guess_region(app) or "us-west-2",
-            "cluster": f"{project_name}-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-            "default_launch_type": "FARGATE",
-        }},
+        "provider_config": {
+            "ecs": {
+                "region": _guess_region(app) or "us-west-2",
+                "cluster": f"{project_name}-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+                "default_launch_type": "FARGATE",
+            }
+        },
         "terraform": {
             "output_dir": "./terraform/${provider}",
             "backend": {"type": "local"},
@@ -615,9 +638,12 @@ def _guess_region(app: CopilotApp) -> str | None:
     """Best-effort: extract a region from any ACM cert ARN found in
     environment manifests. Returns None when nothing matches."""
     import re
+
     arn_re = re.compile(r"arn:aws:acm:([a-z0-9-]+):")
     for env in app.environments:
-        certs = (env.raw.get("http", {}) or {}).get("public", {}).get("certificates") or []
+        certs = (env.raw.get("http", {}) or {}).get("public", {}).get(
+            "certificates"
+        ) or []
         for c in certs:
             m = arn_re.match(str(c))
             if m:
@@ -736,9 +762,11 @@ def _build_summary(
         )
         # Aggregate by AWS resource type for the guidance section.
         by_type: dict[str, list[str]] = {}  # type -> [service/addon]
-        unknown_types: list[tuple[str, str]] = []  # (svc, addon) pairs without recognized types
+        unknown_types: list[tuple[str, str]] = (
+            []
+        )  # (svc, addon) pairs without recognized types
         for svc in app.services:
-            for addon in (svc.addons or []):
+            for addon in svc.addons or []:
                 rtypes = _addon_resource_types(addon)
                 if not rtypes:
                     unknown_types.append((svc.name, addon.name))
@@ -748,8 +776,10 @@ def _build_summary(
         for rt in sorted(by_type):
             sources = by_type[rt]
             lines.append("")
-            lines.append(f"  {rt} ({len(sources)} resource(s) across "
-                         f"{len({s.split('/')[0] for s in sources})} service(s))")
+            lines.append(
+                f"  {rt} ({len(sources)} resource(s) across "
+                f"{len({s.split('/')[0] for s in sources})} service(s))"
+            )
             for s in sorted(set(sources)):
                 lines.append(f"    in: {s}")
             guidance = _ADDON_RESOURCE_GUIDANCE.get(rt)
@@ -757,8 +787,8 @@ def _build_summary(
                 lines.append(f"    next: {guidance}")
             else:
                 lines.append(
-                    f"    next: not yet auto-handled — replicate via your own "
-                    f"terraform module or open an issue"
+                    "    next: not yet auto-handled — replicate via your own "
+                    "terraform module or open an issue"
                 )
         if unknown_types:
             lines.append("")

@@ -19,12 +19,15 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
     """Sequentially destroy each ephemeral stack via provider.destroy."""
     from remote_compose.ephemeral import remove_stack
     from remote_compose.cli_v2 import (
-        build_deploy_context, load_rc_yml, resolve_provider,
+        build_deploy_context,
+        load_rc_yml,
+        resolve_provider,
     )
 
     if not yes:
         if not click.confirm(
-            f"\n  Destroy these {len(targets)} stack(s)?", default=False,
+            f"\n  Destroy these {len(targets)} stack(s)?",
+            default=False,
         ):
             click.echo("  aborted.")
             return
@@ -43,14 +46,18 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
                     f"terraform destroy in {tf_dir}."
                 )
                 from remote_compose.terraform.runner import (
-                    TerraformError, TerraformRunner,
+                    TerraformError,
+                    TerraformRunner,
                 )
+
                 try:
                     runner = TerraformRunner(tf_dir)
                     runner.init()
                     runner.destroy()
                 except TerraformError as exc:
-                    click.echo(f"    FAILED: terraform destroy in {tf_dir}: {exc}", err=True)
+                    click.echo(
+                        f"    FAILED: terraform destroy in {tf_dir}: {exc}", err=True
+                    )
                     failures.append((r.project, f"tf destroy: {exc}"))
                     continue
                 except Exception as exc:
@@ -69,11 +76,15 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
             try:
                 import boto3
                 from remote_compose.audit import audit_project
+
                 session = boto3.Session(
-                    region_name=r.region, profile_name=r.aws_profile,
+                    region_name=r.region,
+                    profile_name=r.aws_profile,
                 )
                 report = audit_project(
-                    session, project=r.project, region=r.region,
+                    session,
+                    project=r.project,
+                    region=r.region,
                 )
             except Exception as exc:
                 click.echo(f"    FAILED: audit fallback: {exc}", err=True)
@@ -98,9 +109,11 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
                 err=True,
             )
             failures.append(
-                (r.project,
-                 f"rc.yml + terraform_dir missing; "
-                 f"{len(report.findings)} AWS leftover(s) need manual cleanup"),
+                (
+                    r.project,
+                    f"rc.yml + terraform_dir missing; "
+                    f"{len(report.findings)} AWS leftover(s) need manual cleanup",
+                ),
             )
             continue
         try:
@@ -112,7 +125,8 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
         if version != 2 or v2 is None:
             click.echo(
                 f"    FAILED: rc.yml at {rc_path} is not v2 "
-                f"(only v2 stacks can be ephemeral).", err=True,
+                f"(only v2 stacks can be ephemeral).",
+                err=True,
             )
             failures.append((r.project, "not v2"))
             continue
@@ -128,7 +142,9 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
         succeeded += 1
         click.echo("    done.")
 
-    click.echo(f"\n  {command_name} complete: {succeeded} destroyed, {len(failures)} failed.")
+    click.echo(
+        f"\n  {command_name} complete: {succeeded} destroyed, {len(failures)} failed."
+    )
     if failures:
         for proj, why in failures:
             click.echo(f"    {proj}: {why}", err=True)
@@ -173,7 +189,7 @@ def _teardown_services(cluster, project_name):
 
         factory = get_aws_client_factory()
         elbv2 = factory.get_client(
-            'elbv2',
+            "elbv2",
             region=cluster.aws_region,
             credential=cluster.aws_credential,
         )
@@ -194,10 +210,13 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
         lb = cluster.load_balancer
         if lb:
             click.echo(f"    ALB ({lb.alb_dns_name})...", nl=False)
-            from remote_compose.services.aws_client_factory import get_aws_client_factory
+            from remote_compose.services.aws_client_factory import (
+                get_aws_client_factory,
+            )
+
             factory = get_aws_client_factory()
             elbv2 = factory.get_client(
-                'elbv2',
+                "elbv2",
                 region=cluster.aws_region,
                 credential=cluster.aws_credential,
             )
@@ -220,10 +239,13 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
         ns = cluster.service_connect_namespace
         if ns:
             click.echo(f"    Namespace ({ns.namespace_name})...", nl=False)
-            from remote_compose.services.aws_client_factory import get_aws_client_factory
+            from remote_compose.services.aws_client_factory import (
+                get_aws_client_factory,
+            )
+
             factory = get_aws_client_factory()
             sd = factory.get_client(
-                'servicediscovery',
+                "servicediscovery",
                 region=cluster.aws_region,
                 credential=cluster.aws_credential,
             )
@@ -237,13 +259,15 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
         pass
 
     from remote_compose.models import SecurityGroupConfig
+
     sgs = SecurityGroupConfig.objects.filter(cluster=cluster)
     if sgs.exists():
         click.echo(f"    {sgs.count()} security groups...", nl=False)
         from remote_compose.services.aws_client_factory import get_aws_client_factory
+
         factory = get_aws_client_factory()
         ec2 = factory.get_client(
-            'ec2',
+            "ec2",
             region=cluster.aws_region,
             credential=cluster.aws_credential,
         )
@@ -260,6 +284,7 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
         if vpc and vpc.is_managed:
             click.echo(f"    VPC ({vpc.vpc_id})...", nl=False)
             from remote_compose.services.vpc_service import VPCService
+
             vpc_service = VPCService()
             try:
                 vpc_service.teardown_vpc(vpc)
@@ -270,13 +295,15 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
         pass
 
     from remote_compose.models import SecretConfig
+
     secrets = SecretConfig.objects.filter(cluster=cluster)
     if secrets.exists():
         click.echo(f"    {secrets.count()} secrets...", nl=False)
         from remote_compose.services.aws_client_factory import get_aws_client_factory
+
         factory = get_aws_client_factory()
         sm = factory.get_client(
-            'secretsmanager',
+            "secretsmanager",
             region=cluster.aws_region,
             credential=cluster.aws_credential,
         )
@@ -298,72 +325,86 @@ def _teardown_infrastructure(cluster, force_delete_secrets: bool = False):
             click.echo(" scheduled for deletion (30d recovery window)")
 
 
-@click.command(name='destroy')
-@click.option('--infra', is_flag=True, help='Also destroy VPC, ALB, etc.')
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt')
+@click.command(name="destroy")
+@click.option("--infra", is_flag=True, help="Also destroy VPC, ALB, etc.")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
 @click.option(
-    '--all-ephemeral', 'all_ephemeral', is_flag=True,
-    help='Destroy every stack in the ephemeral registry (deployed via '
-         'rc deploy --ttl / rc up --ttl), regardless of TTL expiry. '
-         'Single confirmation prompt covers all stacks.',
+    "--all-ephemeral",
+    "all_ephemeral",
+    is_flag=True,
+    help="Destroy every stack in the ephemeral registry (deployed via "
+    "rc deploy --ttl / rc up --ttl), regardless of TTL expiry. "
+    "Single confirmation prompt covers all stacks.",
 )
 @click.option(
-    '--force-delete-secrets', 'force_delete_secrets', is_flag=True,
-    help='Bypass AWS Secrets Manager 30-day recovery window when '
-         'deleting per-secret blobs as part of teardown. Default '
-         '(off) preserves the recovery window so a mistaken destroy '
-         'is reversible — but the secret name stays reserved for 30 '
-         'days, blocking re-create with the same name. Set this when '
-         'you intend to immediately re-deploy with the same project '
-         'name. (remote-compose-myw)',
+    "--force-delete-secrets",
+    "force_delete_secrets",
+    is_flag=True,
+    help="Bypass AWS Secrets Manager 30-day recovery window when "
+    "deleting per-secret blobs as part of teardown. Default "
+    "(off) preserves the recovery window so a mistaken destroy "
+    "is reversible — but the secret name stays reserved for 30 "
+    "days, blocking re-create with the same name. Set this when "
+    "you intend to immediately re-deploy with the same project "
+    "name. (remote-compose-myw)",
 )
 @click.pass_context
 def destroy_cmd(ctx, infra, yes, all_ephemeral, force_delete_secrets):
     """Tear down all services (prompts for confirmation)."""
     if all_ephemeral:
         from remote_compose.ephemeral import (
-            DEFAULT_REGISTRY_PATH, list_records,
+            DEFAULT_REGISTRY_PATH,
+            list_records,
         )
+
         targets = list_records()
         if not targets:
             click.echo(f"  No ephemeral stacks in registry ({DEFAULT_REGISTRY_PATH}).")
             return
-        click.echo(f"\nrc destroy --all-ephemeral — {len(targets)} stack(s) in registry:")
+        click.echo(
+            f"\nrc destroy --all-ephemeral — {len(targets)} stack(s) in registry:"
+        )
         for r in targets:
             prof = f" profile={r.aws_profile}" if r.aws_profile else ""
             click.echo(
                 f"  - {r.project} (region={r.region}{prof}) "
                 f"expires_at={r.expires_at}"
             )
-        _destroy_ephemeral_targets(targets, yes=yes,
-                                   command_name="destroy --all-ephemeral")
+        _destroy_ephemeral_targets(
+            targets, yes=yes, command_name="destroy --all-ephemeral"
+        )
         return
 
     from remote_compose.cli_v2 import dispatch_if_v2, load_rc_yml
-    if dispatch_if_v2(ctx.obj.get('config_path'), 'destroy', yes=yes):
+
+    if dispatch_if_v2(ctx.obj.get("config_path"), "destroy", yes=yes):
         try:
             from remote_compose.ephemeral import remove_stack
-            cfg_path = ctx.obj.get('config_path') or 'rc.yml'
+
+            cfg_path = ctx.obj.get("config_path") or "rc.yml"
             _, raw, v2 = load_rc_yml(cfg_path)
             if v2 is not None:
-                ecs_cfg = ((raw.get('provider_config') or {}).get('ecs')
-                           or {}) if isinstance(raw, dict) else {}
-                region = ecs_cfg.get('region')
+                ecs_cfg = (
+                    ((raw.get("provider_config") or {}).get("ecs") or {})
+                    if isinstance(raw, dict)
+                    else {}
+                )
+                region = ecs_cfg.get("region")
                 if region:
                     remove_stack(project=v2.project, region=region)
         except Exception:
             pass
         return
 
-    config = _load_config(ctx.obj.get('config_path'))
+    config = _load_config(ctx.obj.get("config_path"))
     _bootstrap_django(config)
 
-    project_name = config['project_name']
+    project_name = config["project_name"]
 
     from remote_compose.models import ECSCluster
 
     try:
-        cluster = ECSCluster.objects.get(name=config['cluster'])
+        cluster = ECSCluster.objects.get(name=config["cluster"])
     except ECSCluster.DoesNotExist:
         click.echo(f"Cluster '{config['cluster']}' not found. Nothing to destroy.")
         return
@@ -395,7 +436,9 @@ def _launchd_plist_path() -> Path:
 
 def _install_reaper_schedule(interval_minutes: int) -> None:
     """Write + load a launchd job that runs `rc reap -y` every N minutes."""
-    import os, shutil, subprocess
+    import os
+    import shutil
+    import subprocess
 
     if sys.platform != "darwin":
         click.echo(
@@ -458,11 +501,14 @@ def _install_reaper_schedule(interval_minutes: int) -> None:
     # Best-effort unload (idempotent) + load.
     subprocess.run(
         ["launchctl", "unload", str(plist_path)],
-        check=False, capture_output=True,
+        check=False,
+        capture_output=True,
     )
     res = subprocess.run(
         ["launchctl", "load", str(plist_path)],
-        check=False, capture_output=True, text=True,
+        check=False,
+        capture_output=True,
+        text=True,
     )
     if res.returncode != 0:
         click.echo(
@@ -490,7 +536,8 @@ def _uninstall_reaper_schedule() -> None:
     if plist_path.exists():
         subprocess.run(
             ["launchctl", "unload", str(plist_path)],
-            check=False, capture_output=True,
+            check=False,
+            capture_output=True,
         )
         plist_path.unlink()
         click.echo(f"  Removed {plist_path}.")
@@ -498,25 +545,37 @@ def _uninstall_reaper_schedule() -> None:
         click.echo(f"  No reaper schedule installed at {plist_path}.")
 
 
-@click.command(name='reap')
-@click.option('--dry-run', is_flag=True, help='List past-due stacks without destroying.')
+@click.command(name="reap")
 @click.option(
-    '--all', 'reap_all', is_flag=True,
-    help='Destroy every ephemeral stack regardless of TTL.',
-)
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompt.')
-@click.option(
-    '--install-schedule', 'install_sched', is_flag=True,
-    help='Install a launchd job (macOS) that runs `rc reap -y` periodically. '
-         'Default interval 30 min — tune with --interval-minutes.',
+    "--dry-run", is_flag=True, help="List past-due stacks without destroying."
 )
 @click.option(
-    '--uninstall-schedule', 'uninstall_sched', is_flag=True,
-    help='Remove the launchd reaper job.',
+    "--all",
+    "reap_all",
+    is_flag=True,
+    help="Destroy every ephemeral stack regardless of TTL.",
+)
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
+@click.option(
+    "--install-schedule",
+    "install_sched",
+    is_flag=True,
+    help="Install a launchd job (macOS) that runs `rc reap -y` periodically. "
+    "Default interval 30 min — tune with --interval-minutes.",
 )
 @click.option(
-    '--interval-minutes', 'interval_minutes', default=30, show_default=True,
-    type=int, help='Reaper schedule interval, in minutes. Used with --install-schedule.',
+    "--uninstall-schedule",
+    "uninstall_sched",
+    is_flag=True,
+    help="Remove the launchd reaper job.",
+)
+@click.option(
+    "--interval-minutes",
+    "interval_minutes",
+    default=30,
+    show_default=True,
+    type=int,
+    help="Reaper schedule interval, in minutes. Used with --install-schedule.",
 )
 def reap_cmd(dry_run, reap_all, yes, install_sched, uninstall_sched, interval_minutes):
     """Destroy ephemeral stacks past their TTL.
@@ -535,7 +594,9 @@ def reap_cmd(dry_run, reap_all, yes, install_sched, uninstall_sched, interval_mi
         return
 
     from remote_compose.ephemeral import (
-        DEFAULT_REGISTRY_PATH, list_records, find_expired,
+        DEFAULT_REGISTRY_PATH,
+        list_records,
+        find_expired,
     )
 
     if reap_all:
@@ -553,8 +614,7 @@ def reap_cmd(dry_run, reap_all, yes, install_sched, uninstall_sched, interval_mi
     for r in targets:
         prof = f" profile={r.aws_profile}" if r.aws_profile else ""
         click.echo(
-            f"  - {r.project} (region={r.region}{prof}) "
-            f"expires_at={r.expires_at}"
+            f"  - {r.project} (region={r.region}{prof}) " f"expires_at={r.expires_at}"
         )
 
     if dry_run:

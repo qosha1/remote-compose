@@ -28,10 +28,8 @@ import textwrap
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -115,6 +113,7 @@ def _scaffold(tmp_path: Path) -> Path:
 # R1 + R5 — default env_file → SM auto-promotion (no env_file_auto opt-in)
 # ---------------------------------------------------------------------------
 
+
 def test_R1_compose_env_file_keys_route_to_secrets_not_plaintext_env(tmp_path):
     """Even with rc.yml using `source: file` (not env_file_auto), every
     KEY from a compose env_file MUST end up reachable via secrets[],
@@ -126,8 +125,14 @@ def test_R1_compose_env_file_keys_route_to_secrets_not_plaintext_env(tmp_path):
     django_spec = ctx.services["django"]
     plaintext_env = django_spec.env
 
-    leaked = {"REDIS_URL", "CELERY_BROKER_URL", "DATABASE_URL",
-              "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"}
+    leaked = {
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "DATABASE_URL",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+    }
     plaintext_leaks = leaked & plaintext_env.keys()
     assert not plaintext_leaks, (
         f"R1 FAIL: keys from compose env_file leaked as PLAINTEXT in "
@@ -188,6 +193,7 @@ def test_R1_auto_promotes_compose_envfile_when_rcyaml_has_no_secrets(tmp_path):
 # ---------------------------------------------------------------------------
 # R2 — per-service env_file scoping
 # ---------------------------------------------------------------------------
+
 
 def test_R2_service_with_only_postgres_envfile_does_not_get_django_keys(tmp_path):
     """postgres compose entry references only envs/local/.postgres.
@@ -251,6 +257,7 @@ def test_R2_service_with_no_envfile_gets_empty_list(tmp_path):
 # R3 — rc.yml secret name precedence
 # ---------------------------------------------------------------------------
 
+
 def test_R3_rcyaml_secret_path_wins_over_compose_envfile_path(tmp_path):
     """When rc.yml declares secrets:[{name: 'local-django', path: 'envs/test/.django'}]
     AND a compose env_file 'envs/local/.django' auto-resolves to the
@@ -262,17 +269,18 @@ def test_R3_rcyaml_secret_path_wins_over_compose_envfile_path(tmp_path):
 
     by_name = {s.name: s for s in ctx.secrets}
     sec = by_name.get("local-django")
-    assert sec is not None, (
-        f"R3 FAIL: local-django not in ctx.secrets; got {sorted(by_name)}"
-    )
-    assert "envs/test/.django" in str(sec.path), (
-        f"R3 FAIL: rc.yml secret path should win. Got path={sec.path!r}"
-    )
+    assert (
+        sec is not None
+    ), f"R3 FAIL: local-django not in ctx.secrets; got {sorted(by_name)}"
+    assert "envs/test/.django" in str(
+        sec.path
+    ), f"R3 FAIL: rc.yml secret path should win. Got path={sec.path!r}"
 
 
 # ---------------------------------------------------------------------------
 # R4 — union on collision, rc.yml wins
 # ---------------------------------------------------------------------------
+
 
 def test_R4_union_collision_rcyaml_wins_at_secrets_push(tmp_path):
     """At _secrets_push_v2 time, when an SM secret has both an rc.yml
@@ -292,9 +300,11 @@ def test_R4_union_collision_rcyaml_wins_at_secrets_push(tmp_path):
         def client_factory(svc, **_kw):
             client = mock.MagicMock()
             if svc == "secretsmanager":
+
                 def put_secret_value(**kw):
                     pushed[kw["SecretId"]] = json.loads(kw["SecretString"])
                     return {}
+
                 client.put_secret_value.side_effect = put_secret_value
                 client.get_secret_value.return_value = {"SecretString": "{}"}
             if svc == "ecs":
@@ -315,9 +325,9 @@ def test_R4_union_collision_rcyaml_wins_at_secrets_push(tmp_path):
             catch_exceptions=False,
         )
 
-    assert result.exit_code == 0, (
-        f"R4 FAIL: secrets push errored — output:\n{result.output}"
-    )
+    assert (
+        result.exit_code == 0
+    ), f"R4 FAIL: secrets push errored — output:\n{result.output}"
     body = pushed.get("leak-test/local-django")
     assert body is not None, (
         f"R4 FAIL: nothing pushed to leak-test/local-django. "
@@ -333,6 +343,7 @@ def test_R4_union_collision_rcyaml_wins_at_secrets_push(tmp_path):
 # R5 — per-service plaintext stripping (extends R1 with a stricter check)
 # ---------------------------------------------------------------------------
 
+
 def test_R5_postgres_keys_not_in_django_plaintext_env(tmp_path):
     """django references both .django + .postgres env_files. After fix,
     none of those keys should appear in django.env (they all go to
@@ -342,8 +353,12 @@ def test_R5_postgres_keys_not_in_django_plaintext_env(tmp_path):
     ctx = build_deploy_context(v2, raw, rc_yml)
 
     all_envfile_keys = {
-        "REDIS_URL", "CELERY_BROKER_URL",
-        "DATABASE_URL", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD",
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "DATABASE_URL",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
     }
     django_plaintext = set(ctx.services["django"].env)
     leaked = all_envfile_keys & django_plaintext
@@ -362,8 +377,12 @@ def test_R5_redis_has_no_envfile_keys_anywhere(tmp_path):
 
     redis_env = ctx.services["redis"].env
     forbidden = {
-        "REDIS_URL", "CELERY_BROKER_URL",
-        "DATABASE_URL", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD",
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "DATABASE_URL",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
     }
     leaked = forbidden & redis_env.keys()
     assert not leaked, (

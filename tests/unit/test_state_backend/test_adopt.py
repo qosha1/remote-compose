@@ -12,8 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-import click
-import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -36,21 +34,34 @@ def _write_v2_rc_yml(tmp_path: Path, *, backend_type: str = "s3") -> Path:
         "project": "ss-debuggai",
         "compose_file": "docker-compose.yml",
         "provider": "ecs",
-        "provider_config": {"ecs": {
-            "region": "us-west-2",
-            "cluster": "ss-debuggai-prod",
-            "aws_profile": "debuggai",
-        }},
+        "provider_config": {
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "ss-debuggai-prod",
+                "aws_profile": "debuggai",
+            }
+        },
         "terraform": {"backend": backend_block},
         "services": {
             "django": {"cpu": 1024, "memory": 4096, "type": "application"},
-            "nginx": {"cpu": 256, "memory": 512, "type": "proxy",
-                      "public": True, "port": 80},
+            "nginx": {
+                "cpu": 256,
+                "memory": 512,
+                "type": "proxy",
+                "public": True,
+                "port": 80,
+            },
         },
     }
     (tmp_path / "docker-compose.yml").write_text(
-        yaml.safe_dump({"services": {"django": {"image": "busybox"},
-                                      "nginx": {"image": "nginx:alpine"}}})
+        yaml.safe_dump(
+            {
+                "services": {
+                    "django": {"image": "busybox"},
+                    "nginx": {"image": "nginx:alpine"},
+                }
+            }
+        )
     )
     p = tmp_path / "rc.yml"
     p.write_text(yaml.safe_dump(rc, sort_keys=False))
@@ -73,11 +84,15 @@ class TestAdoptCommandDispatches:
             "remote_compose.state_backend.adopt.adopt_v1_to_v2",
         ) as adopt_fn:
             adopt_fn.return_value = mock.Mock(
-                imported=26, skipped=0, failed=[], duration_s=12.3,
+                imported=26,
+                skipped=0,
+                failed=[],
+                duration_s=12.3,
             )
             runner = CliRunner()
             result = runner.invoke(
-                rc_cli, ["--config", str(rc_path), "adopt"],
+                rc_cli,
+                ["--config", str(rc_path), "adopt"],
             )
 
         assert result.exit_code == 0, result.output
@@ -99,18 +114,23 @@ class TestAdoptIdempotent:
         # adopt_v1_to_v2 internally walks AWS, generates 26 import
         # addresses, runs terraform import per resource. Each import
         # call returns "already in state" (no work done).
-        with mock.patch(
-            "remote_compose.state_backend.adopt._run_terraform_import"
-        ) as imp, mock.patch(
-            "remote_compose.state_backend.adopt._discover_imports"
-        ) as disc:
+        with (
+            mock.patch(
+                "remote_compose.state_backend.adopt._run_terraform_import"
+            ) as imp,
+            mock.patch("remote_compose.state_backend.adopt._discover_imports") as disc,
+        ):
             disc.return_value = [
                 ("module.ecs.aws_ecs_cluster.this", "arn:aws:ecs:...:cluster/x"),
-                ("module.alb.aws_lb.this", "arn:aws:elasticloadbalancing:...:loadbalancer/y"),
+                (
+                    "module.alb.aws_lb.this",
+                    "arn:aws:elasticloadbalancing:...:loadbalancer/y",
+                ),
             ]
             imp.return_value = ("already_in_state", "")  # (status, message)
             result = adopt_v1_to_v2(
-                rc_yml_path=rc_path, working_dir=tmp_path,
+                rc_yml_path=rc_path,
+                working_dir=tmp_path,
             )
         assert result.imported == 0
         assert result.skipped == 2
@@ -127,11 +147,12 @@ class TestAdoptPartialRecovery:
         rc_path = _write_v2_rc_yml(tmp_path)
         # Three imports: first two succeed, third fails with a real-shape
         # terraform error.
-        with mock.patch(
-            "remote_compose.state_backend.adopt._run_terraform_import"
-        ) as imp, mock.patch(
-            "remote_compose.state_backend.adopt._discover_imports"
-        ) as disc:
+        with (
+            mock.patch(
+                "remote_compose.state_backend.adopt._run_terraform_import"
+            ) as imp,
+            mock.patch("remote_compose.state_backend.adopt._discover_imports") as disc,
+        ):
             disc.return_value = [
                 ("module.ecs.aws_ecs_cluster.this", "arn:cluster"),
                 ("module.alb.aws_lb.this", "arn:alb"),
@@ -143,7 +164,8 @@ class TestAdoptPartialRecovery:
                 ("failed", "Error: aws_efs_file_system not found"),
             ]
             result = adopt_v1_to_v2(
-                rc_yml_path=rc_path, working_dir=tmp_path,
+                rc_yml_path=rc_path,
+                working_dir=tmp_path,
             )
         assert result.imported == 2
         # `failed` is a list of (address, id, error) tuples.
@@ -185,16 +207,17 @@ class TestConcurrentDeployLock:
         ):
             runner = CliRunner()
             result = runner.invoke(
-                rc_cli, ["--config", str(rc_path), "deploy"],
+                rc_cli,
+                ["--config", str(rc_path), "deploy"],
             )
 
         assert result.exit_code != 0
         # User-facing output must NOT be a raw stack trace; it should
         # carry a clear "lock held" / "concurrent deploy" hint.
         out = result.output.lower() + (result.stderr_bytes or b"").decode().lower()
-        assert (
-            "lock" in out and ("concurrent" in out or "another" in out
-                                or "in flight" in out or "already" in out)
-        ), (
-            f"expected friendly lock-busy CLI message; got:\n{result.output}"
-        )
+        assert "lock" in out and (
+            "concurrent" in out
+            or "another" in out
+            or "in flight" in out
+            or "already" in out
+        ), f"expected friendly lock-busy CLI message; got:\n{result.output}"

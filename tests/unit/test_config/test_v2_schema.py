@@ -14,8 +14,13 @@ def _minimal() -> dict:
         "compose_file": "docker-compose.yml",
         "provider": "ecs",
         "services": {
-            "web": {"cpu": 256, "memory": 512, "type": "proxy",
-                    "public": True, "port": 80},
+            "web": {
+                "cpu": 256,
+                "memory": 512,
+                "type": "proxy",
+                "public": True,
+                "port": 80,
+            },
         },
     }
 
@@ -89,38 +94,69 @@ class TestSecrets:
         return raw
 
     def test_file_secret_ok(self):
-        parse(self._with_secrets([
-            {"name": "django", "source": "file", "path": "/etc/secrets/.django"},
-        ]))
+        parse(
+            self._with_secrets(
+                [
+                    {
+                        "name": "django",
+                        "source": "file",
+                        "path": "/etc/secrets/.django",
+                    },
+                ]
+            )
+        )
 
     def test_aws_sm_secret_ok(self):
-        parse(self._with_secrets([
-            {"name": "db", "source": "aws_sm",
-             "arn": "arn:aws:secretsmanager:us-west-2:1:secret:db"},
-        ]))
+        parse(
+            self._with_secrets(
+                [
+                    {
+                        "name": "db",
+                        "source": "aws_sm",
+                        "arn": "arn:aws:secretsmanager:us-west-2:1:secret:db",
+                    },
+                ]
+            )
+        )
 
     def test_k8s_secret_ok(self):
-        parse(self._with_secrets([
-            {"name": "app", "source": "k8s_secret", "ref": "app-creds"},
-        ]))
+        parse(
+            self._with_secrets(
+                [
+                    {"name": "app", "source": "k8s_secret", "ref": "app-creds"},
+                ]
+            )
+        )
 
     def test_file_secret_without_path_rejected(self):
         with pytest.raises(ConfigError, match="path"):
-            parse(self._with_secrets([
-                {"name": "x", "source": "file"},
-            ]))
+            parse(
+                self._with_secrets(
+                    [
+                        {"name": "x", "source": "file"},
+                    ]
+                )
+            )
 
     def test_aws_sm_without_arn_rejected(self):
         with pytest.raises(ConfigError, match="arn"):
-            parse(self._with_secrets([
-                {"name": "x", "source": "aws_sm"},
-            ]))
+            parse(
+                self._with_secrets(
+                    [
+                        {"name": "x", "source": "aws_sm"},
+                    ]
+                )
+            )
 
     def test_unknown_source_rejected(self):
         with pytest.raises(ConfigError, match="source"):
-            parse(self._with_secrets([
-                {"name": "x", "source": "bogus"},
-            ]))
+            parse(
+                self._with_secrets(
+                    [
+                        {"name": "x", "source": "bogus"},
+                    ]
+                )
+            )
 
 
 class TestTls:
@@ -201,8 +237,11 @@ class TestServiceDomain:
     def test_two_services_can_have_distinct_domains(self):
         raw = _minimal()
         raw["services"]["api"] = {
-            "cpu": 256, "memory": 512, "type": "application",
-            "public": True, "port": 8080,
+            "cpu": 256,
+            "memory": 512,
+            "type": "application",
+            "public": True,
+            "port": 8080,
             "domain": "api.example.com",
         }
         raw["services"]["web"]["domain"] = "example.com"
@@ -213,8 +252,11 @@ class TestServiceDomain:
     def test_duplicate_domain_across_services_rejected(self):
         raw = _minimal()
         raw["services"]["api"] = {
-            "cpu": 256, "memory": 512, "type": "application",
-            "public": True, "port": 8080,
+            "cpu": 256,
+            "memory": 512,
+            "type": "application",
+            "public": True,
+            "port": 8080,
             "domain": "shared.example.com",
         }
         raw["services"]["web"]["domain"] = "shared.example.com"
@@ -289,7 +331,9 @@ class TestServiceAliases:
     def test_aliases_on_private_service_rejected(self):
         raw = _minimal()
         raw["services"]["worker"] = {
-            "cpu": 256, "memory": 512, "type": "worker",
+            "cpu": 256,
+            "memory": 512,
+            "type": "worker",
             "aliases": ["alt.example.com"],
         }
         with pytest.raises(ConfigError, match="aliases.*public=true"):
@@ -305,8 +349,12 @@ class TestServiceAliases:
     def test_alias_overlapping_other_service_domain_rejected(self):
         raw = _minimal()
         raw["services"]["api"] = {
-            "cpu": 256, "memory": 512, "type": "application",
-            "public": True, "port": 8080, "domain": "api.example.com",
+            "cpu": 256,
+            "memory": 512,
+            "type": "application",
+            "public": True,
+            "port": 8080,
+            "domain": "api.example.com",
         }
         raw["services"]["web"]["domain"] = "web.example.com"
         raw["services"]["web"]["aliases"] = ["api.example.com"]
@@ -316,8 +364,12 @@ class TestServiceAliases:
     def test_alias_overlapping_other_service_alias_rejected(self):
         raw = _minimal()
         raw["services"]["api"] = {
-            "cpu": 256, "memory": 512, "type": "application",
-            "public": True, "port": 8080, "domain": "api.example.com",
+            "cpu": 256,
+            "memory": 512,
+            "type": "application",
+            "public": True,
+            "port": 8080,
+            "domain": "api.example.com",
             "aliases": ["shared.example.com"],
         }
         raw["services"]["web"]["domain"] = "web.example.com"

@@ -45,16 +45,18 @@ class BakeResult:
 
 # Container paths that are obviously NOT user source dirs — system mounts,
 # data volumes, etc. We never bake these.
-_SKIP_CONTAINER_PATHS: frozenset[str] = frozenset({
-    "/tmp/.X11-unix",
-    "/var/run/docker.sock",
-    "/dev/shm",
-    "/var/lib/postgresql/data",
-    "/data",
-    "/var/lib/mysql",
-    "/var/lib/redis",
-    "/etc/localtime",
-})
+_SKIP_CONTAINER_PATHS: frozenset[str] = frozenset(
+    {
+        "/tmp/.X11-unix",
+        "/var/run/docker.sock",
+        "/dev/shm",
+        "/var/lib/postgresql/data",
+        "/data",
+        "/var/lib/mysql",
+        "/var/lib/redis",
+        "/etc/localtime",
+    }
+)
 
 
 def _split_volume_entry(entry) -> Optional[tuple[str, str]]:
@@ -174,7 +176,9 @@ def _is_dockerignored(host: str, ignored: set[str]) -> bool:
     return False
 
 
-def _resolve_dockerfile(compose_path: Path, service_name: str, svc_compose: dict) -> Optional[Path]:
+def _resolve_dockerfile(
+    compose_path: Path, service_name: str, svc_compose: dict
+) -> Optional[Path]:
     """Resolve the Dockerfile path for a service from its compose build stanza."""
     build = svc_compose.get("build")
     if build is None:
@@ -233,8 +237,7 @@ def bake_bind_mount_source(
         )
     if not dockerfile_path.exists():
         raise ValueError(
-            f"service {service_name!r}: Dockerfile not found at "
-            f"{dockerfile_path}"
+            f"service {service_name!r}: Dockerfile not found at " f"{dockerfile_path}"
         )
 
     volumes = svc_compose.get("volumes") or []
@@ -251,8 +254,7 @@ def bake_bind_mount_source(
     result = BakeResult(dockerfile_path=dockerfile_path)
     if not candidate_copies:
         result.skipped_reason = (
-            "service has no source bind mounts to bake (no relative-path "
-            "volumes)."
+            "service has no source bind mounts to bake (no relative-path " "volumes)."
         )
         return result
 
@@ -293,10 +295,13 @@ def bake_bind_mount_source(
         )
         return result
 
-    appended = ["", "# rc-bys: bake bind-mount source dirs into the image so",
-                "# ECS deploys have the source baked in. Local docker-compose",
-                "# still overrides these paths via bind mounts at runtime, so",
-                "# hot-reload keeps working for local dev."]
+    appended = [
+        "",
+        "# rc-bys: bake bind-mount source dirs into the image so",
+        "# ECS deploys have the source baked in. Local docker-compose",
+        "# still overrides these paths via bind mounts at runtime, so",
+        "# hot-reload keeps working for local dev.",
+    ]
     for host, container in new_copies:
         appended.append(f"COPY {host} {container}")
     appended.append("")

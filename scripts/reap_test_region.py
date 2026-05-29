@@ -49,7 +49,6 @@ from dataclasses import dataclass, field
 import boto3
 from botocore.exceptions import ClientError
 
-
 PROJECT_TAG_KEY = "Project"
 PROJECT_TAG_PREFIX = "rc-test-"
 NAME_PREFIX = "rc-test-"
@@ -102,7 +101,9 @@ class Reaper:
         clusters = ecs.list_clusters().get("clusterArns", [])
         matching_clusters: list[str] = []
         for arn in clusters:
-            details = ecs.describe_clusters(clusters=[arn], include=["TAGS"])["clusters"]
+            details = ecs.describe_clusters(clusters=[arn], include=["TAGS"])[
+                "clusters"
+            ]
             if not details:
                 continue
             cluster = details[0]
@@ -115,8 +116,13 @@ class Reaper:
             services = ecs.list_services(cluster=cluster).get("serviceArns", [])
             for svc_arn in services:
                 svc_name = svc_arn.split("/")[-1]
-                self._do(f"ecs service {cluster}/{svc_name}",
-                         ecs.delete_service, cluster=cluster, service=svc_name, force=True)
+                self._do(
+                    f"ecs service {cluster}/{svc_name}",
+                    ecs.delete_service,
+                    cluster=cluster,
+                    service=svc_name,
+                    force=True,
+                )
             # Wait a beat for services to drain tasks.
             if services and not self.dry_run:
                 time.sleep(5)
@@ -127,21 +133,28 @@ class Reaper:
                 for cp in resp[0].get("capacityProviders", []):
                     if cp in ("FARGATE", "FARGATE_SPOT"):
                         continue
-                    self._do(f"ecs capacity provider {cp}",
-                             ecs.delete_capacity_provider, capacityProvider=cp)
+                    self._do(
+                        f"ecs capacity provider {cp}",
+                        ecs.delete_capacity_provider,
+                        capacityProvider=cp,
+                    )
 
-            self._do(f"ecs cluster {cluster}",
-                     ecs.delete_cluster, cluster=cluster)
+            self._do(f"ecs cluster {cluster}", ecs.delete_cluster, cluster=cluster)
 
         # Deregister task definitions whose family matches our prefix.
         families = ecs.list_task_definition_families(
             familyPrefix=NAME_PREFIX, status="ACTIVE"
         ).get("families", [])
         for family in families:
-            arns = ecs.list_task_definitions(familyPrefix=family, status="ACTIVE").get("taskDefinitionArns", [])
+            arns = ecs.list_task_definitions(familyPrefix=family, status="ACTIVE").get(
+                "taskDefinitionArns", []
+            )
             for arn in arns:
-                self._do(f"ecs task def {arn.split('/')[-1]}",
-                         ecs.deregister_task_definition, taskDefinition=arn)
+                self._do(
+                    f"ecs task def {arn.split('/')[-1]}",
+                    ecs.deregister_task_definition,
+                    taskDefinition=arn,
+                )
 
     # ------------------------------------------------------------------
     # Auto Scaling + Launch Templates
@@ -154,8 +167,12 @@ class Reaper:
             if not self._tagged(g.get("Tags", [])):
                 continue
             name = g["AutoScalingGroupName"]
-            self._do(f"asg {name}",
-                     asg.delete_auto_scaling_group, AutoScalingGroupName=name, ForceDelete=True)
+            self._do(
+                f"asg {name}",
+                asg.delete_auto_scaling_group,
+                AutoScalingGroupName=name,
+                ForceDelete=True,
+            )
 
         ec2 = self.session.client("ec2", region_name=self.region)
         lts = ec2.describe_launch_templates().get("LaunchTemplates", [])
@@ -164,8 +181,11 @@ class Reaper:
             tags = lt.get("Tags", [])
             if not (self._tagged(tags) or name.startswith(NAME_PREFIX)):
                 continue
-            self._do(f"launch template {name}",
-                     ec2.delete_launch_template, LaunchTemplateName=name)
+            self._do(
+                f"launch template {name}",
+                ec2.delete_launch_template,
+                LaunchTemplateName=name,
+            )
 
     # ------------------------------------------------------------------
     # ALB / target groups
@@ -184,11 +204,17 @@ class Reaper:
                 lb_arns_to_kill.append(arn)
         for arn in lb_arns_to_kill:
             listeners = elb.describe_listeners(LoadBalancerArn=arn).get("Listeners", [])
-            for l in listeners:
-                self._do(f"elb listener {l['ListenerArn'].split('/')[-1]}",
-                         elb.delete_listener, ListenerArn=l["ListenerArn"])
-            self._do(f"elb lb {arn.split('/')[-2]}",
-                     elb.delete_load_balancer, LoadBalancerArn=arn)
+            for lst in listeners:
+                self._do(
+                    f"elb listener {lst['ListenerArn'].split('/')[-1]}",
+                    elb.delete_listener,
+                    ListenerArn=lst["ListenerArn"],
+                )
+            self._do(
+                f"elb lb {arn.split('/')[-2]}",
+                elb.delete_load_balancer,
+                LoadBalancerArn=arn,
+            )
 
         # Target groups
         tgs = elb.describe_target_groups().get("TargetGroups", [])
@@ -198,8 +224,11 @@ class Reaper:
             if not tags:
                 continue
             if self._tagged(tags[0].get("Tags", [])):
-                self._do(f"elb target group {tg['TargetGroupName']}",
-                         elb.delete_target_group, TargetGroupArn=arn)
+                self._do(
+                    f"elb target group {tg['TargetGroupName']}",
+                    elb.delete_target_group,
+                    TargetGroupArn=arn,
+                )
 
     # ------------------------------------------------------------------
     # EFS
@@ -215,18 +244,25 @@ class Reaper:
 
             aps = efs.describe_access_points(FileSystemId=fs_id).get("AccessPoints", [])
             for ap in aps:
-                self._do(f"efs access point {ap['AccessPointId']}",
-                         efs.delete_access_point, AccessPointId=ap["AccessPointId"])
+                self._do(
+                    f"efs access point {ap['AccessPointId']}",
+                    efs.delete_access_point,
+                    AccessPointId=ap["AccessPointId"],
+                )
 
             mts = efs.describe_mount_targets(FileSystemId=fs_id).get("MountTargets", [])
             for mt in mts:
-                self._do(f"efs mount target {mt['MountTargetId']}",
-                         efs.delete_mount_target, MountTargetId=mt["MountTargetId"])
+                self._do(
+                    f"efs mount target {mt['MountTargetId']}",
+                    efs.delete_mount_target,
+                    MountTargetId=mt["MountTargetId"],
+                )
             if mts and not self.dry_run:
                 time.sleep(10)  # mount targets take a moment to detach
 
-            self._do(f"efs file system {fs_id}",
-                     efs.delete_file_system, FileSystemId=fs_id)
+            self._do(
+                f"efs file system {fs_id}", efs.delete_file_system, FileSystemId=fs_id
+            )
 
     # ------------------------------------------------------------------
     # ECR
@@ -239,8 +275,12 @@ class Reaper:
             name = repo["repositoryName"]
             if not name.startswith(NAME_PREFIX):
                 continue
-            self._do(f"ecr repo {name}",
-                     ecr.delete_repository, repositoryName=name, force=True)
+            self._do(
+                f"ecr repo {name}",
+                ecr.delete_repository,
+                repositoryName=name,
+                force=True,
+            )
 
     # ------------------------------------------------------------------
     # Secrets Manager
@@ -253,9 +293,12 @@ class Reaper:
             name = s["Name"]
             if not name.startswith(NAME_PREFIX):
                 continue
-            self._do(f"secret {name}",
-                     sm.delete_secret, SecretId=name,
-                     ForceDeleteWithoutRecovery=True)
+            self._do(
+                f"secret {name}",
+                sm.delete_secret,
+                SecretId=name,
+                ForceDeleteWithoutRecovery=True,
+            )
 
     # ------------------------------------------------------------------
     # CloudWatch Logs
@@ -263,10 +306,15 @@ class Reaper:
 
     def reap_log_groups(self) -> None:
         logs = self.session.client("logs", region_name=self.region)
-        groups = logs.describe_log_groups(logGroupNamePrefix=f"/ecs/{NAME_PREFIX}").get("logGroups", [])
+        groups = logs.describe_log_groups(logGroupNamePrefix=f"/ecs/{NAME_PREFIX}").get(
+            "logGroups", []
+        )
         for g in groups:
-            self._do(f"log group {g['logGroupName']}",
-                     logs.delete_log_group, logGroupName=g["logGroupName"])
+            self._do(
+                f"log group {g['logGroupName']}",
+                logs.delete_log_group,
+                logGroupName=g["logGroupName"],
+            )
 
     # ------------------------------------------------------------------
     # IAM (global — name-prefix scoped)
@@ -280,31 +328,48 @@ class Reaper:
             if not name.startswith(NAME_PREFIX):
                 continue
             # detach managed policies
-            attached = iam.list_attached_role_policies(RoleName=name).get("AttachedPolicies", [])
+            attached = iam.list_attached_role_policies(RoleName=name).get(
+                "AttachedPolicies", []
+            )
             for p in attached:
-                self._do(f"detach policy {p['PolicyArn']} from {name}",
-                         iam.detach_role_policy, RoleName=name, PolicyArn=p["PolicyArn"])
+                self._do(
+                    f"detach policy {p['PolicyArn']} from {name}",
+                    iam.detach_role_policy,
+                    RoleName=name,
+                    PolicyArn=p["PolicyArn"],
+                )
             # delete inline
             inline = iam.list_role_policies(RoleName=name).get("PolicyNames", [])
             for p in inline:
-                self._do(f"inline policy {p} on {name}",
-                         iam.delete_role_policy, RoleName=name, PolicyName=p)
+                self._do(
+                    f"inline policy {p} on {name}",
+                    iam.delete_role_policy,
+                    RoleName=name,
+                    PolicyName=p,
+                )
             # detach instance profiles
-            profiles = iam.list_instance_profiles_for_role(RoleName=name).get("InstanceProfiles", [])
+            profiles = iam.list_instance_profiles_for_role(RoleName=name).get(
+                "InstanceProfiles", []
+            )
             for prof in profiles:
-                self._do(f"remove role {name} from profile {prof['InstanceProfileName']}",
-                         iam.remove_role_from_instance_profile,
-                         InstanceProfileName=prof["InstanceProfileName"], RoleName=name)
-            self._do(f"iam role {name}",
-                     iam.delete_role, RoleName=name)
+                self._do(
+                    f"remove role {name} from profile {prof['InstanceProfileName']}",
+                    iam.remove_role_from_instance_profile,
+                    InstanceProfileName=prof["InstanceProfileName"],
+                    RoleName=name,
+                )
+            self._do(f"iam role {name}", iam.delete_role, RoleName=name)
 
         profiles = iam.list_instance_profiles(MaxItems=1000).get("InstanceProfiles", [])
         for prof in profiles:
             name = prof["InstanceProfileName"]
             if not name.startswith(NAME_PREFIX):
                 continue
-            self._do(f"instance profile {name}",
-                     iam.delete_instance_profile, InstanceProfileName=name)
+            self._do(
+                f"instance profile {name}",
+                iam.delete_instance_profile,
+                InstanceProfileName=name,
+            )
 
     # ------------------------------------------------------------------
     # VPC + dependencies
@@ -330,7 +395,8 @@ class Reaper:
                 if attachment.get("AttachmentId"):
                     try:
                         ec2.detach_network_interface(
-                            AttachmentId=attachment["AttachmentId"], Force=True,
+                            AttachmentId=attachment["AttachmentId"],
+                            Force=True,
                         )
                     except ClientError:
                         pass
@@ -350,15 +416,22 @@ class Reaper:
             if not still_there:
                 return
             if time.time() > deadline:
-                self._log(f"WARN: {len(still_there)} ENIs in {vpc_id} still present after {timeout}s")
+                self._log(
+                    f"WARN: {len(still_there)} ENIs in {vpc_id} still present after {timeout}s"
+                )
                 return
             time.sleep(5)
 
     def reap_vpc(self) -> None:
         ec2 = self.session.client("ec2", region_name=self.region)
-        vpcs = ec2.describe_vpcs(Filters=[
-            {"Name": f"tag:{PROJECT_TAG_KEY}", "Values": [f"{PROJECT_TAG_PREFIX}*"]},
-        ]).get("Vpcs", [])
+        vpcs = ec2.describe_vpcs(
+            Filters=[
+                {
+                    "Name": f"tag:{PROJECT_TAG_KEY}",
+                    "Values": [f"{PROJECT_TAG_PREFIX}*"],
+                },
+            ]
+        ).get("Vpcs", [])
         for vpc in vpcs:
             vpc_id = vpc["VpcId"]
 
@@ -366,9 +439,11 @@ class Reaper:
             # releases them lazily after service delete (~60s); wait + force.
             self._drain_vpc_enis(ec2, vpc_id)
             # security groups (non-default)
-            sgs = ec2.describe_security_groups(Filters=[
-                {"Name": "vpc-id", "Values": [vpc_id]},
-            ]).get("SecurityGroups", [])
+            sgs = ec2.describe_security_groups(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                ]
+            ).get("SecurityGroups", [])
             for sg in sgs:
                 if sg["GroupName"] == "default":
                     continue
@@ -376,27 +451,36 @@ class Reaper:
                 try:
                     if sg.get("IpPermissions"):
                         ec2.revoke_security_group_ingress(
-                            GroupId=sg["GroupId"], IpPermissions=sg["IpPermissions"])
+                            GroupId=sg["GroupId"], IpPermissions=sg["IpPermissions"]
+                        )
                 except ClientError:
                     pass
             for sg in sgs:
                 if sg["GroupName"] == "default":
                     continue
-                self._do(f"security group {sg['GroupId']}",
-                         ec2.delete_security_group, GroupId=sg["GroupId"])
+                self._do(
+                    f"security group {sg['GroupId']}",
+                    ec2.delete_security_group,
+                    GroupId=sg["GroupId"],
+                )
 
             # subnets
-            subnets = ec2.describe_subnets(Filters=[
-                {"Name": "vpc-id", "Values": [vpc_id]},
-            ]).get("Subnets", [])
+            subnets = ec2.describe_subnets(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                ]
+            ).get("Subnets", [])
             for s in subnets:
-                self._do(f"subnet {s['SubnetId']}",
-                         ec2.delete_subnet, SubnetId=s["SubnetId"])
+                self._do(
+                    f"subnet {s['SubnetId']}", ec2.delete_subnet, SubnetId=s["SubnetId"]
+                )
 
             # route tables (non-main)
-            rts = ec2.describe_route_tables(Filters=[
-                {"Name": "vpc-id", "Values": [vpc_id]},
-            ]).get("RouteTables", [])
+            rts = ec2.describe_route_tables(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                ]
+            ).get("RouteTables", [])
             for rt in rts:
                 is_main = any(a.get("Main") for a in rt.get("Associations", []))
                 if is_main:
@@ -405,34 +489,47 @@ class Reaper:
                 for a in rt.get("Associations", []):
                     if a.get("RouteTableAssociationId"):
                         try:
-                            ec2.disassociate_route_table(AssociationId=a["RouteTableAssociationId"])
+                            ec2.disassociate_route_table(
+                                AssociationId=a["RouteTableAssociationId"]
+                            )
                         except ClientError:
                             pass
-                self._do(f"route table {rt['RouteTableId']}",
-                         ec2.delete_route_table, RouteTableId=rt["RouteTableId"])
+                self._do(
+                    f"route table {rt['RouteTableId']}",
+                    ec2.delete_route_table,
+                    RouteTableId=rt["RouteTableId"],
+                )
 
             # internet gateways
-            igws = ec2.describe_internet_gateways(Filters=[
-                {"Name": "attachment.vpc-id", "Values": [vpc_id]},
-            ]).get("InternetGateways", [])
+            igws = ec2.describe_internet_gateways(
+                Filters=[
+                    {"Name": "attachment.vpc-id", "Values": [vpc_id]},
+                ]
+            ).get("InternetGateways", [])
             for igw in igws:
-                self._do(f"detach igw {igw['InternetGatewayId']}",
-                         ec2.detach_internet_gateway,
-                         InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc_id)
-                self._do(f"delete igw {igw['InternetGatewayId']}",
-                         ec2.delete_internet_gateway,
-                         InternetGatewayId=igw["InternetGatewayId"])
+                self._do(
+                    f"detach igw {igw['InternetGatewayId']}",
+                    ec2.detach_internet_gateway,
+                    InternetGatewayId=igw["InternetGatewayId"],
+                    VpcId=vpc_id,
+                )
+                self._do(
+                    f"delete igw {igw['InternetGatewayId']}",
+                    ec2.delete_internet_gateway,
+                    InternetGatewayId=igw["InternetGatewayId"],
+                )
 
-            self._do(f"vpc {vpc_id}",
-                     ec2.delete_vpc, VpcId=vpc_id)
+            self._do(f"vpc {vpc_id}", ec2.delete_vpc, VpcId=vpc_id)
 
     # ------------------------------------------------------------------
     # Drive
     # ------------------------------------------------------------------
 
     def run(self) -> int:
-        print(f"Reaping Project={PROJECT_TAG_PREFIX}* resources in {self.region} "
-              f"(dry_run={self.dry_run})...\n")
+        print(
+            f"Reaping Project={PROJECT_TAG_PREFIX}* resources in {self.region} "
+            f"(dry_run={self.dry_run})...\n"
+        )
         # Order matters for dependencies.
         self.reap_ecs()
         self.reap_autoscaling()
@@ -457,14 +554,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--force-region", action="store_true",
-                        help="Allow running outside us-east-1 (discouraged).")
+    parser.add_argument(
+        "--force-region",
+        action="store_true",
+        help="Allow running outside us-east-1 (discouraged).",
+    )
     parser.add_argument("--profile", default=os.environ.get("AWS_PROFILE"))
     args = parser.parse_args()
 
     if args.region != DEFAULT_REGION and not args.force_region:
-        print(f"Refusing to run in {args.region}. Use --force-region to override.",
-              file=sys.stderr)
+        print(
+            f"Refusing to run in {args.region}. Use --force-region to override.",
+            file=sys.stderr,
+        )
         return 2
 
     session = boto3.Session(

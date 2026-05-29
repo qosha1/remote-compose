@@ -20,7 +20,6 @@ from moto import mock_aws
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -29,18 +28,28 @@ def _ctx(tmp_path: Path) -> DeployContext:
         project="moto-test",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "moto-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "moto-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                               public=True, port=80, replicas=2),
-            "api": ServiceSpec(name="api", cpu=512, memory=1024,
-                               type="application", replicas=1),
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                replicas=2,
+            ),
+            "api": ServiceSpec(
+                name="api", cpu=512, memory=1024, type="application", replicas=1
+            ),
         },
         secrets=[],
     )
@@ -58,13 +67,15 @@ def _seed_cluster_and_services(cluster: str, services: dict[str, int]) -> None:
     for svc_name, running in services.items():
         task_def = ecs.register_task_definition(
             family=f"moto-test-{svc_name}",
-            containerDefinitions=[{
-                "name": svc_name,
-                "image": "alpine:latest",
-                "essential": True,
-                "cpu": 256,
-                "memory": 512,
-            }],
+            containerDefinitions=[
+                {
+                    "name": svc_name,
+                    "image": "alpine:latest",
+                    "essential": True,
+                    "cpu": 256,
+                    "memory": 512,
+                }
+            ],
             networkMode="bridge",
             requiresCompatibilities=["EC2"],
         )["taskDefinition"]

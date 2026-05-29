@@ -28,22 +28,22 @@ class StepResult:
     data: Optional[Any] = None  # Optional data to pass to next step
 
     @classmethod
-    def ok(cls, message: str, data: Any = None) -> 'StepResult':
+    def ok(cls, message: str, data: Any = None) -> "StepResult":
         """Create a successful result."""
         return cls(success=True, message=message, should_continue=True, data=data)
 
     @classmethod
-    def skip(cls, message: str) -> 'StepResult':
+    def skip(cls, message: str) -> "StepResult":
         """Create a result indicating step was skipped (still counts as success)."""
         return cls(success=True, message=f"Skipped: {message}", should_continue=True)
 
     @classmethod
-    def fail(cls, message: str, error: Optional[Exception] = None) -> 'StepResult':
+    def fail(cls, message: str, error: Optional[Exception] = None) -> "StepResult":
         """Create a failure result that stops the pipeline."""
         return cls(success=False, message=message, should_continue=False, error=error)
 
     @classmethod
-    def stop(cls, message: str) -> 'StepResult':
+    def stop(cls, message: str) -> "StepResult":
         """Create a successful result that stops further execution."""
         return cls(success=True, message=message, should_continue=False)
 
@@ -151,13 +151,13 @@ class PipelineStep(ABC):
         Returns:
             StepResult from execution
         """
-        self.emit_event('step_started', context=context)
+        self.emit_event("step_started", context=context)
 
         try:
             # Check if step should run
             if not self.should_run(context):
                 result = StepResult.skip(f"{self.name} conditions not met")
-                self.emit_event('step_skipped', result=result, context=context)
+                self.emit_event("step_skipped", result=result, context=context)
                 return result
 
             # Execute the step
@@ -165,18 +165,17 @@ class PipelineStep(ABC):
 
             # Emit appropriate event
             if result.success:
-                self.emit_event('step_completed', result=result, context=context)
+                self.emit_event("step_completed", result=result, context=context)
             else:
-                self.emit_event('step_failed', result=result, context=context)
+                self.emit_event("step_failed", result=result, context=context)
 
             return result
 
         except Exception as e:
             result = StepResult.fail(
-                message=f"{self.name} failed with exception: {str(e)}",
-                error=e
+                message=f"{self.name} failed with exception: {str(e)}", error=e
             )
-            self.emit_event('step_failed', result=result, context=context, error=e)
+            self.emit_event("step_failed", result=result, context=context, error=e)
             return result
 
     def __repr__(self) -> str:
@@ -220,9 +219,7 @@ class CompositeStep(PipelineStep):
             if not result.success or not result.should_continue:
                 return result
 
-        return StepResult.ok(
-            f"{self.name}: completed {len(completed)} sub-steps"
-        )
+        return StepResult.ok(f"{self.name}: completed {len(completed)} sub-steps")
 
     def cleanup(self, context: PipelineContext) -> None:
         """Clean up all sub-steps in reverse order."""
@@ -230,7 +227,7 @@ class CompositeStep(PipelineStep):
             try:
                 step.cleanup(context)
             except Exception as e:
-                self.emit_event('cleanup_error', step=step.name, error=e)
+                self.emit_event("cleanup_error", step=step.name, error=e)
 
 
 class ConditionalStep(PipelineStep):
@@ -244,7 +241,7 @@ class ConditionalStep(PipelineStep):
         self,
         step: PipelineStep,
         condition: Callable[[PipelineContext], bool],
-        skip_message: str = "Condition not met"
+        skip_message: str = "Condition not met",
     ):
         """
         Initialize conditional step.

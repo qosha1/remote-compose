@@ -19,7 +19,6 @@ from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 from remote_compose.terraform.runner import TerraformRunner
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -29,7 +28,9 @@ def _terraform_usable() -> bool:
     try:
         result = subprocess.run(
             ["terraform", "-version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -48,16 +49,25 @@ def ecs_ctx(tmp_path):
         project="itest",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "itest-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                               public=True, port=80, health_check_path="/health"),
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/health",
+            ),
             "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
         },
         secrets=[],
@@ -82,22 +92,34 @@ def _multi_domain_ctx(tmp_path):
         project="itest",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "itest-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512, type="proxy",
-                public=True, port=80, health_check_path="/health",
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/health",
                 domain="web.example.com",
             ),
             "api": ServiceSpec(
-                name="api", cpu=512, memory=1024, type="application",
-                public=True, port=8000, health_check_path="/health",
+                name="api",
+                cpu=512,
+                memory=1024,
+                type="application",
+                public=True,
+                port=8000,
+                health_check_path="/health",
                 domain="api.example.com",
             ),
         },
@@ -113,17 +135,24 @@ def _alias_ctx(tmp_path):
         project="itest",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "itest-cluster",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "nginx": ServiceSpec(
-                name="nginx", cpu=256, memory=512, type="proxy",
-                public=True, port=80, health_check_path="/",
+                name="nginx",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/",
                 domain="primary.example.com",
                 aliases=["a.example.com", "b.example.com"],
             ),

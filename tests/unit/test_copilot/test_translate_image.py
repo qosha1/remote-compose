@@ -28,61 +28,91 @@ def _svc(raw: dict) -> CopilotService:
 
 class TestImageBuild:
     def test_build_dict_carries_context_dockerfile(self):
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {"build": {
-                "context": "./",
-                "dockerfile": "compose/production/django/Dockerfile",
-            }},
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {
+                        "build": {
+                            "context": "./",
+                            "dockerfile": "compose/production/django/Dockerfile",
+                        }
+                    },
+                }
+            )
+        )
         assert out["build"]["context"] == "./"
         assert out["build"]["dockerfile"] == "compose/production/django/Dockerfile"
 
     def test_build_args_passed_through(self):
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {"build": {
-                "context": ".", "args": {"VERSION": "1.2", "ENV": "prod"},
-            }},
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {
+                        "build": {
+                            "context": ".",
+                            "args": {"VERSION": "1.2", "ENV": "prod"},
+                        }
+                    },
+                }
+            )
+        )
         assert out["build"]["args"] == {"VERSION": "1.2", "ENV": "prod"}
 
     def test_build_target_passed_through(self):
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {"build": {"context": ".", "target": "production"}},
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {"build": {"context": ".", "target": "production"}},
+                }
+            )
+        )
         assert out["build"]["target"] == "production"
 
     def test_build_string_form(self):
         # Copilot allows `build: ./path/to/Dockerfile.dir` shorthand.
-        out, _ = translate_image(_svc({
-            "name": "api", "image": {"build": "./api"},
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {"build": "./api"},
+                }
+            )
+        )
         # Compose accepts the string form directly.
         assert out["build"] == "./api"
 
 
 class TestImageLocation:
     def test_image_location_becomes_image(self):
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {
-                "location": "123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp:v1",
-            },
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {
+                        "location": "123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp:v1",
+                    },
+                }
+            )
+        )
         assert out["image"] == "123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp:v1"
         assert "build" not in out
 
     def test_location_with_template_var_left_intact(self):
         # Copilot supports ${TAG} interpolation that compose doesn't.
         # Carry it as-is + downstream translators can warn.
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {
-                "location": "123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp:${TAG}",
-            },
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {
+                        "location": "123456789012.dkr.ecr.us-east-2.amazonaws.com/myapp:${TAG}",
+                    },
+                }
+            )
+        )
         assert "${TAG}" in out["image"]
 
 
@@ -94,9 +124,14 @@ class TestImageNeitherBuildNorLocation:
 
     def test_image_block_without_build_or_location_returns_empty(self):
         # E.g. just image.port set; nothing for compose to build/pull.
-        out, warnings = translate_image(_svc({
-            "name": "api", "image": {"port": 8080},
-        }))
+        out, warnings = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {"port": 8080},
+                }
+            )
+        )
         assert out == {}
 
 
@@ -105,10 +140,14 @@ class TestPortNotEmittedHere:
     not the image translator. Verify we don't accidentally emit it."""
 
     def test_port_not_in_compose_output(self):
-        out, _ = translate_image(_svc({
-            "name": "api",
-            "image": {"build": ".", "port": 8001},
-        }))
+        out, _ = translate_image(
+            _svc(
+                {
+                    "name": "api",
+                    "image": {"build": ".", "port": 8001},
+                }
+            )
+        )
         # port is service-type concern; compose ports[] is host-mapping
         # which isn't relevant on Fargate (each task has its own ENI).
         assert "ports" not in out

@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 import yaml
 
@@ -22,6 +22,7 @@ from .base import BaseService
 
 class VolumeType(Enum):
     """Classification of volume mount types."""
+
     NAMED = "named"
     HOST_PATH = "host_path"
     DOCKER_SOCK = "docker_sock"
@@ -32,6 +33,7 @@ class VolumeType(Enum):
 @dataclass
 class VolumeInfo:
     """Information about a volume mount."""
+
     source: str
     target: str
     volume_type: VolumeType
@@ -54,6 +56,7 @@ class VolumeInfo:
 @dataclass
 class BuildInfo:
     """Information about a service build context."""
+
     context: str
     dockerfile: str = "Dockerfile"
     args: Dict[str, str] = field(default_factory=dict)
@@ -72,6 +75,7 @@ class BuildInfo:
 @dataclass
 class PreprocessedService:
     """A preprocessed service ready for ECS conversion."""
+
     name: str
     config: Dict[str, Any]
     requires_build: bool = False
@@ -102,6 +106,7 @@ class PreprocessedService:
 @dataclass
 class PreprocessedCompose:
     """Result of preprocessing a docker-compose file."""
+
     services: Dict[str, PreprocessedService] = field(default_factory=dict)
     named_volumes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     networks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -128,7 +133,9 @@ class PreprocessedCompose:
 
     def get_build_services(self) -> Dict[str, PreprocessedService]:
         """Get services that require building."""
-        return {k: v for k, v in self.services.items() if v.requires_build and not v.skip}
+        return {
+            k: v for k, v in self.services.items() if v.requires_build and not v.skip
+        }
 
 
 class ComposePreprocessor(BaseService):
@@ -168,7 +175,7 @@ class ComposePreprocessor(BaseService):
         aws_account_id: Optional[str] = None,
         aws_region: str = "us-east-1",
         ecr_repository_prefix: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Initialize the preprocessor.
@@ -325,7 +332,7 @@ class ComposePreprocessor(BaseService):
         in_degree: Dict[str, int] = {name: 0 for name in service_names}
 
         for service_name, service in active_services.items():
-            depends_on = service.config.get('depends_on', [])
+            depends_on = service.config.get("depends_on", [])
 
             # Normalize depends_on to a list of dependency names
             dep_names: List[str] = []
@@ -430,7 +437,9 @@ class ComposePreprocessor(BaseService):
         )
 
         # Check for incompatibilities first
-        self._detect_incompatibilities(service_name, service_config, preprocessed, result)
+        self._detect_incompatibilities(
+            service_name, service_config, preprocessed, result
+        )
 
         # Check for replicas: 0 (service should be skipped)
         if self._should_skip_service(service_config, preprocessed):
@@ -508,7 +517,9 @@ class ComposePreprocessor(BaseService):
         """
         # Check for privileged mode
         if service_config.get("privileged"):
-            msg = f"Service '{service_name}': Privileged mode is not supported in Fargate"
+            msg = (
+                f"Service '{service_name}': Privileged mode is not supported in Fargate"
+            )
             preprocessed.warnings.append(msg)
             result.warnings.append(msg)
 
@@ -609,9 +620,7 @@ class ComposePreprocessor(BaseService):
                 for key, value in file_vars.items():
                     if key not in preprocessed.env_vars:
                         preprocessed.env_vars[key] = value
-                self.log_debug(
-                    f"Loaded {len(file_vars)} variables from {env_file}"
-                )
+                self.log_debug(f"Loaded {len(file_vars)} variables from {env_file}")
             except Exception as e:
                 msg = (
                     f"Service '{preprocessed.name}': Failed to parse env_file "
@@ -654,7 +663,9 @@ class ComposePreprocessor(BaseService):
 
                 # Parse key=value
                 if "=" not in line:
-                    self.log_debug(f"Skipping invalid line {line_num} in {path}: no '='")
+                    self.log_debug(
+                        f"Skipping invalid line {line_num} in {path}: no '='"
+                    )
                     continue
 
                 key, value = line.split("=", 1)
@@ -662,8 +673,9 @@ class ComposePreprocessor(BaseService):
                 value = value.strip()
 
                 # Remove surrounding quotes
-                if (value.startswith('"') and value.endswith('"')) or \
-                   (value.startswith("'") and value.endswith("'")):
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
                     value = value[1:-1]
 
                 # Validate key
@@ -871,7 +883,9 @@ class ComposePreprocessor(BaseService):
             read_only = "ro" in parts[2]
 
         # Classify the volume
-        return self._classify_volume_source(source, target, read_only, service_name, result)
+        return self._classify_volume_source(
+            source, target, read_only, service_name, result
+        )
 
     def _parse_volume_dict(
         self,
@@ -913,7 +927,9 @@ class ComposePreprocessor(BaseService):
             )
 
         # Default: named volume
-        return self._classify_volume_source(source, target, read_only, service_name, result)
+        return self._classify_volume_source(
+            source, target, read_only, service_name, result
+        )
 
     def _classify_volume_source(
         self,
@@ -937,8 +953,9 @@ class ComposePreprocessor(BaseService):
             VolumeInfo with classification
         """
         # Check for Docker socket
-        if any(sock in source for sock in self.DOCKER_SOCK_PATTERNS) or \
-           any(sock in target for sock in self.DOCKER_SOCK_PATTERNS):
+        if any(sock in source for sock in self.DOCKER_SOCK_PATTERNS) or any(
+            sock in target for sock in self.DOCKER_SOCK_PATTERNS
+        ):
             msg = (
                 f"Service '{service_name}': Docker socket mount detected - "
                 "this is not supported in Fargate"
@@ -954,7 +971,11 @@ class ComposePreprocessor(BaseService):
             )
 
         # Check for host path (absolute path or relative ./path)
-        if source.startswith("/") or source.startswith("./") or source.startswith("../"):
+        if (
+            source.startswith("/")
+            or source.startswith("./")
+            or source.startswith("../")
+        ):
             msg = (
                 f"Service '{service_name}': Host path volume '{source}' - "
                 "consider using EFS for persistent storage in Fargate"

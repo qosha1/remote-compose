@@ -46,7 +46,6 @@ from remote_compose.v1_migrate.apply import (
 from remote_compose.v1_migrate.discover import discover
 from remote_compose.v1_migrate.plan import build_plan
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -87,6 +86,7 @@ def real_aws_canary_stack(tmp_path):
 # Canary row write/read
 # ---------------------------------------------------------------------
 
+
 class TestDbIntegrityCanary:
     """Run only with RC_E2E_DB_CANARY=1; otherwise all tests skip."""
 
@@ -95,13 +95,12 @@ class TestDbIntegrityCanary:
         # The actual psycopg2 connect logic lives behind the fixture so
         # the test stays declarative.
         import psycopg2  # noqa: F401 — only imported when test runs
+
         raise NotImplementedError(
             "psycopg2.connect(dsn) -> CREATE TABLE -> INSERT canary"
         )
 
-    def test_migration_then_post_migration_canary_read(
-        self, real_aws_canary_stack
-    ):
+    def test_migration_then_post_migration_canary_read(self, real_aws_canary_stack):
         # After the canary row exists in v1, run the full migration.
         # Then connect to the SAME postgres (now v2-managed) and SELECT.
         # Row must be present, marker must match.
@@ -122,9 +121,7 @@ class TestDbIntegrityCanary:
 
         # Phase 3: import state into a sandbox copy first
         sandbox_state = Path(info["working_dir"]) / "tfstate.copy"
-        sandbox_state.write_bytes(
-            Path(info["live_tfstate"]).read_bytes()
-        )
+        sandbox_state.write_bytes(Path(info["live_tfstate"]).read_bytes())
         ip = ImportStatePhase(
             plan=plan,
             output_dir=out_dir,
@@ -141,6 +138,7 @@ class TestDbIntegrityCanary:
 
         # Phase 5 (post-cutover): the canary MUST still be readable.
         import psycopg2
+
         with psycopg2.connect(info["postgres_dsn"]) as conn:
             with conn.cursor() as cur:
                 cur.execute(

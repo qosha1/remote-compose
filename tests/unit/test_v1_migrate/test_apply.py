@@ -44,7 +44,6 @@ from remote_compose.v1_migrate.apply import (
 from remote_compose.v1_migrate.discover import ResourceInventory, V1Stack
 from remote_compose.v1_migrate.plan import build_plan
 
-
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "v1_migrate"
 V1_RC_YML = FIXTURES / "ss-debuggai-prod.rc.yml"
 INVENTORY_JSON = FIXTURES / "inventory.json"
@@ -61,17 +60,22 @@ def plan():
 def sandbox_tfstate(tmp_path: Path) -> Path:
     """Fake tfstate copy — represents the cp -r of live state."""
     s = tmp_path / "tfstate.copy"
-    s.write_text(json.dumps({
-        "version": 4,
-        "terraform_version": "1.6.0",
-        "resources": [],  # empty — we'll import into it
-    }))
+    s.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "terraform_version": "1.6.0",
+                "resources": [],  # empty — we'll import into it
+            }
+        )
+    )
     return s
 
 
 # ---------------------------------------------------------------------
 # Phase ABC
 # ---------------------------------------------------------------------
+
 
 class TestPhaseAbc:
     def test_phase_is_abstract(self):
@@ -93,6 +97,7 @@ class TestPhaseAbc:
 # ValidatePhase — read-only
 # ---------------------------------------------------------------------
 
+
 class TestValidatePhase:
     def test_no_aws_calls_in_dry_run(self, plan, monkeypatch):
         # ValidatePhase MUST be safe to run against prod without any
@@ -101,11 +106,13 @@ class TestValidatePhase:
 
         class StrictReadOnlySession:
             def __getattr__(self, name):
-                if name.startswith("create_") or name.startswith("delete_") \
-                        or name.startswith("update_") or name.startswith("put_"):
-                    raise AssertionError(
-                        f"ValidatePhase called mutating API: {name}"
-                    )
+                if (
+                    name.startswith("create_")
+                    or name.startswith("delete_")
+                    or name.startswith("update_")
+                    or name.startswith("put_")
+                ):
+                    raise AssertionError(f"ValidatePhase called mutating API: {name}")
                 calls.append(name)
                 return lambda *a, **k: None
 
@@ -120,6 +127,7 @@ class TestValidatePhase:
             def re_discover(self):
                 # simulate: the EFS file system id changed
                 from remote_compose.v1_migrate.discover import ResourceInventory
+
                 d = ResourceInventory.from_json(INVENTORY_JSON).to_dict()
                 d["efs"]["file_system_id"] = "fs-DIFFERENT"
                 return ResourceInventory.from_dict(d)
@@ -133,6 +141,7 @@ class TestValidatePhase:
 # ---------------------------------------------------------------------
 # EmitV2TerraformPhase — writes .tf, splices import {}
 # ---------------------------------------------------------------------
+
 
 class TestEmitV2TerraformPhase:
     def test_writes_main_tf(self, plan, tmp_path):
@@ -156,6 +165,7 @@ class TestEmitV2TerraformPhase:
 # ---------------------------------------------------------------------
 # ImportStatePhase — sandbox-state-copy guard + import-only changeset
 # ---------------------------------------------------------------------
+
 
 class TestImportStatePhase:
     def test_refuses_without_sandbox_copy(self, plan, tmp_path):
@@ -187,13 +197,16 @@ class TestImportStatePhase:
         out.mkdir()
 
         class FakeTerraform:
-            def init(self, *a, **k): return ("", 0)
+            def init(self, *a, **k):
+                return ("", 0)
+
             def plan(self, *a, **k):
                 return (
                     "Terraform will perform the following actions:\n"
                     "  # aws_efs_file_system.this will be destroyed\n",
                     2,
                 )
+
             def apply(self, *a, **k):
                 raise AssertionError("apply must not run when plan shows destroy")
 
@@ -207,17 +220,18 @@ class TestImportStatePhase:
         assert result.ok is False
         assert "destroy" in result.details.lower()
 
-    def test_happy_path_runs_apply(
-        self, plan, tmp_path, sandbox_tfstate
-    ):
+    def test_happy_path_runs_apply(self, plan, tmp_path, sandbox_tfstate):
         out = tmp_path / "tf"
         out.mkdir()
         applied = []
 
         class FakeTerraform:
-            def init(self, *a, **k): return ("", 0)
+            def init(self, *a, **k):
+                return ("", 0)
+
             def plan(self, *a, **k):
                 return ("Plan: 6 to import, 0 to add, 0 to change, 0 to destroy.", 0)
+
             def apply(self, *a, **k):
                 applied.append(True)
                 return ("Apply complete! Resources: 6 imported.", 0)
@@ -237,6 +251,7 @@ class TestImportStatePhase:
 # ServicesCutoverPhase
 # ---------------------------------------------------------------------
 
+
 class _FakeEcs:
     """boto3 ecs.client stub: serves describe_services + describe_task_definition,
     captures register_task_definition + update_service calls.
@@ -251,8 +266,7 @@ class _FakeEcs:
     def list_services(self, cluster):
         return {
             "serviceArns": [
-                f"arn:aws:ecs:us-west-2:0:service/{cluster}/{n}"
-                for n in self._services
+                f"arn:aws:ecs:us-west-2:0:service/{cluster}/{n}" for n in self._services
             ],
         }
 
@@ -260,13 +274,14 @@ class _FakeEcs:
         out = []
         for name in services:
             if name in self._services:
-                out.append({
-                    "serviceName": name,
-                    "taskDefinition": (
-                        f"arn:aws:ecs:us-west-2:0:task-definition/"
-                        f"{name}:1"
-                    ),
-                })
+                out.append(
+                    {
+                        "serviceName": name,
+                        "taskDefinition": (
+                            f"arn:aws:ecs:us-west-2:0:task-definition/" f"{name}:1"
+                        ),
+                    }
+                )
         return {"services": out}
 
     def describe_task_definition(self, taskDefinition):
@@ -279,8 +294,7 @@ class _FakeEcs:
         return {
             "taskDefinition": {
                 "taskDefinitionArn": (
-                    f"arn:aws:ecs:us-west-2:0:task-definition/"
-                    f"{kwargs['family']}:2"
+                    f"arn:aws:ecs:us-west-2:0:task-definition/" f"{kwargs['family']}:2"
                 ),
             },
         }
@@ -301,42 +315,55 @@ def _v1_django_task_def() -> dict:
         "executionRoleArn": "arn:aws:iam::033937118837:role/ecsTaskExecutionRole",
         "taskRoleArn": "arn:aws:iam::033937118837:role/ecsTaskRole",
         "ephemeralStorage": {"sizeInGiB": 40},
-        "containerDefinitions": [{
-            "name": "django",
-            "image": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/django:abc123",
-            "essential": True,
-            # v1 envfile injection: real secret values pasted in env (will be stripped).
-            "environment": [
-                {"name": "DEBUG", "value": "False"},  # not in plan.secret_arn_map -> kept
-                {"name": "POSTGRES_PASSWORD", "value": "real-secret-leaked"},  # collides -> dropped
-                {"name": "DJANGO_LOG_LEVEL", "value": "INFO"},
-            ],
-            "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
-            "mountPoints": [{
-                "sourceVolume": "static", "containerPath": "/app/static",
-                "readOnly": False,
-            }],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": "/ecs/ss-debuggai-prod",
-                    "awslogs-region": "us-west-2",
-                    "awslogs-stream-prefix": "django",
+        "containerDefinitions": [
+            {
+                "name": "django",
+                "image": "033937118837.dkr.ecr.us-west-2.amazonaws.com/ss-debuggai/django:abc123",
+                "essential": True,
+                # v1 envfile injection: real secret values pasted in env (will be stripped).
+                "environment": [
+                    {
+                        "name": "DEBUG",
+                        "value": "False",
+                    },  # not in plan.secret_arn_map -> kept
+                    {
+                        "name": "POSTGRES_PASSWORD",
+                        "value": "real-secret-leaked",
+                    },  # collides -> dropped
+                    {"name": "DJANGO_LOG_LEVEL", "value": "INFO"},
+                ],
+                "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
+                "mountPoints": [
+                    {
+                        "sourceVolume": "static",
+                        "containerPath": "/app/static",
+                        "readOnly": False,
+                    }
+                ],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": "/ecs/ss-debuggai-prod",
+                        "awslogs-region": "us-west-2",
+                        "awslogs-stream-prefix": "django",
+                    },
                 },
-            },
-        }],
-        "volumes": [{
-            "name": "static",
-            "efsVolumeConfiguration": {
-                "fileSystemId": "fs-0e8a2f9d1e006af95",
-                "rootDirectory": "/",
-                "transitEncryption": "ENABLED",
-                "authorizationConfig": {
-                    "accessPointId": "fsap-0027054fe47e721f1",
-                    "iam": "DISABLED",
+            }
+        ],
+        "volumes": [
+            {
+                "name": "static",
+                "efsVolumeConfiguration": {
+                    "fileSystemId": "fs-0e8a2f9d1e006af95",
+                    "rootDirectory": "/",
+                    "transitEncryption": "ENABLED",
+                    "authorizationConfig": {
+                        "accessPointId": "fsap-0027054fe47e721f1",
+                        "iam": "DISABLED",
+                    },
                 },
-            },
-        }],
+            }
+        ],
         # Fields that describe_task_definition returns but RegisterTaskDefinition rejects:
         "taskDefinitionArn": "arn:aws:ecs:us-west-2:0:task-definition/ss-debuggai-django:1",
         "revision": 1,
@@ -350,16 +377,25 @@ class TestServicesCutoverPhase:
     def test_rolls_each_v1_service_with_v2_secrets(self, plan):
         # Stand up 7 v1 services, all with the same shape skeleton.
         services = {
-            f"ss-debuggai-{name}": {**_v1_django_task_def(), "family": f"ss-debuggai-{name}"}
+            f"ss-debuggai-{name}": {
+                **_v1_django_task_def(),
+                "family": f"ss-debuggai-{name}",
+            }
             for name in [
-                "django", "postgres", "redis", "nginx",
-                "celery-worker", "celery-beat", "celery-worker-linkedin",
+                "django",
+                "postgres",
+                "redis",
+                "nginx",
+                "celery-worker",
+                "celery-beat",
+                "celery-worker-linkedin",
             ]
         }
         ecs = _FakeEcs(services)
 
         result = ServicesCutoverPhase(
-            plan=plan, ecs_client=ecs,
+            plan=plan,
+            ecs_client=ecs,
         ).run()
         assert result.ok, result.details
         # All 7 services registered + rolled.
@@ -403,8 +439,10 @@ class TestServicesCutoverPhase:
         assert c0["portMappings"] == [{"containerPort": 8000, "protocol": "tcp"}]
         assert c0["mountPoints"][0]["containerPath"] == "/app/static"
         # Volumes (the EFS reference) preserved at the task-def level.
-        assert td["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"] == \
-            "fs-0e8a2f9d1e006af95"
+        assert (
+            td["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"]
+            == "fs-0e8a2f9d1e006af95"
+        )
         # Ephemeral storage preserved.
         assert td["ephemeralStorage"] == {"sizeInGiB": 40}
 
@@ -415,9 +453,16 @@ class TestServicesCutoverPhase:
         ecs = _FakeEcs(services)
         ServicesCutoverPhase(plan=plan, ecs_client=ecs).run()
         td = ecs.registered[0]
-        for forbidden in ("revision", "status", "taskDefinitionArn",
-                          "registeredAt", "registeredBy"):
-            assert forbidden not in td, f"{forbidden!r} leaked into RegisterTaskDefinition"
+        for forbidden in (
+            "revision",
+            "status",
+            "taskDefinitionArn",
+            "registeredAt",
+            "registeredBy",
+        ):
+            assert (
+                forbidden not in td
+            ), f"{forbidden!r} leaked into RegisterTaskDefinition"
 
     def test_aborts_on_error_with_rollback_hint(self, plan):
         # If register_task_definition raises mid-flight, the phase must
@@ -454,6 +499,7 @@ class TestServicesCutoverPhase:
 # ---------------------------------------------------------------------
 # DecommissionV1Phase — must NEVER touch SM/EFS/ALB
 # ---------------------------------------------------------------------
+
 
 class TestDecommissionV1Phase:
     def test_no_aws_destroy_calls(self, plan):

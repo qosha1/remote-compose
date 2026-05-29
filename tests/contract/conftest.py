@@ -41,6 +41,7 @@ def _reset_fake_state() -> None:
     """Per-test reset of FakeProvider class-level state to prevent leakage."""
     try:
         from remote_compose.provider.fake import FakeProvider
+
         FakeProvider.reset()
     except ImportError:
         pass
@@ -95,11 +96,13 @@ def working_dir(tmp_path: Path) -> Path:
 
 _PROVIDER_DEFAULT_CONFIG: dict[str, dict] = {
     "fake": {},
-    "ecs": {"ecs": {
-        "region": "us-west-2",
-        "cluster": "contract-test",
-        "vpc_cidr": "10.0.0.0/16",
-    }},
+    "ecs": {
+        "ecs": {
+            "region": "us-west-2",
+            "cluster": "contract-test",
+            "vpc_cidr": "10.0.0.0/16",
+        }
+    },
     # k8s defaults land when the k8s provider ships (rc-e5u.8).
 }
 
@@ -121,15 +124,27 @@ def minimal_ctx(
     """
     services = {
         "web": ServiceSpec(
-            name="web", cpu=256, memory=512, replicas=1,
-            type="proxy", public=True, port=80,
+            name="web",
+            cpu=256,
+            memory=512,
+            replicas=1,
+            type="proxy",
+            public=True,
+            port=80,
         ),
         "api": ServiceSpec(
-            name="api", cpu=512, memory=1024, replicas=1,
-            type="application", health_check_path="/",
+            name="api",
+            cpu=512,
+            memory=1024,
+            replicas=1,
+            type="application",
+            health_check_path="/",
         ),
         "cache": ServiceSpec(
-            name="cache", cpu=256, memory=512, replicas=1,
+            name="cache",
+            cpu=256,
+            memory=512,
+            replicas=1,
             type="infrastructure",
         ),
     }

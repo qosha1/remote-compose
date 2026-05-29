@@ -5,13 +5,26 @@ from __future__ import annotations
 import click
 
 
-@click.command(name='migrate')
-@click.option('--in', 'in_path', default='rc.yml', show_default=True,
-              help='Path to rc.yml v1 input.')
-@click.option('--out', 'out_path', default='rc.v2.yml', show_default=True,
-              help='Path to write rc.yml v2 output.')
-@click.option('--force', is_flag=True,
-              help='Write output even if unmigratable fields are present.')
+@click.command(name="migrate")
+@click.option(
+    "--in",
+    "in_path",
+    default="rc.yml",
+    show_default=True,
+    help="Path to rc.yml v1 input.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default="rc.v2.yml",
+    show_default=True,
+    help="Path to write rc.yml v2 output.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Write output even if unmigratable fields are present.",
+)
 def migrate_cmd(in_path, out_path, force):
     """Convert a v1 rc.yml to v2 schema."""
     import yaml
@@ -38,6 +51,6 @@ def migrate_cmd(in_path, out_path, force):
         )
         raise click.exceptions.Exit(1)
 
-    with open(out_path, 'w') as f:
+    with open(out_path, "w") as f:
         yaml.safe_dump(result.v2, f, sort_keys=False)
     click.echo(f"Wrote {out_path} (version 2).")

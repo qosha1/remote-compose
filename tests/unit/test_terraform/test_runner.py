@@ -82,7 +82,9 @@ class TestPlanSummaryParser:
         assert s.create == 5 and s.update == 2 and s.destroy == 1
 
     def test_no_changes_wording(self):
-        s = _parse_plan_summary("No changes. Your infrastructure matches the configuration.")
+        s = _parse_plan_summary(
+            "No changes. Your infrastructure matches the configuration."
+        )
         assert s.create == s.update == s.destroy == 0
 
     def test_unknown_format_returns_zeros(self):

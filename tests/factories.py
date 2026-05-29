@@ -19,34 +19,34 @@ class SecureCredentialFactory(DjangoModelFactory):
     class Meta:
         model = SecureCredential
 
-    name = factory.Sequence(lambda n: f'credential-{n}')
-    description = factory.Faker('sentence')
+    name = factory.Sequence(lambda n: f"credential-{n}")
+    description = factory.Faker("sentence")
     credential_type = SecureCredential.CredentialType.SSH_PRIVATE_KEY
     encrypted_value = factory.LazyFunction(
-        lambda: encrypt_value('-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----')
+        lambda: encrypt_value(
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
     )
-    created_by = 'test'
+    created_by = "test"
 
 
 class AWSCredentialFactory(SecureCredentialFactory):
     credential_type = SecureCredential.CredentialType.AWS_ACCESS_KEY
-    aws_access_key_id = factory.Sequence(lambda n: f'AKIA{n:016d}')
-    aws_region = 'us-east-1'
-    encrypted_value = factory.LazyFunction(
-        lambda: encrypt_value('fake-secret-key')
-    )
+    aws_access_key_id = factory.Sequence(lambda n: f"AKIA{n:016d}")
+    aws_region = "us-east-1"
+    encrypted_value = factory.LazyFunction(lambda: encrypt_value("fake-secret-key"))
 
 
 class DeploymentTargetFactory(DjangoModelFactory):
     class Meta:
         model = DeploymentTarget
 
-    name = factory.Sequence(lambda n: f'target-{n}')
-    description = factory.Faker('sentence')
+    name = factory.Sequence(lambda n: f"target-{n}")
+    description = factory.Faker("sentence")
     target_type = DeploymentTarget.TargetType.SSH
-    host = factory.Faker('ipv4_public')
+    host = factory.Faker("ipv4_public")
     port = 22
-    username = 'ubuntu'
+    username = "ubuntu"
     environment = DeploymentTarget.Environment.DEVELOPMENT
     is_active = True
     health_status = DeploymentTarget.HealthStatus.UNKNOWN
@@ -56,8 +56,8 @@ class DockerContextFactory(DjangoModelFactory):
     class Meta:
         model = DockerContext
 
-    name = factory.Sequence(lambda n: f'context-{n}')
-    description = factory.Faker('sentence')
+    name = factory.Sequence(lambda n: f"context-{n}")
+    description = factory.Faker("sentence")
     target = factory.SubFactory(DeploymentTargetFactory)
     context_type = DockerContext.ContextType.SSH
     endpoint = factory.LazyAttribute(
@@ -73,17 +73,17 @@ class DeploymentFactory(DjangoModelFactory):
 
     context = factory.SubFactory(DockerContextFactory)
     target = factory.LazyAttribute(lambda o: o.context.target)
-    compose_file_path = '/path/to/docker-compose.yml'
+    compose_file_path = "/path/to/docker-compose.yml"
     compose_content = """version: '3.8'
 services:
   web:
     image: nginx:alpine
 """
-    project_name = factory.Sequence(lambda n: f'project-{n}')
+    project_name = factory.Sequence(lambda n: f"project-{n}")
     status = Deployment.Status.PENDING
     deployment_type = Deployment.DeploymentType.DEPLOY
-    version = factory.Sequence(lambda n: f'v1.0.{n}')
-    deployed_by = 'test-user'
+    version = factory.Sequence(lambda n: f"v1.0.{n}")
+    deployed_by = "test-user"
 
 
 class DeploymentLogFactory(DjangoModelFactory):
@@ -92,6 +92,6 @@ class DeploymentLogFactory(DjangoModelFactory):
 
     deployment = factory.SubFactory(DeploymentFactory)
     log_level = DeploymentLog.LogLevel.INFO
-    message = factory.Faker('sentence')
-    command = ''
-    output = ''
+    message = factory.Faker("sentence")
+    command = ""
+    output = ""

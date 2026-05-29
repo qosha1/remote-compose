@@ -10,51 +10,53 @@ from remote_compose.models import ECSCluster
 
 
 class Command(BaseCommand):
-    help = 'Manage AWS Secrets Manager secrets for ECS deployments'
+    help = "Manage AWS Secrets Manager secrets for ECS deployments"
 
     def add_arguments(self, parser):
-        subparsers = parser.add_subparsers(dest='action', help='Action to perform')
+        subparsers = parser.add_subparsers(dest="action", help="Action to perform")
 
         # Push action
-        push_parser = subparsers.add_parser('push', help='Push env file values to Secrets Manager')
-        push_parser.add_argument('--cluster', required=True, help='ECS cluster name')
+        push_parser = subparsers.add_parser(
+            "push", help="Push env file values to Secrets Manager"
+        )
+        push_parser.add_argument("--cluster", required=True, help="ECS cluster name")
         push_parser.add_argument(
-            '--env-file',
-            required=True,
-            help='Path to env file with secrets'
+            "--env-file", required=True, help="Path to env file with secrets"
         )
 
         # List action
-        list_parser = subparsers.add_parser('list', help='List managed secrets')
-        list_parser.add_argument('--cluster', required=True, help='ECS cluster name')
+        list_parser = subparsers.add_parser("list", help="List managed secrets")
+        list_parser.add_argument("--cluster", required=True, help="ECS cluster name")
 
         # Show action
-        show_parser = subparsers.add_parser('show', help='Show secret keys (not values)')
-        show_parser.add_argument('--cluster', required=True, help='ECS cluster name')
-        show_parser.add_argument('--name', help='Secret name to show')
+        show_parser = subparsers.add_parser(
+            "show", help="Show secret keys (not values)"
+        )
+        show_parser.add_argument("--cluster", required=True, help="ECS cluster name")
+        show_parser.add_argument("--name", help="Secret name to show")
 
     def handle(self, *args, **options):
-        action = options.get('action')
+        action = options.get("action")
         if not action:
             self.stdout.write("Usage: ecs_secrets {push|list|show}")
             return
 
-        if action == 'push':
+        if action == "push":
             self._handle_push(options)
-        elif action == 'list':
+        elif action == "list":
             self._handle_list(options)
-        elif action == 'show':
+        elif action == "show":
             self._handle_show(options)
 
     def _get_cluster(self, options):
         try:
-            return ECSCluster.objects.get(name=options['cluster'])
+            return ECSCluster.objects.get(name=options["cluster"])
         except ECSCluster.DoesNotExist:
             raise CommandError(f"Cluster not found: {options['cluster']}")
 
     def _handle_push(self, options):
         cluster = self._get_cluster(options)
-        env_file = options['env_file']
+        env_file = options["env_file"]
 
         if not os.path.exists(env_file):
             raise CommandError(f"Env file not found: {env_file}")
@@ -63,7 +65,9 @@ class Command(BaseCommand):
 
         secrets_service = SecretsService()
 
-        self.stdout.write(f"Pushing secrets from {env_file} to cluster {cluster.name}...")
+        self.stdout.write(
+            f"Pushing secrets from {env_file} to cluster {cluster.name}..."
+        )
 
         try:
             arns = secrets_service.push_env_file(
@@ -85,7 +89,7 @@ class Command(BaseCommand):
 
         from remote_compose.models import SecretConfig
 
-        secrets = SecretConfig.objects.filter(cluster=cluster).order_by('env_var_name')
+        secrets = SecretConfig.objects.filter(cluster=cluster).order_by("env_var_name")
 
         if not secrets.exists():
             self.stdout.write("No managed secrets found.")
@@ -123,17 +127,17 @@ class Command(BaseCommand):
                 self.stdout.write("No secrets found in AWS Secrets Manager.")
                 return
 
-            name_filter = options.get('name')
+            name_filter = options.get("name")
 
             self.stdout.write(f"Secrets in cluster {cluster.name}:")
             self.stdout.write("")
 
             for secret in managed:
-                if name_filter and name_filter not in secret.get('name', ''):
+                if name_filter and name_filter not in secret.get("name", ""):
                     continue
                 self.stdout.write(f"  Name: {secret.get('name', 'unknown')}")
                 self.stdout.write(f"  ARN:  {secret.get('arn', 'unknown')}")
-                if secret.get('keys'):
+                if secret.get("keys"):
                     self.stdout.write(f"  Keys: {', '.join(secret['keys'])}")
                 self.stdout.write("")
 

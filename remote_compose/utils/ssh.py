@@ -5,7 +5,6 @@ SSH utilities for remote command execution.
 import io
 import logging
 import os
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +62,7 @@ class StrictHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 @dataclass
 class CommandResult:
     """Result of a remote command execution."""
+
     stdout: str
     stderr: str
     exit_code: int
@@ -124,10 +124,14 @@ class SSHClient:
         self.key_content = key_content
         self.port = port
         self.password = password
-        self.connect_timeout = connect_timeout or get_setting('SSH_CONNECTION_TIMEOUT', 30)
-        self.command_timeout = command_timeout or get_setting('SSH_COMMAND_TIMEOUT', 300)
+        self.connect_timeout = connect_timeout or get_setting(
+            "SSH_CONNECTION_TIMEOUT", 30
+        )
+        self.command_timeout = command_timeout or get_setting(
+            "SSH_COMMAND_TIMEOUT", 300
+        )
         self.known_hosts_path = known_hosts_path
-        self.auto_add_hosts = auto_add_hosts or get_setting('SSH_AUTO_ADD_HOSTS', False)
+        self.auto_add_hosts = auto_add_hosts or get_setting("SSH_AUTO_ADD_HOSTS", False)
 
         self._client: Optional[paramiko.SSHClient] = None
         self._temp_key_file: Optional[str] = None
@@ -143,7 +147,7 @@ class SSHClient:
                 raise SSHAuthenticationError(
                     f"SSH key file not found: {self.key_path}",
                     host=self.host,
-                    port=self.port
+                    port=self.port,
                 )
             key_source = self.key_path
 
@@ -171,7 +175,7 @@ class SSHClient:
         raise SSHAuthenticationError(
             "Unable to load SSH key. Unsupported key format.",
             host=self.host,
-            port=self.port
+            port=self.port,
         )
 
     def connect(self):
@@ -188,7 +192,7 @@ class SSHClient:
             known_hosts = self.known_hosts_path
             if known_hosts is None:
                 # Use default known_hosts location
-                known_hosts = Path.home() / '.ssh' / 'known_hosts'
+                known_hosts = Path.home() / ".ssh" / "known_hosts"
 
             if isinstance(known_hosts, (str, Path)) and Path(known_hosts).exists():
                 try:
@@ -198,28 +202,30 @@ class SSHClient:
                     logger.warning(f"Failed to load known hosts: {e}")
 
         # Set host key policy - strict by default
-        self._client.set_missing_host_key_policy(StrictHostKeyPolicy(auto_add_new=self.auto_add_hosts))
+        self._client.set_missing_host_key_policy(
+            StrictHostKeyPolicy(auto_add_new=self.auto_add_hosts)
+        )
 
         try:
             pkey = self._get_pkey()
 
             connect_kwargs = {
-                'hostname': self.host,
-                'port': self.port,
-                'username': self.username,
-                'timeout': self.connect_timeout,
-                'allow_agent': False,
-                'look_for_keys': False,
+                "hostname": self.host,
+                "port": self.port,
+                "username": self.username,
+                "timeout": self.connect_timeout,
+                "allow_agent": False,
+                "look_for_keys": False,
             }
 
             if pkey:
-                connect_kwargs['pkey'] = pkey
+                connect_kwargs["pkey"] = pkey
             elif self.password:
-                connect_kwargs['password'] = self.password
+                connect_kwargs["password"] = self.password
             else:
                 # Allow agent and system keys if no explicit auth
-                connect_kwargs['allow_agent'] = True
-                connect_kwargs['look_for_keys'] = True
+                connect_kwargs["allow_agent"] = True
+                connect_kwargs["look_for_keys"] = True
 
             logger.debug(f"Connecting to {self.username}@{self.host}:{self.port}")
             self._client.connect(**connect_kwargs)
@@ -227,27 +233,19 @@ class SSHClient:
 
         except paramiko.AuthenticationException as e:
             raise SSHAuthenticationError(
-                f"Authentication failed: {e}",
-                host=self.host,
-                port=self.port
+                f"Authentication failed: {e}", host=self.host, port=self.port
             )
         except paramiko.SSHException as e:
-            raise SSHConnectionError(
-                f"SSH error: {e}",
-                host=self.host,
-                port=self.port
-            )
+            raise SSHConnectionError(f"SSH error: {e}", host=self.host, port=self.port)
         except TimeoutError:
             raise SSHTimeoutError(
                 f"Connection timed out after {self.connect_timeout}s",
                 host=self.host,
-                port=self.port
+                port=self.port,
             )
         except Exception as e:
             raise SSHConnectionError(
-                f"Failed to connect: {e}",
-                host=self.host,
-                port=self.port
+                f"Failed to connect: {e}", host=self.host, port=self.port
             )
 
     def disconnect(self):
@@ -287,14 +285,11 @@ class SSHClient:
         try:
             logger.debug(f"Executing command: {command[:100]}...")
 
-            stdin, stdout, stderr = self._client.exec_command(
-                command,
-                timeout=timeout
-            )
+            stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
 
             exit_code = stdout.channel.recv_exit_status()
-            stdout_text = stdout.read().decode('utf-8', errors='replace')
-            stderr_text = stderr.read().decode('utf-8', errors='replace')
+            stdout_text = stdout.read().decode("utf-8", errors="replace")
+            stderr_text = stderr.read().decode("utf-8", errors="replace")
 
             logger.debug(f"Command exit code: {exit_code}")
 
@@ -302,14 +297,12 @@ class SSHClient:
                 stdout=stdout_text,
                 stderr=stderr_text,
                 exit_code=exit_code,
-                command=command
+                command=command,
             )
 
         except paramiko.SSHException as e:
             raise SSHConnectionError(
-                f"Command execution failed: {e}",
-                host=self.host,
-                port=self.port
+                f"Command execution failed: {e}", host=self.host, port=self.port
             )
 
     def execute_commands(self, commands: list) -> list:
@@ -340,7 +333,7 @@ class SSHClient:
         try:
             self.connect()
             result = self.execute('echo "connection_test"')
-            if result.success and 'connection_test' in result.stdout:
+            if result.success and "connection_test" in result.stdout:
                 return True, "Connection successful"
             return False, f"Connection test failed: {result.stderr}"
         except Exception as e:
@@ -369,9 +362,7 @@ class SSHClient:
             return True
         except Exception as e:
             raise SSHConnectionError(
-                f"File upload failed: {e}",
-                host=self.host,
-                port=self.port
+                f"File upload failed: {e}", host=self.host, port=self.port
             )
 
     def upload_content(self, content: str, remote_path: str) -> bool:
@@ -389,16 +380,14 @@ class SSHClient:
 
         try:
             sftp = self._client.open_sftp()
-            with sftp.file(remote_path, 'w') as f:
+            with sftp.file(remote_path, "w") as f:
                 f.write(content)
             sftp.close()
             logger.debug(f"Uploaded content to {remote_path}")
             return True
         except Exception as e:
             raise SSHConnectionError(
-                f"Content upload failed: {e}",
-                host=self.host,
-                port=self.port
+                f"Content upload failed: {e}", host=self.host, port=self.port
             )
 
     def download_file(self, remote_path: str, local_path: str) -> bool:
@@ -422,9 +411,7 @@ class SSHClient:
             return True
         except Exception as e:
             raise SSHConnectionError(
-                f"File download failed: {e}",
-                host=self.host,
-                port=self.port
+                f"File download failed: {e}", host=self.host, port=self.port
             )
 
 

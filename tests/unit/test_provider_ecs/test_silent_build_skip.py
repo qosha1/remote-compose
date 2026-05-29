@@ -27,11 +27,13 @@ def _ctx(tmp_path: Path, services: dict) -> DeployContext:
         project="silent-skip-test",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1",
-            "cluster": "silent-skip-test",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "silent-skip-test",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services=services,
@@ -60,7 +62,7 @@ def healthy_runner(tmp_path):
         "output",
         '{"ecr_repositories": {"value": {'
         '"api": "111.dkr.ecr.us-east-1.amazonaws.com/silent-skip-test/api"'
-        '}}}',
+        "}}}",
     )
     return runner
 
@@ -70,14 +72,23 @@ class TestSilentBuildSkipEmitsVisibleProgress:
     explaining why, not just a tucked-away result.warning."""
 
     def test_no_build_context_emits_progress_line(
-        self, tmp_path, mock_session, healthy_runner,
+        self,
+        tmp_path,
+        mock_session,
+        healthy_runner,
     ):
-        ctx = _ctx(tmp_path, {
-            "image-only": ServiceSpec(
-                name="image-only", cpu=256, memory=512, type="application",
-                image="nginx:alpine",
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "image-only": ServiceSpec(
+                    name="image-only",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    image="nginx:alpine",
+                ),
+            },
+        )
         progress_lines: list[str] = []
         provider = ECSProvider(
             runner_factory=lambda d: healthy_runner,
@@ -87,8 +98,10 @@ class TestSilentBuildSkipEmitsVisibleProgress:
         provider.deploy(ctx)
         # Today nothing is emitted; this assertion fails until 8q4 is fixed.
         assert any(
-            "build" in line.lower() and (
-                "no images" in line.lower() or "0 images" in line.lower()
+            "build" in line.lower()
+            and (
+                "no images" in line.lower()
+                or "0 images" in line.lower()
                 or "skipped" in line.lower()
             )
             for line in progress_lines
@@ -98,17 +111,26 @@ class TestSilentBuildSkipEmitsVisibleProgress:
         )
 
     def test_missing_terraform_outputs_emits_progress_line(
-        self, tmp_path, mock_session, empty_outputs_runner,
+        self,
+        tmp_path,
+        mock_session,
+        empty_outputs_runner,
     ):
         api_ctx = tmp_path / "api"
         api_ctx.mkdir()
         (api_ctx / "Dockerfile").write_text("FROM alpine\n")
-        ctx = _ctx(tmp_path, {
-            "api": ServiceSpec(
-                name="api", cpu=256, memory=512, type="application",
-                build_context=api_ctx,
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "api": ServiceSpec(
+                    name="api",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    build_context=api_ctx,
+                ),
+            },
+        )
         progress_lines: list[str] = []
         provider = ECSProvider(
             runner_factory=lambda d: empty_outputs_runner,
@@ -118,7 +140,8 @@ class TestSilentBuildSkipEmitsVisibleProgress:
         provider.deploy(ctx)
         assert any(
             "ecr_repositories" in line.lower()
-            or "missing" in line.lower() and "build" in line.lower()
+            or "missing" in line.lower()
+            and "build" in line.lower()
             for line in progress_lines
         ), (
             "expected a visible progress line that the build phase was "
@@ -126,7 +149,9 @@ class TestSilentBuildSkipEmitsVisibleProgress:
         )
 
     def test_per_service_missing_repo_url_emits_stderr_warn(
-        self, tmp_path, mock_session,
+        self,
+        tmp_path,
+        mock_session,
     ):
         # Service builds, but its name isn't in the outputs map. Today this
         # appends to result.warnings silently. After 8q4 it must call
@@ -134,18 +159,24 @@ class TestSilentBuildSkipEmitsVisibleProgress:
         api_ctx = tmp_path / "ghost"
         api_ctx.mkdir()
         (api_ctx / "Dockerfile").write_text("FROM alpine\n")
-        ctx = _ctx(tmp_path, {
-            "ghost": ServiceSpec(
-                name="ghost", cpu=256, memory=512, type="application",
-                build_context=api_ctx,
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            {
+                "ghost": ServiceSpec(
+                    name="ghost",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    build_context=api_ctx,
+                ),
+            },
+        )
         runner = RecordingTerraformRunner(tmp_path / "terraform")
         runner.script(
             "output",
             '{"ecr_repositories": {"value": {'
             '"different-svc": "111.dkr.ecr.us-east-1.amazonaws.com/x/y"'
-            '}}}',
+            "}}}",
         )
         progress_lines: list[str] = []
         provider = ECSProvider(

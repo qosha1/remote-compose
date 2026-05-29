@@ -7,7 +7,6 @@ sees any feedback.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -31,12 +30,17 @@ def _make_ctx_with_large_context(tmp_path: Path, size_bytes: int) -> DeployConte
         project="ctx-size-test",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {"region": "us-east-1", "cluster": "x", "vpc_cidr": "10.0.0.0/16"}},
+        provider_config={
+            "ecs": {"region": "us-east-1", "cluster": "x", "vpc_cidr": "10.0.0.0/16"}
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "api": ServiceSpec(
-                name="api", cpu=256, memory=512, type="application",
+                name="api",
+                cpu=256,
+                memory=512,
+                type="application",
                 build_context=ctx_path,
             ),
         },
@@ -70,9 +74,9 @@ class TestBuildContextPreflight:
         events: list[str] = []
         provider = ECSProvider(progress=events.append)
         provider._preflight_build_context_sizes(list(ctx.services.values()))
-        assert any("WARN" in e and "1.5GB" in e for e in events), (
-            f"expected WARN line for 1.5GB context. events={events}"
-        )
+        assert any(
+            "WARN" in e and "1.5GB" in e for e in events
+        ), f"expected WARN line for 1.5GB context. events={events}"
 
     def test_force_override_allows_huge_context(self, tmp_path, monkeypatch):
         monkeypatch.setenv("RC_FORCE_LARGE_CONTEXT", "1")

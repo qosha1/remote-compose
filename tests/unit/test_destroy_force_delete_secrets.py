@@ -55,16 +55,17 @@ class TestForceDeleteSecretsFlag:
 
         SecretConfig = MagicMock()
         SecretConfig.objects.filter.return_value = secret_qs
-        with patch.dict(
-            "sys.modules",
-            {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
-        ), patch(
-            "remote_compose.services.aws_client_factory.get_aws_client_factory",
-            return_value=factory,
-        ), patch(
-            "remote_compose.services.vpc_service.VPCService"
-        ), patch(
-            "remote_compose.cli.click.echo"
+        with (
+            patch.dict(
+                "sys.modules",
+                {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
+            ),
+            patch(
+                "remote_compose.services.aws_client_factory.get_aws_client_factory",
+                return_value=factory,
+            ),
+            patch("remote_compose.services.vpc_service.VPCService"),
+            patch("remote_compose.cli.click.echo"),
         ):
             _teardown_infrastructure(mock_cluster)
 
@@ -82,16 +83,17 @@ class TestForceDeleteSecretsFlag:
 
         SecretConfig = MagicMock()
         SecretConfig.objects.filter.return_value = secret_qs
-        with patch.dict(
-            "sys.modules",
-            {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
-        ), patch(
-            "remote_compose.services.aws_client_factory.get_aws_client_factory",
-            return_value=factory,
-        ), patch(
-            "remote_compose.services.vpc_service.VPCService"
-        ), patch(
-            "remote_compose.cli.click.echo"
+        with (
+            patch.dict(
+                "sys.modules",
+                {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
+            ),
+            patch(
+                "remote_compose.services.aws_client_factory.get_aws_client_factory",
+                return_value=factory,
+            ),
+            patch("remote_compose.services.vpc_service.VPCService"),
+            patch("remote_compose.cli.click.echo"),
         ):
             _teardown_infrastructure(mock_cluster, force_delete_secrets=True)
 
@@ -107,16 +109,17 @@ class TestForceDeleteSecretsFlag:
 
         SecretConfig = MagicMock()
         SecretConfig.objects.filter.return_value = secret_qs
-        with patch.dict(
-            "sys.modules",
-            {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
-        ), patch(
-            "remote_compose.services.aws_client_factory.get_aws_client_factory",
-            return_value=factory,
-        ), patch(
-            "remote_compose.services.vpc_service.VPCService"
-        ), patch(
-            "remote_compose.cli.click.echo"
+        with (
+            patch.dict(
+                "sys.modules",
+                {"remote_compose.models": MagicMock(SecretConfig=SecretConfig)},
+            ),
+            patch(
+                "remote_compose.services.aws_client_factory.get_aws_client_factory",
+                return_value=factory,
+            ),
+            patch("remote_compose.services.vpc_service.VPCService"),
+            patch("remote_compose.cli.click.echo"),
         ):
             _teardown_infrastructure(mock_cluster)
 

@@ -56,7 +56,10 @@ _DISABLE_BUILDCACHE_ENV = "RC_DISABLE_BUILDCACHE"
 
 def _disable_buildcache_set() -> bool:
     return os.environ.get(_DISABLE_BUILDCACHE_ENV, "").lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -201,7 +204,9 @@ class ImageBuilder:
         return list(spec.tags)
 
     def _popen_with_watchdog(
-        self, cmd: list[str], timeout_s: int,
+        self,
+        cmd: list[str],
+        timeout_s: int,
     ) -> tuple[int, str]:
         """Run cmd with line streaming + a no-progress watchdog.
 

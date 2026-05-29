@@ -10,7 +10,6 @@ import textwrap
 from pathlib import Path
 from unittest import mock
 
-import pytest
 from click.testing import CliRunner
 
 from remote_compose.cli import cli
@@ -35,7 +34,9 @@ def _scaffold_v2(tmp_path: Path) -> Path:
         backup:
           service: postgres
     """).strip())
-    (tmp_path / "docker-compose.yml").write_text("services:\n  postgres:\n    image: postgres:15\n")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  postgres:\n    image: postgres:15\n"
+    )
     return rc_yml
 
 
@@ -50,21 +51,28 @@ def _make_session_factory(env_overrides: dict = None):
         }
         ecs.describe_task_definition.return_value = {
             "taskDefinition": {
-                "containerDefinitions": [{
-                    "name": "postgres",
-                    "environment": [
-                        {"name": "POSTGRES_USER", "value": "appuser"},
-                        {"name": "POSTGRES_DB", "value": "backend"},
-                        {"name": "POSTGRES_PORT", "value": "5434"},
-                        *[{"name": k, "value": v} for k, v in env_overrides.items()],
-                    ],
-                }],
+                "containerDefinitions": [
+                    {
+                        "name": "postgres",
+                        "environment": [
+                            {"name": "POSTGRES_USER", "value": "appuser"},
+                            {"name": "POSTGRES_DB", "value": "backend"},
+                            {"name": "POSTGRES_PORT", "value": "5434"},
+                            *[
+                                {"name": k, "value": v}
+                                for k, v in env_overrides.items()
+                            ],
+                        ],
+                    }
+                ],
             },
         }
         ecs.describe_tasks.return_value = {
-            "tasks": [{
-                "taskDefinitionArn": "arn:aws:ecs:us-west-1:111:task-definition/rc-test-postgres:1",
-            }],
+            "tasks": [
+                {
+                    "taskDefinitionArn": "arn:aws:ecs:us-west-1:111:task-definition/rc-test-postgres:1",
+                }
+            ],
         }
         sess.client.return_value = ecs
         return sess
@@ -82,8 +90,10 @@ class TestDbPsql:
             captured["cmd"] = cmd
             return mock.Mock(returncode=0, stdout="42\n", stderr="")
 
-        with mock.patch("boto3.Session", side_effect=_make_session_factory()), \
-             mock.patch("subprocess.run", side_effect=fake_run):
+        with (
+            mock.patch("boto3.Session", side_effect=_make_session_factory()),
+            mock.patch("subprocess.run", side_effect=fake_run),
+        ):
             result = runner.invoke(
                 cli,
                 ["-c", str(rc_yml), "db", "psql", "-c", "SELECT count(*) FROM x"],
@@ -121,8 +131,10 @@ class TestDbPsql:
             captured["cmd"] = cmd
             return mock.Mock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("boto3.Session", side_effect=_make_session_factory()), \
-             mock.patch("subprocess.run", side_effect=fake_run):
+        with (
+            mock.patch("boto3.Session", side_effect=_make_session_factory()),
+            mock.patch("subprocess.run", side_effect=fake_run),
+        ):
             result = runner.invoke(
                 cli,
                 ["-c", str(rc_yml), "db", "psql", "-d", "otherdb", "-c", "\\dt"],
@@ -158,7 +170,8 @@ class TestDbPsql:
         rc_yml.write_text("cluster: legacy\nproject_name: x\n")
         runner = CliRunner()
         result = runner.invoke(
-            cli, ["-c", str(rc_yml), "db", "psql", "-c", "x"],
+            cli,
+            ["-c", str(rc_yml), "db", "psql", "-c", "x"],
             catch_exceptions=False,
         )
         assert result.exit_code != 0
@@ -171,8 +184,10 @@ class TestDbPsql:
         def fake_run(cmd, *args, **kwargs):
             return mock.Mock(returncode=3, stdout="", stderr="psql: error")
 
-        with mock.patch("boto3.Session", side_effect=_make_session_factory()), \
-             mock.patch("subprocess.run", side_effect=fake_run):
+        with (
+            mock.patch("boto3.Session", side_effect=_make_session_factory()),
+            mock.patch("subprocess.run", side_effect=fake_run),
+        ):
             result = runner.invoke(
                 cli,
                 ["-c", str(rc_yml), "db", "psql", "-c", "broken sql"],

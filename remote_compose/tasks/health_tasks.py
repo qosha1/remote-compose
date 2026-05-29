@@ -3,14 +3,13 @@ Celery tasks for health monitoring.
 """
 
 import logging
-from typing import Optional, List
+from typing import Optional
 
 from celery import shared_task
 from django.utils import timezone
 
 from ..models import DeploymentTarget, Deployment
 from ..services import TargetService, DeploymentService
-from ..conf import get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +29,9 @@ def check_target_health(self, target_id: int) -> dict:
         target = DeploymentTarget.objects.get(id=target_id)
     except DeploymentTarget.DoesNotExist:
         return {
-            'success': False,
-            'target_id': target_id,
-            'error': f"Target {target_id} not found",
+            "success": False,
+            "target_id": target_id,
+            "error": f"Target {target_id} not found",
         }
 
     target_service = TargetService()
@@ -46,21 +45,21 @@ def check_target_health(self, target_id: int) -> dict:
             target.mark_unhealthy(message)
 
         return {
-            'success': True,
-            'target_id': target_id,
-            'target_name': target.name,
-            'healthy': success,
-            'message': message,
-            'checked_at': timezone.now().isoformat(),
+            "success": True,
+            "target_id": target_id,
+            "target_name": target.name,
+            "healthy": success,
+            "message": message,
+            "checked_at": timezone.now().isoformat(),
         }
 
     except Exception as e:
         logger.exception(f"Health check failed for target {target_id}: {e}")
         target.mark_unhealthy(str(e))
         return {
-            'success': False,
-            'target_id': target_id,
-            'error': str(e),
+            "success": False,
+            "target_id": target_id,
+            "error": str(e),
         }
 
 
@@ -81,18 +80,18 @@ def check_all_targets_health() -> dict:
         result = check_target_health(target.id)
         results.append(result)
 
-        if result.get('healthy'):
+        if result.get("healthy"):
             healthy_count += 1
         else:
             unhealthy_count += 1
 
     return {
-        'success': True,
-        'total_targets': len(results),
-        'healthy_count': healthy_count,
-        'unhealthy_count': unhealthy_count,
-        'results': results,
-        'checked_at': timezone.now().isoformat(),
+        "success": True,
+        "total_targets": len(results),
+        "healthy_count": healthy_count,
+        "unhealthy_count": unhealthy_count,
+        "results": results,
+        "checked_at": timezone.now().isoformat(),
     }
 
 
@@ -135,39 +134,47 @@ def run_health_checks(
             status = deployment_service.get_status(deployment)
 
             # Check if services are running
-            live_status = status.get('live_service_status', {})
-            all_running = all(
-                svc.get('state', '').lower() in ('running', 'up')
-                for svc in live_status.values()
-            ) if live_status else False
+            live_status = status.get("live_service_status", {})
+            all_running = (
+                all(
+                    svc.get("state", "").lower() in ("running", "up")
+                    for svc in live_status.values()
+                )
+                if live_status
+                else False
+            )
 
-            results.append({
-                'deployment_id': deployment.id,
-                'project_name': deployment.project_name,
-                'target': deployment.target.name,
-                'healthy': all_running,
-                'service_status': live_status,
-                'error': status.get('live_status_error'),
-            })
+            results.append(
+                {
+                    "deployment_id": deployment.id,
+                    "project_name": deployment.project_name,
+                    "target": deployment.target.name,
+                    "healthy": all_running,
+                    "service_status": live_status,
+                    "error": status.get("live_status_error"),
+                }
+            )
 
         except Exception as e:
-            results.append({
-                'deployment_id': deployment.id,
-                'project_name': deployment.project_name,
-                'target': deployment.target.name,
-                'healthy': False,
-                'error': str(e),
-            })
+            results.append(
+                {
+                    "deployment_id": deployment.id,
+                    "project_name": deployment.project_name,
+                    "target": deployment.target.name,
+                    "healthy": False,
+                    "error": str(e),
+                }
+            )
 
-    healthy_count = sum(1 for r in results if r.get('healthy'))
+    healthy_count = sum(1 for r in results if r.get("healthy"))
 
     return {
-        'success': True,
-        'total_checked': len(results),
-        'healthy_count': healthy_count,
-        'unhealthy_count': len(results) - healthy_count,
-        'results': results,
-        'checked_at': timezone.now().isoformat(),
+        "success": True,
+        "total_checked": len(results),
+        "healthy_count": healthy_count,
+        "unhealthy_count": len(results) - healthy_count,
+        "results": results,
+        "checked_at": timezone.now().isoformat(),
     }
 
 
@@ -187,17 +194,22 @@ def monitor_stale_deployments(max_running_hours: int = 24) -> dict:
     stale_deployments = Deployment.objects.filter(
         status=Deployment.Status.RUNNING,
         started_at__lt=cutoff_time,
-    ).select_related('target')
+    ).select_related("target")
 
     stale_list = []
     for deployment in stale_deployments:
-        stale_list.append({
-            'deployment_id': deployment.id,
-            'project_name': deployment.project_name,
-            'target': deployment.target.name,
-            'started_at': deployment.started_at.isoformat(),
-            'running_hours': (timezone.now() - deployment.started_at).total_seconds() / 3600,
-        })
+        stale_list.append(
+            {
+                "deployment_id": deployment.id,
+                "project_name": deployment.project_name,
+                "target": deployment.target.name,
+                "started_at": deployment.started_at.isoformat(),
+                "running_hours": (
+                    timezone.now() - deployment.started_at
+                ).total_seconds()
+                / 3600,
+            }
+        )
 
         # Log warning
         logger.warning(
@@ -206,8 +218,8 @@ def monitor_stale_deployments(max_running_hours: int = 24) -> dict:
         )
 
     return {
-        'success': True,
-        'stale_count': len(stale_list),
-        'stale_deployments': stale_list,
-        'checked_at': timezone.now().isoformat(),
+        "success": True,
+        "stale_count": len(stale_list),
+        "stale_deployments": stale_list,
+        "checked_at": timezone.now().isoformat(),
     }

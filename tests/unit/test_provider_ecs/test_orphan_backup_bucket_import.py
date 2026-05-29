@@ -13,12 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
 from remote_compose.terraform.runner import (
-    RecordingTerraformRunner, TerraformError,
+    RecordingTerraformRunner,
+    TerraformError,
 )
 
 
@@ -40,17 +40,22 @@ def _ctx(
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2=rc_yml,
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "myapp-prod",
-            "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "myapp-prod",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             "api": ServiceSpec(name="api", cpu=256, memory=512, type="application"),
             "postgres": ServiceSpec(
-                name="postgres", cpu=256, memory=512, type="infrastructure",
+                name="postgres",
+                cpu=256,
+                memory=512,
+                type="infrastructure",
             ),
         },
         secrets=[],
@@ -147,7 +152,8 @@ class TestOrphanBackupBucketImport:
             def import_resource(self, address, resource_id):
                 self.calls.append(
                     type(self.calls[0])(args=["import", address, resource_id])
-                    if self.calls else None
+                    if self.calls
+                    else None
                 )
                 raise TerraformError(
                     cmd=["terraform", "import", address, resource_id],
@@ -178,15 +184,14 @@ class TestOrphanBackupBucketImport:
             def import_resource(self, address, resource_id):
                 self.calls.append(
                     type(self.calls[0])(args=["import", address, resource_id])
-                    if self.calls else None
+                    if self.calls
+                    else None
                 )
                 raise TerraformError(
                     cmd=["terraform", "import", address, resource_id],
                     returncode=1,
                     stdout="",
-                    stderr=(
-                        "Error: Resource already managed by Terraform"
-                    ),
+                    stderr=("Error: Resource already managed by Terraform"),
                 )
 
         runner = _FailingImportRunner(tmp_path / "terraform")

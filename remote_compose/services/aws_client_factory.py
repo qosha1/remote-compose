@@ -45,19 +45,19 @@ class AWSClientFactory(BaseService):
 
     # Supported AWS services
     SUPPORTED_SERVICES: Set[str] = {
-        'ecs',      # Elastic Container Service
-        'ecr',      # Elastic Container Registry
-        'efs',      # Elastic File System
-        'ec2',      # Elastic Compute Cloud (for VPC, subnets, security groups)
-        'iam',      # Identity and Access Management
-        'sts',      # Security Token Service
-        'logs',     # CloudWatch Logs
-        'cloudwatch',  # CloudWatch Metrics
-        's3',       # Simple Storage Service
-        'ssm',      # Systems Manager (for Parameter Store)
-        'elbv2',    # Elastic Load Balancing v2 (ALB/NLB)
-        'secretsmanager',  # Secrets Manager
-        'servicediscovery',  # Cloud Map (Service Connect)
+        "ecs",  # Elastic Container Service
+        "ecr",  # Elastic Container Registry
+        "efs",  # Elastic File System
+        "ec2",  # Elastic Compute Cloud (for VPC, subnets, security groups)
+        "iam",  # Identity and Access Management
+        "sts",  # Security Token Service
+        "logs",  # CloudWatch Logs
+        "cloudwatch",  # CloudWatch Metrics
+        "s3",  # Simple Storage Service
+        "ssm",  # Systems Manager (for Parameter Store)
+        "elbv2",  # Elastic Load Balancing v2 (ALB/NLB)
+        "secretsmanager",  # Secrets Manager
+        "servicediscovery",  # Cloud Map (Service Connect)
     }
 
     # Client cache TTL (clients are refreshed after this duration)
@@ -67,11 +67,13 @@ class AWSClientFactory(BaseService):
         self,
         credential_service: Optional[CredentialService] = None,
         default_region: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
-        self.default_region = default_region or get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        self.default_region = default_region or get_setting(
+            "AWS_DEFAULT_REGION", "us-east-1"
+        )
 
         # Thread-safe client cache
         self._client_cache: Dict[str, Dict[str, Any]] = {}
@@ -84,14 +86,14 @@ class AWSClientFactory(BaseService):
         credential: Optional[SecureCredential] = None,
     ) -> str:
         """Generate a unique cache key for client lookup."""
-        credential_id = credential.id if credential else 'default'
+        credential_id = credential.id if credential else "default"
         return f"{service}:{region}:{credential_id}"
 
     def _is_cache_valid(self, cache_entry: Dict[str, Any]) -> bool:
         """Check if a cached client is still valid."""
         if not cache_entry:
             return False
-        created_at = cache_entry.get('created_at', 0)
+        created_at = cache_entry.get("created_at", 0)
         return (time.time() - created_at) < self.CACHE_TTL_SECONDS
 
     def get_client(
@@ -133,7 +135,7 @@ class AWSClientFactory(BaseService):
                 cache_entry = self._client_cache.get(cache_key)
                 if cache_entry and self._is_cache_valid(cache_entry):
                     self.log_debug(f"Using cached {service} client for region {region}")
-                    return cache_entry['client']
+                    return cache_entry["client"]
 
         # Create new client
         client = self._create_client(service, region, credential)
@@ -141,8 +143,8 @@ class AWSClientFactory(BaseService):
         # Cache the client
         with self._cache_lock:
             self._client_cache[cache_key] = {
-                'client': client,
-                'created_at': time.time(),
+                "client": client,
+                "created_at": time.time(),
             }
 
         return client
@@ -155,15 +157,19 @@ class AWSClientFactory(BaseService):
     ):
         """Create a new boto3 client."""
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 # Use stored AWS credentials
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 self.log_debug(f"Creating {service} client with stored credentials")
                 return boto3.client(
                     service,
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
                 # Use default credential chain (env vars, IAM role, etc.)
@@ -177,8 +183,12 @@ class AWSClientFactory(BaseService):
                 "IAM role, or create an AWS credential in remote_compose."
             )
         except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-            if error_code in ('InvalidClientTokenId', 'SignatureDoesNotMatch', 'AccessDenied'):
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            if error_code in (
+                "InvalidClientTokenId",
+                "SignatureDoesNotMatch",
+                "AccessDenied",
+            ):
                 raise AWSCredentialError(f"Invalid AWS credentials: {e}")
             raise AWSError(f"Failed to create {service} client: {e}")
         except Exception as e:
@@ -202,11 +212,12 @@ class AWSClientFactory(BaseService):
                 # Selective clear
                 keys_to_remove = []
                 for key in self._client_cache.keys():
-                    parts = key.split(':')
+                    parts = key.split(":")
                     if len(parts) >= 2:
                         key_service, key_region = parts[0], parts[1]
-                        if (service is None or key_service == service) and \
-                           (region is None or key_region == region):
+                        if (service is None or key_service == service) and (
+                            region is None or key_region == region
+                        ):
                             keys_to_remove.append(key)
 
                 for key in keys_to_remove:
@@ -218,28 +229,29 @@ class AWSClientFactory(BaseService):
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get statistics about the client cache."""
         with self._cache_lock:
-            now = time.time()
             stats = {
-                'total_cached': len(self._client_cache),
-                'by_service': {},
-                'by_region': {},
-                'expired_count': 0,
+                "total_cached": len(self._client_cache),
+                "by_service": {},
+                "by_region": {},
+                "expired_count": 0,
             }
 
             for key, entry in self._client_cache.items():
-                parts = key.split(':')
+                parts = key.split(":")
                 if len(parts) >= 2:
                     service, region = parts[0], parts[1]
 
                     # Count by service
-                    stats['by_service'][service] = stats['by_service'].get(service, 0) + 1
+                    stats["by_service"][service] = (
+                        stats["by_service"].get(service, 0) + 1
+                    )
 
                     # Count by region
-                    stats['by_region'][region] = stats['by_region'].get(region, 0) + 1
+                    stats["by_region"][region] = stats["by_region"].get(region, 0) + 1
 
                     # Check if expired
                     if not self._is_cache_valid(entry):
-                        stats['expired_count'] += 1
+                        stats["expired_count"] += 1
 
             return stats
 
@@ -266,20 +278,20 @@ class AWSClientFactory(BaseService):
         region = region or self.default_region
 
         try:
-            sts = self.get_client('sts', region, credential, force_new=True)
+            sts = self.get_client("sts", region, credential, force_new=True)
             response = sts.get_caller_identity()
 
             return {
-                'account': response.get('Account'),
-                'arn': response.get('Arn'),
-                'user_id': response.get('UserId'),
-                'valid': True,
+                "account": response.get("Account"),
+                "arn": response.get("Arn"),
+                "user_id": response.get("UserId"),
+                "valid": True,
             }
 
         except AWSCredentialError:
             raise
         except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
             raise AWSCredentialError(
                 f"Credential validation failed ({error_code}): {e}"
             )

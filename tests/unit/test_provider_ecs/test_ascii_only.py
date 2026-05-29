@@ -19,18 +19,29 @@ def _rich_ctx(tmp_path: Path) -> DeployContext:
         project="ascii-check",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-east-1", "cluster": "c", "vpc_cidr": "10.0.0.0/16",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-east-1",
+                "cluster": "c",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512, type="proxy",
-                               public=True, port=80),
-            "db":  ServiceSpec(name="db", cpu=512, memory=1024, type="infrastructure",
-                               volumes=[{"name": "data", "mount": "/data"}]),
-            "worker": ServiceSpec(name="worker", cpu=1024, memory=2048,
-                                  type="worker", launch_type="EC2"),
+            "web": ServiceSpec(
+                name="web", cpu=256, memory=512, type="proxy", public=True, port=80
+            ),
+            "db": ServiceSpec(
+                name="db",
+                cpu=512,
+                memory=1024,
+                type="infrastructure",
+                volumes=[{"name": "data", "mount": "/data"}],
+            ),
+            "worker": ServiceSpec(
+                name="worker", cpu=1024, memory=2048, type="worker", launch_type="EC2"
+            ),
         },
         secrets=[],
     )

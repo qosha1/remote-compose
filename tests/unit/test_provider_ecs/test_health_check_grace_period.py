@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.ecs import ECSProvider
@@ -52,6 +51,7 @@ def _grace_for(hcl: str, service_name: str) -> str | None:
     """Extract health_check_grace_period_seconds from the named service's
     aws_ecs_service block. Returns None when not set."""
     import re
+
     pattern = re.compile(
         rf'resource "aws_ecs_service" "{service_name}" \{{(.*?)^}}',
         re.DOTALL | re.MULTILINE,
@@ -60,7 +60,7 @@ def _grace_for(hcl: str, service_name: str) -> str | None:
     if not m:
         return None
     block = m.group(1)
-    g = re.search(r'health_check_grace_period_seconds\s*=\s*(\d+)', block)
+    g = re.search(r"health_check_grace_period_seconds\s*=\s*(\d+)", block)
     return g.group(1) if g else None
 
 
@@ -68,8 +68,12 @@ class TestPublicServiceGetsGracePeriod:
     def test_public_with_health_check_path_gets_default_60s(self, tmp_path):
         services = {
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512,
-                public=True, port=8080, health_check_path="/health",
+                name="web",
+                cpu=256,
+                memory=512,
+                public=True,
+                port=8080,
+                health_check_path="/health",
             ),
         }
         hcl = _services_tf(tmp_path, services)
@@ -81,8 +85,11 @@ class TestPublicServiceGetsGracePeriod:
         # is needed regardless of whether health_check_path is set.
         services = {
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512,
-                public=True, port=8080,
+                name="web",
+                cpu=256,
+                memory=512,
+                public=True,
+                port=8080,
             ),
         }
         hcl = _services_tf(tmp_path, services)
@@ -96,7 +103,10 @@ class TestNonPublicServiceNoGracePeriod:
         # template must NOT emit the line for non-public services.
         services = {
             "worker": ServiceSpec(
-                name="worker", cpu=256, memory=512, type="worker",
+                name="worker",
+                cpu=256,
+                memory=512,
+                type="worker",
                 public=False,
             ),
         }
@@ -111,8 +121,12 @@ class TestAutoOnDeployBumpsToSlowBootDefault:
         # cover the hook duration.
         services = {
             "django": ServiceSpec(
-                name="django", cpu=512, memory=1024,
-                public=True, port=8000, health_check_path="/health/",
+                name="django",
+                cpu=512,
+                memory=1024,
+                public=True,
+                port=8000,
+                health_check_path="/health/",
                 lifecycle={
                     "migrate": {
                         "command": ["python", "manage.py", "migrate"],
@@ -130,8 +144,12 @@ class TestAutoOnDeployBumpsToSlowBootDefault:
         # rollout, so the default 60s grace applies.
         services = {
             "django": ServiceSpec(
-                name="django", cpu=512, memory=1024,
-                public=True, port=8000, health_check_path="/health/",
+                name="django",
+                cpu=512,
+                memory=1024,
+                public=True,
+                port=8000,
+                health_check_path="/health/",
                 lifecycle={
                     "createsuperuser": {
                         "command": ["python", "manage.py", "createsuperuser"],
@@ -148,8 +166,12 @@ class TestExplicitOverride:
     def test_explicit_value_wins_over_default(self, tmp_path):
         services = {
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512,
-                public=True, port=8080, health_check_path="/health",
+                name="web",
+                cpu=256,
+                memory=512,
+                public=True,
+                port=8080,
+                health_check_path="/health",
                 health_check_grace_period=300,
             ),
         }
@@ -162,8 +184,12 @@ class TestExplicitOverride:
         # intent is durable in state.
         services = {
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512,
-                public=True, port=8080, health_check_path="/health",
+                name="web",
+                cpu=256,
+                memory=512,
+                public=True,
+                port=8080,
+                health_check_path="/health",
                 health_check_grace_period=0,
             ),
         }
@@ -174,8 +200,12 @@ class TestExplicitOverride:
         # Even with auto_on_deploy lifecycle, an explicit value wins.
         services = {
             "django": ServiceSpec(
-                name="django", cpu=512, memory=1024,
-                public=True, port=8000, health_check_path="/health/",
+                name="django",
+                cpu=512,
+                memory=1024,
+                public=True,
+                port=8000,
+                health_check_path="/health/",
                 health_check_grace_period=600,
                 lifecycle={
                     "migrate": {

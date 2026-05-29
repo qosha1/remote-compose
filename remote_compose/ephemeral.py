@@ -27,7 +27,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # Duration parsing
 # ---------------------------------------------------------------------------
@@ -113,10 +112,10 @@ def from_iso_utc(value: str) -> datetime:
 class EphemeralRecord:
     project: str
     region: str
-    expires_at: str           # ISO 8601 UTC, "...Z"
-    rc_yml_path: str          # absolute path to rc.yml that produced this
-    terraform_dir: str        # absolute path to the emitted terraform module
-    created_at: str           # ISO 8601 UTC, "...Z" — first-seen timestamp
+    expires_at: str  # ISO 8601 UTC, "...Z"
+    rc_yml_path: str  # absolute path to rc.yml that produced this
+    terraform_dir: str  # absolute path to the emitted terraform module
+    created_at: str  # ISO 8601 UTC, "...Z" — first-seen timestamp
     aws_profile: Optional[str] = None
     extra: dict = field(default_factory=dict)
 
@@ -205,14 +204,13 @@ def register_stack(
     return new_record
 
 
-def remove_stack(
-    *, project: str, region: str, path: Optional[Path] = None
-) -> bool:
+def remove_stack(*, project: str, region: str, path: Optional[Path] = None) -> bool:
     """Remove a single stack from the registry. Returns True if removed."""
     p = Path(path) if path else DEFAULT_REGISTRY_PATH
     raw = _load_raw(p)
     out = [
-        e for e in raw
+        e
+        for e in raw
         if not (e.get("project") == project and e.get("region") == region)
     ]
     if len(out) == len(raw):

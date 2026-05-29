@@ -68,7 +68,9 @@ class SecretsService(BaseService):
         Raises:
             SecretProvisioningError: If creation or update fails.
         """
-        sm = self.aws_factory.get_client('secretsmanager', region=region, credential=credential)
+        sm = self.aws_factory.get_client(
+            "secretsmanager", region=region, credential=credential
+        )
         secret_name = f"{cluster.name}/{name}"
 
         last_exists_error: Optional[ClientError] = None
@@ -76,7 +78,7 @@ class SecretsService(BaseService):
             # Try to update existing secret.
             try:
                 response = sm.describe_secret(SecretId=secret_name)
-                secret_arn = response['ARN']
+                secret_arn = response["ARN"]
                 sm.put_secret_value(
                     SecretId=secret_name,
                     SecretString=value,
@@ -86,14 +88,14 @@ class SecretsService(BaseService):
                     cluster=cluster,
                     env_var_name=name,
                     defaults={
-                        'secret_arn': secret_arn,
-                        'secret_name': secret_name,
+                        "secret_arn": secret_arn,
+                        "secret_name": secret_name,
                     },
                 )
                 return secret_arn
             except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', '')
-                if error_code != 'ResourceNotFoundException':
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code != "ResourceNotFoundException":
                     raise SecretProvisioningError(
                         f"Failed to describe secret {secret_name}: {e}",
                         secret_name=secret_name,
@@ -105,30 +107,30 @@ class SecretsService(BaseService):
                     Name=secret_name,
                     SecretString=value,
                     Tags=[
-                        {'Key': 'remote-compose:cluster', 'Value': cluster.name},
-                        {'Key': 'remote-compose:managed', 'Value': 'true'},
-                        {'Key': 'remote-compose:env-var', 'Value': name},
+                        {"Key": "remote-compose:cluster", "Value": cluster.name},
+                        {"Key": "remote-compose:managed", "Value": "true"},
+                        {"Key": "remote-compose:env-var", "Value": name},
                     ],
                 )
-                secret_arn = response['ARN']
+                secret_arn = response["ARN"]
                 self.log_info(f"Created secret: {secret_name}")
                 SecretConfig.objects.update_or_create(
                     cluster=cluster,
                     env_var_name=name,
                     defaults={
-                        'secret_arn': secret_arn,
-                        'secret_name': secret_name,
+                        "secret_arn": secret_arn,
+                        "secret_name": secret_name,
                     },
                 )
                 self.notify_observers(
-                    'secret_created',
+                    "secret_created",
                     cluster_name=cluster.name,
                     secret_name=secret_name,
                 )
                 return secret_arn
             except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', '')
-                if error_code != 'ResourceExistsException':
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code != "ResourceExistsException":
                     raise SecretProvisioningError(
                         f"Failed to create secret {secret_name}: {e}",
                         secret_name=secret_name,
@@ -189,7 +191,7 @@ class SecretsService(BaseService):
             try:
                 config = SecretConfig.objects.get(cluster=cluster, env_var_name=name)
                 config.source_file = env_file_path
-                config.save(update_fields=['source_file'])
+                config.save(update_fields=["source_file"])
             except SecretConfig.DoesNotExist:
                 pass
 
@@ -199,7 +201,7 @@ class SecretsService(BaseService):
         )
 
         self.notify_observers(
-            'env_file_pushed',
+            "env_file_pushed",
             cluster_name=cluster.name,
             env_file_path=env_file_path,
             secret_count=len(secret_arns),
@@ -222,7 +224,7 @@ class SecretsService(BaseService):
             use in ECS container definition ``secrets`` field.
         """
         return [
-            {'name': name, 'valueFrom': arn}
+            {"name": name, "valueFrom": arn}
             for name, arn in sorted(secrets_arns.items())
         ]
 
@@ -243,36 +245,39 @@ class SecretsService(BaseService):
         Returns:
             List of dicts with secret metadata.
         """
-        sm = self.aws_factory.get_client('secretsmanager', region=region, credential=credential)
+        sm = self.aws_factory.get_client(
+            "secretsmanager", region=region, credential=credential
+        )
 
         try:
             secrets = []
-            paginator = sm.get_paginator('list_secrets')
+            paginator = sm.get_paginator("list_secrets")
 
             for page in paginator.paginate(
                 Filters=[
                     {
-                        'Key': 'tag-key',
-                        'Values': ['remote-compose:cluster'],
+                        "Key": "tag-key",
+                        "Values": ["remote-compose:cluster"],
                     },
                     {
-                        'Key': 'tag-value',
-                        'Values': [cluster.name],
+                        "Key": "tag-value",
+                        "Values": [cluster.name],
                     },
                 ],
             ):
-                for secret in page.get('SecretList', []):
-                    secrets.append({
-                        'arn': secret.get('ARN'),
-                        'name': secret.get('Name'),
-                        'description': secret.get('Description', ''),
-                        'created_date': str(secret.get('CreatedDate', '')),
-                        'last_changed_date': str(secret.get('LastChangedDate', '')),
-                        'tags': {
-                            t['Key']: t['Value']
-                            for t in secret.get('Tags', [])
-                        },
-                    })
+                for secret in page.get("SecretList", []):
+                    secrets.append(
+                        {
+                            "arn": secret.get("ARN"),
+                            "name": secret.get("Name"),
+                            "description": secret.get("Description", ""),
+                            "created_date": str(secret.get("CreatedDate", "")),
+                            "last_changed_date": str(secret.get("LastChangedDate", "")),
+                            "tags": {
+                                t["Key"]: t["Value"] for t in secret.get("Tags", [])
+                            },
+                        }
+                    )
 
             return secrets
 
@@ -309,27 +314,31 @@ class SecretsService(BaseService):
         env_vars: Dict[str, str] = {}
 
         try:
-            with open(path, 'r') as f:
+            with open(path, "r") as f:
                 for line_num, line in enumerate(f, start=1):
                     line = line.strip()
 
                     # Skip empty lines and comments
-                    if not line or line.startswith('#'):
+                    if not line or line.startswith("#"):
                         continue
 
                     # Split on first '='
-                    if '=' not in line:
+                    if "=" not in line:
                         self.log_warning(
                             f"Skipping invalid line {line_num} in {path}: no '=' found"
                         )
                         continue
 
-                    key, value = line.split('=', 1)
+                    key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
 
                     # Strip surrounding quotes
-                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in ('"', "'")
+                    ):
                         value = value[1:-1]
 
                     if key:

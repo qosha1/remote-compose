@@ -20,6 +20,7 @@ class ImagePushError(RuntimeError):
 @dataclass
 class _AuthSession:
     """Transient record of a registry login, returned by the authenticator."""
+
     registry: str
 
 
@@ -50,8 +51,7 @@ class ImagePusher:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise ImagePushError(
-                    f"docker push failed for {tag!r}: "
-                    f"{result.stderr.strip()[:500]}"
+                    f"docker push failed for {tag!r}: " f"{result.stderr.strip()[:500]}"
                 )
             pushed.append(tag)
         return pushed

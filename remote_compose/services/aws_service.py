@@ -24,14 +24,14 @@ class AWSService(BaseService):
         self,
         credential_service: Optional[CredentialService] = None,
         target_service: Optional[TargetService] = None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
         self.target_service = target_service or TargetService(
             credential_service=self.credential_service
         )
-        self.default_region = get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        self.default_region = get_setting("AWS_DEFAULT_REGION", "us-east-1")
 
     def _get_ec2_client(
         self,
@@ -51,17 +51,21 @@ class AWSService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'ec2',
+                    "ec2",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
                 # Use default credential chain
-                return boto3.client('ec2', region_name=region)
+                return boto3.client("ec2", region_name=region)
 
         except NoCredentialsError:
             raise AWSCredentialError(
@@ -97,35 +101,41 @@ class AWSService(BaseService):
             ec2_filters = []
             if filters:
                 for key, value in filters.items():
-                    if key.startswith('tag:'):
-                        ec2_filters.append({
-                            'Name': key,
-                            'Values': [value] if isinstance(value, str) else value,
-                        })
-                    elif key == 'state':
-                        ec2_filters.append({
-                            'Name': 'instance-state-name',
-                            'Values': [value] if isinstance(value, str) else value,
-                        })
+                    if key.startswith("tag:"):
+                        ec2_filters.append(
+                            {
+                                "Name": key,
+                                "Values": [value] if isinstance(value, str) else value,
+                            }
+                        )
+                    elif key == "state":
+                        ec2_filters.append(
+                            {
+                                "Name": "instance-state-name",
+                                "Values": [value] if isinstance(value, str) else value,
+                            }
+                        )
                     else:
-                        ec2_filters.append({
-                            'Name': key,
-                            'Values': [value] if isinstance(value, str) else value,
-                        })
+                        ec2_filters.append(
+                            {
+                                "Name": key,
+                                "Values": [value] if isinstance(value, str) else value,
+                            }
+                        )
 
             # Make API call
             kwargs = {}
             if ec2_filters:
-                kwargs['Filters'] = ec2_filters
+                kwargs["Filters"] = ec2_filters
             if instance_ids:
-                kwargs['InstanceIds'] = instance_ids
+                kwargs["InstanceIds"] = instance_ids
 
             response = client.describe_instances(**kwargs)
 
             # Parse response
             instances = []
-            for reservation in response.get('Reservations', []):
-                for instance in reservation.get('Instances', []):
+            for reservation in response.get("Reservations", []):
+                for instance in reservation.get("Instances", []):
                     instances.append(self._parse_instance(instance, region))
 
             self.log_debug(f"Found {len(instances)} instances in {region}")
@@ -184,7 +194,7 @@ class AWSService(BaseService):
         filters = tag_filters or {}
 
         if running_only:
-            filters['state'] = 'running'
+            filters["state"] = "running"
 
         return self.list_instances(
             region=region,
@@ -198,10 +208,10 @@ class AWSService(BaseService):
         target_name: str,
         ssh_key: Optional[SecureCredential] = None,
         ssh_key_path: Optional[str] = None,
-        ssh_username: str = 'ubuntu',
+        ssh_username: str = "ubuntu",
         region: Optional[str] = None,
         credential: Optional[SecureCredential] = None,
-        environment: str = 'development',
+        environment: str = "development",
         validate_connection: bool = True,
     ) -> DeploymentTarget:
         """
@@ -227,23 +237,23 @@ class AWSService(BaseService):
             credential=credential,
         )
 
-        if instance['state'] != 'running':
+        if instance["state"] != "running":
             raise EC2Error(
                 f"Instance {instance_id} is not running (state: {instance['state']})"
             )
 
         # Determine host address
-        host = instance.get('public_ip') or instance.get('public_dns')
+        host = instance.get("public_ip") or instance.get("public_dns")
         if not host:
-            host = instance.get('private_ip')
+            host = instance.get("private_ip")
             if not host:
                 raise EC2Error(f"Instance {instance_id} has no accessible IP address")
 
         # Map environment string
         env_map = {
-            'development': DeploymentTarget.Environment.DEVELOPMENT,
-            'staging': DeploymentTarget.Environment.STAGING,
-            'production': DeploymentTarget.Environment.PRODUCTION,
+            "development": DeploymentTarget.Environment.DEVELOPMENT,
+            "staging": DeploymentTarget.Environment.STAGING,
+            "production": DeploymentTarget.Environment.PRODUCTION,
         }
 
         target = self.target_service.create_target(
@@ -253,19 +263,23 @@ class AWSService(BaseService):
             port=22,
             ssh_key=ssh_key,
             ssh_key_path=ssh_key_path,
-            environment=env_map.get(environment, DeploymentTarget.Environment.DEVELOPMENT),
+            environment=env_map.get(
+                environment, DeploymentTarget.Environment.DEVELOPMENT
+            ),
             aws_instance_id=instance_id,
             aws_region=region or self.default_region,
             validate_connection=validate_connection,
             metadata={
-                'aws_instance_type': instance.get('instance_type'),
-                'aws_key_name': instance.get('key_name'),
-                'aws_tags': instance.get('tags', {}),
+                "aws_instance_type": instance.get("instance_type"),
+                "aws_key_name": instance.get("key_name"),
+                "aws_tags": instance.get("tags", {}),
             },
         )
 
         self.log_info(f"Created target from EC2 instance: {target.name}")
-        self.notify_observers('target_created_from_ec2', target=target, instance=instance)
+        self.notify_observers(
+            "target_created_from_ec2", target=target, instance=instance
+        )
 
         return target
 
@@ -295,15 +309,19 @@ class AWSService(BaseService):
             credential=credential,
         )
 
-        new_host = instance.get('public_ip') or instance.get('public_dns') or instance.get('private_ip')
+        new_host = (
+            instance.get("public_ip")
+            or instance.get("public_dns")
+            or instance.get("private_ip")
+        )
 
         if new_host and new_host != target.host:
             old_host = target.host
             target.host = new_host
-            target.save(update_fields=['host', 'updated_at'])
+            target.save(update_fields=["host", "updated_at"])
 
             self.log_info(f"Updated target {target.name} IP: {old_host} -> {new_host}")
-            self.notify_observers('target_ip_updated', target=target, old_host=old_host)
+            self.notify_observers("target_ip_updated", target=target, old_host=old_host)
 
         return target
 
@@ -334,7 +352,7 @@ class AWSService(BaseService):
             self.log_info(f"Starting instance: {instance_id}")
 
             if wait:
-                waiter = client.get_waiter('instance_running')
+                waiter = client.get_waiter("instance_running")
                 waiter.wait(InstanceIds=[instance_id])
                 self.log_info(f"Instance {instance_id} is now running")
 
@@ -370,7 +388,7 @@ class AWSService(BaseService):
             self.log_info(f"Stopping instance: {instance_id}")
 
             if wait:
-                waiter = client.get_waiter('instance_stopped')
+                waiter = client.get_waiter("instance_stopped")
                 waiter.wait(InstanceIds=[instance_id])
                 self.log_info(f"Instance {instance_id} is now stopped")
 
@@ -382,23 +400,23 @@ class AWSService(BaseService):
     def _parse_instance(self, instance: dict, region: str) -> dict:
         """Parse EC2 instance response into a simpler dictionary."""
         tags = {}
-        for tag in instance.get('Tags', []):
-            tags[tag['Key']] = tag['Value']
+        for tag in instance.get("Tags", []):
+            tags[tag["Key"]] = tag["Value"]
 
         return {
-            'instance_id': instance['InstanceId'],
-            'instance_type': instance.get('InstanceType'),
-            'state': instance.get('State', {}).get('Name'),
-            'public_ip': instance.get('PublicIpAddress'),
-            'private_ip': instance.get('PrivateIpAddress'),
-            'public_dns': instance.get('PublicDnsName'),
-            'private_dns': instance.get('PrivateDnsName'),
-            'key_name': instance.get('KeyName'),
-            'launch_time': instance.get('LaunchTime'),
-            'region': region,
-            'tags': tags,
-            'name': tags.get('Name', ''),
-            'security_groups': [
-                sg['GroupId'] for sg in instance.get('SecurityGroups', [])
+            "instance_id": instance["InstanceId"],
+            "instance_type": instance.get("InstanceType"),
+            "state": instance.get("State", {}).get("Name"),
+            "public_ip": instance.get("PublicIpAddress"),
+            "private_ip": instance.get("PrivateIpAddress"),
+            "public_dns": instance.get("PublicDnsName"),
+            "private_dns": instance.get("PrivateDnsName"),
+            "key_name": instance.get("KeyName"),
+            "launch_time": instance.get("LaunchTime"),
+            "region": region,
+            "tags": tags,
+            "name": tags.get("Name", ""),
+            "security_groups": [
+                sg["GroupId"] for sg in instance.get("SecurityGroups", [])
             ],
         }

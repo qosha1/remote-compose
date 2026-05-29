@@ -12,7 +12,6 @@ from typing import Literal
 
 from ..exceptions import ValidationError
 
-
 Arch = Literal["arm64", "x86_64"]
 
 

@@ -46,7 +46,7 @@ class EFSService(BaseService):
     # ``EFSService.PERMISSIVE_*`` constants below.
     DEFAULT_UID = 1000
     DEFAULT_GID = 1000
-    DEFAULT_PERMISSIONS = '0755'
+    DEFAULT_PERMISSIONS = "0755"
 
     # Opt-in permissive defaults for the unusual case where the
     # application performs its own chown/chmod on startup and needs
@@ -54,16 +54,14 @@ class EFSService(BaseService):
     # used these for every volume; new code must opt in explicitly.
     PERMISSIVE_UID = 0
     PERMISSIVE_GID = 0
-    PERMISSIVE_PERMISSIONS = '0777'
+    PERMISSIVE_PERMISSIONS = "0777"
 
     def __init__(
-        self,
-        credential_service: Optional[CredentialService] = None,
-        **kwargs
+        self, credential_service: Optional[CredentialService] = None, **kwargs
     ):
         super().__init__(**kwargs)
         self.credential_service = credential_service or CredentialService()
-        self.default_region = get_setting('AWS_DEFAULT_REGION', 'us-east-1')
+        self.default_region = get_setting("AWS_DEFAULT_REGION", "us-east-1")
 
     # -------------------------------------------------------------------------
     # Client Factory Methods
@@ -78,16 +76,20 @@ class EFSService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'efs',
+                    "efs",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('efs', region_name=region)
+                return boto3.client("efs", region_name=region)
 
         except NoCredentialsError:
             raise AWSCredentialError(
@@ -106,16 +108,20 @@ class EFSService(BaseService):
         region = region or self.default_region
 
         try:
-            if credential and credential.credential_type == SecureCredential.CredentialType.AWS_ACCESS_KEY:
+            if (
+                credential
+                and credential.credential_type
+                == SecureCredential.CredentialType.AWS_ACCESS_KEY
+            ):
                 aws_creds = self.credential_service.get_aws_credentials(credential)
                 return boto3.client(
-                    'ec2',
+                    "ec2",
                     region_name=region,
-                    aws_access_key_id=aws_creds['access_key_id'],
-                    aws_secret_access_key=aws_creds['secret_access_key'],
+                    aws_access_key_id=aws_creds["access_key_id"],
+                    aws_secret_access_key=aws_creds["secret_access_key"],
                 )
             else:
-                return boto3.client('ec2', region_name=region)
+                return boto3.client("ec2", region_name=region)
         except Exception as e:
             raise AWSError(f"Failed to create EC2 client: {e}")
 
@@ -131,8 +137,8 @@ class EFSService(BaseService):
         subnet_ids: Optional[List[str]] = None,
         security_group_ids: Optional[List[str]] = None,
         credential: Optional[SecureCredential] = None,
-        performance_mode: str = 'generalPurpose',
-        throughput_mode: str = 'bursting',
+        performance_mode: str = "generalPurpose",
+        throughput_mode: str = "bursting",
         encrypted: bool = True,
         tags: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
@@ -173,13 +179,13 @@ class EFSService(BaseService):
         if not subnet_ids:
             raise EFSFileSystemError(
                 "subnet_ids are required when creating a new file system",
-                file_system_name=name
+                file_system_name=name,
             )
 
         # Prepare tags
         all_tags = {
-            'Name': name,
-            'CreatedBy': 'remote-compose',
+            "Name": name,
+            "CreatedBy": "remote-compose",
         }
         if tags:
             all_tags.update(tags)
@@ -187,18 +193,20 @@ class EFSService(BaseService):
         try:
             # Create the file system
             create_params = {
-                'CreationToken': f"remote-compose-{name}",
-                'PerformanceMode': performance_mode,
-                'ThroughputMode': throughput_mode,
-                'Encrypted': encrypted,
-                'Tags': [{'Key': k, 'Value': v} for k, v in all_tags.items()],
+                "CreationToken": f"remote-compose-{name}",
+                "PerformanceMode": performance_mode,
+                "ThroughputMode": throughput_mode,
+                "Encrypted": encrypted,
+                "Tags": [{"Key": k, "Value": v} for k, v in all_tags.items()],
             }
 
             response = client.create_file_system(**create_params)
-            file_system_id = response['FileSystemId']
+            file_system_id = response["FileSystemId"]
 
             self.log_info(f"Created EFS file system: {file_system_id} ({name})")
-            self.notify_observers('efs_file_system_created', file_system_id=file_system_id, name=name)
+            self.notify_observers(
+                "efs_file_system_created", file_system_id=file_system_id, name=name
+            )
 
             # Wait for file system to be available before creating mount targets
             self._wait_for_file_system_available(file_system_id, region, credential)
@@ -211,7 +219,7 @@ class EFSService(BaseService):
                     region=region,
                     credential=credential,
                 )
-                security_group_ids = [sg['security_group_id']]
+                security_group_ids = [sg["security_group_id"]]
 
             # Create mount targets
             mount_target_ids = []
@@ -226,20 +234,21 @@ class EFSService(BaseService):
 
             # Wait for mount targets to be available
             if mount_target_ids:
-                self.wait_for_mount_targets_available(file_system_id, region, credential)
+                self.wait_for_mount_targets_available(
+                    file_system_id, region, credential
+                )
 
             return self._format_file_system(response, mount_target_ids, region)
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'FileSystemAlreadyExists':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "FileSystemAlreadyExists":
                 # Race condition: another process created it
                 existing = self._find_file_system_by_name(name, region, credential)
                 if existing:
                     return existing
             raise EFSFileSystemError(
-                f"Failed to create file system: {e}",
-                file_system_name=name
+                f"Failed to create file system: {e}", file_system_name=name
             )
 
     def _find_file_system_by_name(
@@ -261,19 +270,19 @@ class EFSService(BaseService):
         client = self._get_efs_client(region, credential)
 
         try:
-            paginator = client.get_paginator('describe_file_systems')
+            paginator = client.get_paginator("describe_file_systems")
             for page in paginator.paginate():
-                for fs in page.get('FileSystems', []):
+                for fs in page.get("FileSystems", []):
                     # Tags are already in the describe_file_systems
                     # response — no extra round-trip needed.
                     tags = {
-                        t['Key']: t['Value']
-                        for t in (fs.get('Tags') or [])
-                        if isinstance(t, dict) and 'Key' in t and 'Value' in t
+                        t["Key"]: t["Value"]
+                        for t in (fs.get("Tags") or [])
+                        if isinstance(t, dict) and "Key" in t and "Value" in t
                     }
-                    if tags.get('Name') == name:
+                    if tags.get("Name") == name:
                         mount_targets = self._get_mount_target_ids(
-                            fs['FileSystemId'], region, credential
+                            fs["FileSystemId"], region, credential
                         )
                         return self._format_file_system(fs, mount_targets, region)
             return None
@@ -302,28 +311,29 @@ class EFSService(BaseService):
 
         try:
             response = client.describe_file_systems(FileSystemId=file_system_id)
-            file_systems = response.get('FileSystems', [])
+            file_systems = response.get("FileSystems", [])
 
             if not file_systems:
                 raise EFSFileSystemError(
                     f"File system not found: {file_system_id}",
-                    file_system_id=file_system_id
+                    file_system_id=file_system_id,
                 )
 
             fs = file_systems[0]
-            mount_targets = self._get_mount_target_ids(file_system_id, region, credential)
+            mount_targets = self._get_mount_target_ids(
+                file_system_id, region, credential
+            )
             return self._format_file_system(fs, mount_targets, region)
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'FileSystemNotFound':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "FileSystemNotFound":
                 raise EFSFileSystemError(
                     f"File system not found: {file_system_id}",
-                    file_system_id=file_system_id
+                    file_system_id=file_system_id,
                 )
             raise EFSFileSystemError(
-                f"Failed to describe file system: {e}",
-                file_system_id=file_system_id
+                f"Failed to describe file system: {e}", file_system_id=file_system_id
             )
 
     def list_file_systems(
@@ -347,18 +357,20 @@ class EFSService(BaseService):
 
         try:
             file_systems = []
-            paginator = client.get_paginator('describe_file_systems')
+            paginator = client.get_paginator("describe_file_systems")
 
             paginate_params = {}
             if max_results:
-                paginate_params['PaginationConfig'] = {'MaxItems': max_results}
+                paginate_params["PaginationConfig"] = {"MaxItems": max_results}
 
             for page in paginator.paginate(**paginate_params):
-                for fs in page.get('FileSystems', []):
+                for fs in page.get("FileSystems", []):
                     mount_targets = self._get_mount_target_ids(
-                        fs['FileSystemId'], region, credential
+                        fs["FileSystemId"], region, credential
                     )
-                    file_systems.append(self._format_file_system(fs, mount_targets, region))
+                    file_systems.append(
+                        self._format_file_system(fs, mount_targets, region)
+                    )
 
             return file_systems
 
@@ -394,9 +406,11 @@ class EFSService(BaseService):
         try:
             # Delete access points first
             if delete_access_points:
-                access_points = self.list_access_points(file_system_id, region, credential)
+                access_points = self.list_access_points(
+                    file_system_id, region, credential
+                )
                 for ap in access_points:
-                    self.delete_access_point(ap['access_point_id'], region, credential)
+                    self.delete_access_point(ap["access_point_id"], region, credential)
 
             # Delete mount targets
             if delete_mount_targets:
@@ -409,24 +423,27 @@ class EFSService(BaseService):
             client.delete_file_system(FileSystemId=file_system_id)
 
             self.log_info(f"Deleted EFS file system: {file_system_id}")
-            self.notify_observers('efs_file_system_deleted', file_system_id=file_system_id)
+            self.notify_observers(
+                "efs_file_system_deleted", file_system_id=file_system_id
+            )
 
             return True
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'FileSystemNotFound':
-                self.log_warning(f"File system not found for deletion: {file_system_id}")
+            error_code = e.response["Error"]["Code"]
+            if error_code == "FileSystemNotFound":
+                self.log_warning(
+                    f"File system not found for deletion: {file_system_id}"
+                )
                 return False
-            elif error_code == 'FileSystemInUse':
+            elif error_code == "FileSystemInUse":
                 raise EFSFileSystemError(
                     f"File system {file_system_id} is still in use. "
                     "Delete mount targets and access points first.",
-                    file_system_id=file_system_id
+                    file_system_id=file_system_id,
                 )
             raise EFSFileSystemError(
-                f"Failed to delete file system: {e}",
-                file_system_id=file_system_id
+                f"Failed to delete file system: {e}", file_system_id=file_system_id
             )
 
     def _wait_for_file_system_available(
@@ -444,16 +461,16 @@ class EFSService(BaseService):
         while time.time() - start_time < timeout:
             try:
                 response = client.describe_file_systems(FileSystemId=file_system_id)
-                file_systems = response.get('FileSystems', [])
+                file_systems = response.get("FileSystems", [])
 
                 if file_systems:
-                    status = file_systems[0].get('LifeCycleState')
-                    if status == 'available':
+                    status = file_systems[0].get("LifeCycleState")
+                    if status == "available":
                         return
-                    elif status == 'error':
+                    elif status == "error":
                         raise EFSFileSystemError(
                             f"File system entered error state: {file_system_id}",
-                            file_system_id=file_system_id
+                            file_system_id=file_system_id,
                         )
 
                 time.sleep(poll_interval)
@@ -464,7 +481,7 @@ class EFSService(BaseService):
 
         raise EFSFileSystemError(
             f"Timeout waiting for file system {file_system_id} to become available",
-            file_system_id=file_system_id
+            file_system_id=file_system_id,
         )
 
     def _format_file_system(
@@ -474,22 +491,22 @@ class EFSService(BaseService):
         region: str,
     ) -> Dict[str, Any]:
         """Format file system response to consistent structure."""
-        file_system_id = fs.get('FileSystemId', '')
+        file_system_id = fs.get("FileSystemId", "")
         return {
-            'file_system_id': file_system_id,
-            'file_system_arn': fs.get('FileSystemArn'),
-            'creation_token': fs.get('CreationToken'),
-            'life_cycle_state': fs.get('LifeCycleState'),
-            'name': fs.get('Name'),
-            'number_of_mount_targets': fs.get('NumberOfMountTargets', 0),
-            'size_in_bytes': fs.get('SizeInBytes', {}).get('Value', 0),
-            'performance_mode': fs.get('PerformanceMode'),
-            'throughput_mode': fs.get('ThroughputMode'),
-            'encrypted': fs.get('Encrypted', False),
-            'kms_key_id': fs.get('KmsKeyId'),
-            'dns_name': f"{file_system_id}.efs.{region}.amazonaws.com",
-            'mount_target_ids': mount_target_ids,
-            'tags': {t['Key']: t['Value'] for t in fs.get('Tags', [])},
+            "file_system_id": file_system_id,
+            "file_system_arn": fs.get("FileSystemArn"),
+            "creation_token": fs.get("CreationToken"),
+            "life_cycle_state": fs.get("LifeCycleState"),
+            "name": fs.get("Name"),
+            "number_of_mount_targets": fs.get("NumberOfMountTargets", 0),
+            "size_in_bytes": fs.get("SizeInBytes", {}).get("Value", 0),
+            "performance_mode": fs.get("PerformanceMode"),
+            "throughput_mode": fs.get("ThroughputMode"),
+            "encrypted": fs.get("Encrypted", False),
+            "kms_key_id": fs.get("KmsKeyId"),
+            "dns_name": f"{file_system_id}.efs.{region}.amazonaws.com",
+            "mount_target_ids": mount_target_ids,
+            "tags": {t["Key"]: t["Value"] for t in fs.get("Tags", [])},
         }
 
     # -------------------------------------------------------------------------
@@ -532,13 +549,13 @@ class EFSService(BaseService):
         client = self._get_efs_client(region, credential)
 
         # Ensure path starts with /
-        if not path.startswith('/'):
-            path = f'/{path}'
+        if not path.startswith("/"):
+            path = f"/{path}"
 
         # Prepare tags
         all_tags = {
-            'Name': name,
-            'CreatedBy': 'remote-compose',
+            "Name": name,
+            "CreatedBy": "remote-compose",
         }
         if tags:
             all_tags.update(tags)
@@ -546,40 +563,44 @@ class EFSService(BaseService):
         try:
             # ClientToken must be <= 64 characters
             # Use a hash of name + file_system_id for uniqueness
-            token_hash = hashlib.sha256(f"{name}-{file_system_id}".encode()).hexdigest()[:16]
+            token_hash = hashlib.sha256(
+                f"{name}-{file_system_id}".encode()
+            ).hexdigest()[:16]
             client_token = f"rc-{token_hash}"  # 3 + 16 = 19 chars, safely under 64
 
             response = client.create_access_point(
                 ClientToken=client_token,
                 FileSystemId=file_system_id,
                 PosixUser={
-                    'Uid': uid,
-                    'Gid': gid,
+                    "Uid": uid,
+                    "Gid": gid,
                 },
                 RootDirectory={
-                    'Path': path,
-                    'CreationInfo': {
-                        'OwnerUid': uid,
-                        'OwnerGid': gid,
-                        'Permissions': permissions,
+                    "Path": path,
+                    "CreationInfo": {
+                        "OwnerUid": uid,
+                        "OwnerGid": gid,
+                        "Permissions": permissions,
                     },
                 },
-                Tags=[{'Key': k, 'Value': v} for k, v in all_tags.items()],
+                Tags=[{"Key": k, "Value": v} for k, v in all_tags.items()],
             )
 
-            self.log_info(f"Created EFS access point: {response['AccessPointId']} for path {path}")
+            self.log_info(
+                f"Created EFS access point: {response['AccessPointId']} for path {path}"
+            )
             self.notify_observers(
-                'efs_access_point_created',
-                access_point_id=response['AccessPointId'],
+                "efs_access_point_created",
+                access_point_id=response["AccessPointId"],
                 file_system_id=file_system_id,
-                path=path
+                path=path,
             )
 
             return self._format_access_point(response)
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'AccessPointAlreadyExists':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "AccessPointAlreadyExists":
                 # Try to find existing access point
                 existing = self._find_access_point_by_path(
                     file_system_id, path, region, credential
@@ -589,7 +610,7 @@ class EFSService(BaseService):
             raise EFSAccessPointError(
                 f"Failed to create access point: {e}",
                 file_system_id=file_system_id,
-                path=path
+                path=path,
             )
 
     def _find_access_point_by_path(
@@ -602,7 +623,7 @@ class EFSService(BaseService):
         """Find an access point by its root directory path."""
         access_points = self.list_access_points(file_system_id, region, credential)
         for ap in access_points:
-            if ap.get('root_directory_path') == path:
+            if ap.get("root_directory_path") == path:
                 return ap
         return None
 
@@ -629,18 +650,21 @@ class EFSService(BaseService):
             client.delete_access_point(AccessPointId=access_point_id)
 
             self.log_info(f"Deleted EFS access point: {access_point_id}")
-            self.notify_observers('efs_access_point_deleted', access_point_id=access_point_id)
+            self.notify_observers(
+                "efs_access_point_deleted", access_point_id=access_point_id
+            )
 
             return True
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'AccessPointNotFound':
-                self.log_warning(f"Access point not found for deletion: {access_point_id}")
+            error_code = e.response["Error"]["Code"]
+            if error_code == "AccessPointNotFound":
+                self.log_warning(
+                    f"Access point not found for deletion: {access_point_id}"
+                )
                 return False
             raise EFSAccessPointError(
-                f"Failed to delete access point: {e}",
-                access_point_id=access_point_id
+                f"Failed to delete access point: {e}", access_point_id=access_point_id
             )
 
     def list_access_points(
@@ -664,18 +688,17 @@ class EFSService(BaseService):
 
         try:
             access_points = []
-            paginator = client.get_paginator('describe_access_points')
+            paginator = client.get_paginator("describe_access_points")
 
             for page in paginator.paginate(FileSystemId=file_system_id):
-                for ap in page.get('AccessPoints', []):
+                for ap in page.get("AccessPoints", []):
                     access_points.append(self._format_access_point(ap))
 
             return access_points
 
         except ClientError as e:
             raise EFSAccessPointError(
-                f"Failed to list access points: {e}",
-                file_system_id=file_system_id
+                f"Failed to list access points: {e}", file_system_id=file_system_id
             )
 
     def describe_access_point(
@@ -699,47 +722,46 @@ class EFSService(BaseService):
 
         try:
             response = client.describe_access_points(AccessPointId=access_point_id)
-            access_points = response.get('AccessPoints', [])
+            access_points = response.get("AccessPoints", [])
 
             if not access_points:
                 raise EFSAccessPointError(
                     f"Access point not found: {access_point_id}",
-                    access_point_id=access_point_id
+                    access_point_id=access_point_id,
                 )
 
             return self._format_access_point(access_points[0])
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'AccessPointNotFound':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "AccessPointNotFound":
                 raise EFSAccessPointError(
                     f"Access point not found: {access_point_id}",
-                    access_point_id=access_point_id
+                    access_point_id=access_point_id,
                 )
             raise EFSAccessPointError(
-                f"Failed to describe access point: {e}",
-                access_point_id=access_point_id
+                f"Failed to describe access point: {e}", access_point_id=access_point_id
             )
 
     def _format_access_point(self, ap: Dict[str, Any]) -> Dict[str, Any]:
         """Format access point response to consistent structure."""
-        posix_user = ap.get('PosixUser', {})
-        root_dir = ap.get('RootDirectory', {})
-        creation_info = root_dir.get('CreationInfo', {})
+        posix_user = ap.get("PosixUser", {})
+        root_dir = ap.get("RootDirectory", {})
+        creation_info = root_dir.get("CreationInfo", {})
 
         return {
-            'access_point_id': ap.get('AccessPointId'),
-            'access_point_arn': ap.get('AccessPointArn'),
-            'file_system_id': ap.get('FileSystemId'),
-            'name': ap.get('Name'),
-            'life_cycle_state': ap.get('LifeCycleState'),
-            'root_directory_path': root_dir.get('Path', '/'),
-            'posix_uid': posix_user.get('Uid'),
-            'posix_gid': posix_user.get('Gid'),
-            'owner_uid': creation_info.get('OwnerUid'),
-            'owner_gid': creation_info.get('OwnerGid'),
-            'permissions': creation_info.get('Permissions'),
-            'tags': {t['Key']: t['Value'] for t in ap.get('Tags', [])},
+            "access_point_id": ap.get("AccessPointId"),
+            "access_point_arn": ap.get("AccessPointArn"),
+            "file_system_id": ap.get("FileSystemId"),
+            "name": ap.get("Name"),
+            "life_cycle_state": ap.get("LifeCycleState"),
+            "root_directory_path": root_dir.get("Path", "/"),
+            "posix_uid": posix_user.get("Uid"),
+            "posix_gid": posix_user.get("Gid"),
+            "owner_uid": creation_info.get("OwnerUid"),
+            "owner_gid": creation_info.get("OwnerGid"),
+            "permissions": creation_info.get("Permissions"),
+            "tags": {t["Key"]: t["Value"] for t in ap.get("Tags", [])},
         }
 
     # -------------------------------------------------------------------------
@@ -778,32 +800,36 @@ class EFSService(BaseService):
                     SecurityGroups=security_group_ids,
                 )
 
-                mount_target_id = response['MountTargetId']
+                mount_target_id = response["MountTargetId"]
                 mount_target_ids.append(mount_target_id)
 
-                self.log_info(f"Created mount target: {mount_target_id} in subnet {subnet_id}")
+                self.log_info(
+                    f"Created mount target: {mount_target_id} in subnet {subnet_id}"
+                )
 
             except ClientError as e:
-                error_code = e.response['Error']['Code']
-                if error_code == 'MountTargetConflict':
+                error_code = e.response["Error"]["Code"]
+                if error_code == "MountTargetConflict":
                     # Mount target already exists in this subnet
                     existing = self._get_mount_target_for_subnet(
                         file_system_id, subnet_id, region, credential
                     )
                     if existing:
                         mount_target_ids.append(existing)
-                        self.log_info(f"Mount target already exists in subnet {subnet_id}")
+                        self.log_info(
+                            f"Mount target already exists in subnet {subnet_id}"
+                        )
                         continue
                 raise EFSMountTargetError(
                     f"Failed to create mount target in subnet {subnet_id}: {e}",
                     file_system_id=file_system_id,
-                    subnet_id=subnet_id
+                    subnet_id=subnet_id,
                 )
 
         self.notify_observers(
-            'efs_mount_targets_created',
+            "efs_mount_targets_created",
             file_system_id=file_system_id,
-            mount_target_ids=mount_target_ids
+            mount_target_ids=mount_target_ids,
         )
 
         return mount_target_ids
@@ -820,9 +846,9 @@ class EFSService(BaseService):
 
         try:
             response = client.describe_mount_targets(FileSystemId=file_system_id)
-            for mt in response.get('MountTargets', []):
-                if mt.get('SubnetId') == subnet_id:
-                    return mt.get('MountTargetId')
+            for mt in response.get("MountTargets", []):
+                if mt.get("SubnetId") == subnet_id:
+                    return mt.get("MountTargetId")
             return None
         except ClientError:
             return None
@@ -838,7 +864,7 @@ class EFSService(BaseService):
 
         try:
             response = client.describe_mount_targets(FileSystemId=file_system_id)
-            return [mt['MountTargetId'] for mt in response.get('MountTargets', [])]
+            return [mt["MountTargetId"] for mt in response.get("MountTargets", [])]
         except ClientError:
             return []
 
@@ -864,32 +890,33 @@ class EFSService(BaseService):
 
         try:
             response = client.describe_mount_targets(FileSystemId=file_system_id)
-            mount_targets = response.get('MountTargets', [])
+            mount_targets = response.get("MountTargets", [])
 
             for mt in mount_targets:
-                mount_target_id = mt['MountTargetId']
+                mount_target_id = mt["MountTargetId"]
                 try:
                     client.delete_mount_target(MountTargetId=mount_target_id)
                     deleted_count += 1
                     self.log_info(f"Deleted mount target: {mount_target_id}")
                 except ClientError as e:
-                    error_code = e.response['Error']['Code']
-                    if error_code != 'MountTargetNotFound':
-                        self.log_warning(f"Failed to delete mount target {mount_target_id}: {e}")
+                    error_code = e.response["Error"]["Code"]
+                    if error_code != "MountTargetNotFound":
+                        self.log_warning(
+                            f"Failed to delete mount target {mount_target_id}: {e}"
+                        )
 
             if deleted_count > 0:
                 self.notify_observers(
-                    'efs_mount_targets_deleted',
+                    "efs_mount_targets_deleted",
                     file_system_id=file_system_id,
-                    count=deleted_count
+                    count=deleted_count,
                 )
 
             return deleted_count
 
         except ClientError as e:
             raise EFSMountTargetError(
-                f"Failed to delete mount targets: {e}",
-                file_system_id=file_system_id
+                f"Failed to delete mount targets: {e}", file_system_id=file_system_id
             )
 
     def wait_for_mount_targets_available(
@@ -922,15 +949,14 @@ class EFSService(BaseService):
         while time.time() - start_time < timeout:
             try:
                 response = client.describe_mount_targets(FileSystemId=file_system_id)
-                mount_targets = response.get('MountTargets', [])
+                mount_targets = response.get("MountTargets", [])
 
                 if not mount_targets:
                     time.sleep(poll_interval)
                     continue
 
                 all_available = all(
-                    mt.get('LifeCycleState') == 'available'
-                    for mt in mount_targets
+                    mt.get("LifeCycleState") == "available" for mt in mount_targets
                 )
 
                 if all_available:
@@ -939,11 +965,11 @@ class EFSService(BaseService):
 
                 # Check for errors
                 for mt in mount_targets:
-                    if mt.get('LifeCycleState') == 'error':
+                    if mt.get("LifeCycleState") == "error":
                         raise EFSMountTargetError(
                             f"Mount target {mt['MountTargetId']} entered error state",
                             file_system_id=file_system_id,
-                            mount_target_id=mt['MountTargetId']
+                            mount_target_id=mt["MountTargetId"],
                         )
 
                 time.sleep(poll_interval)
@@ -954,7 +980,7 @@ class EFSService(BaseService):
 
         raise EFSMountTargetError(
             f"Timeout waiting for mount targets to become available for {file_system_id}",
-            file_system_id=file_system_id
+            file_system_id=file_system_id,
         )
 
     def _wait_for_no_mount_targets(
@@ -972,28 +998,32 @@ class EFSService(BaseService):
         while time.time() - start_time < timeout:
             try:
                 response = client.describe_mount_targets(FileSystemId=file_system_id)
-                mount_targets = response.get('MountTargets', [])
+                mount_targets = response.get("MountTargets", [])
 
                 if not mount_targets:
                     return
 
                 # Check if any are still deleting
-                deleting = [mt for mt in mount_targets if mt.get('LifeCycleState') == 'deleting']
+                deleting = [
+                    mt for mt in mount_targets if mt.get("LifeCycleState") == "deleting"
+                ]
                 if deleting:
-                    self.log_debug(f"Waiting for {len(deleting)} mount targets to delete...")
+                    self.log_debug(
+                        f"Waiting for {len(deleting)} mount targets to delete..."
+                    )
 
                 time.sleep(poll_interval)
 
             except ClientError as e:
-                error_code = e.response['Error']['Code']
-                if error_code == 'FileSystemNotFound':
+                error_code = e.response["Error"]["Code"]
+                if error_code == "FileSystemNotFound":
                     return  # File system already gone
                 self.log_warning(f"Error checking mount targets: {e}")
                 time.sleep(poll_interval)
 
         raise EFSMountTargetError(
             f"Timeout waiting for mount targets to be deleted for {file_system_id}",
-            file_system_id=file_system_id
+            file_system_id=file_system_id,
         )
 
     def describe_mount_targets(
@@ -1019,23 +1049,22 @@ class EFSService(BaseService):
             response = client.describe_mount_targets(FileSystemId=file_system_id)
             return [
                 {
-                    'mount_target_id': mt.get('MountTargetId'),
-                    'file_system_id': mt.get('FileSystemId'),
-                    'subnet_id': mt.get('SubnetId'),
-                    'life_cycle_state': mt.get('LifeCycleState'),
-                    'ip_address': mt.get('IpAddress'),
-                    'network_interface_id': mt.get('NetworkInterfaceId'),
-                    'availability_zone_id': mt.get('AvailabilityZoneId'),
-                    'availability_zone_name': mt.get('AvailabilityZoneName'),
-                    'vpc_id': mt.get('VpcId'),
+                    "mount_target_id": mt.get("MountTargetId"),
+                    "file_system_id": mt.get("FileSystemId"),
+                    "subnet_id": mt.get("SubnetId"),
+                    "life_cycle_state": mt.get("LifeCycleState"),
+                    "ip_address": mt.get("IpAddress"),
+                    "network_interface_id": mt.get("NetworkInterfaceId"),
+                    "availability_zone_id": mt.get("AvailabilityZoneId"),
+                    "availability_zone_name": mt.get("AvailabilityZoneName"),
+                    "vpc_id": mt.get("VpcId"),
                 }
-                for mt in response.get('MountTargets', [])
+                for mt in response.get("MountTargets", [])
             ]
 
         except ClientError as e:
             raise EFSMountTargetError(
-                f"Failed to describe mount targets: {e}",
-                file_system_id=file_system_id
+                f"Failed to describe mount targets: {e}", file_system_id=file_system_id
             )
 
     # -------------------------------------------------------------------------
@@ -1092,13 +1121,15 @@ class EFSService(BaseService):
                 return existing
             try:
                 return self._create_efs_security_group(
-                    ec2, vpc_id, name,
+                    ec2,
+                    vpc_id,
+                    name,
                     region=region,
                     credential=credential,
                     description=description,
                 )
             except ClientError as e:
-                if e.response['Error']['Code'] != 'InvalidGroup.Duplicate':
+                if e.response["Error"]["Code"] != "InvalidGroup.Duplicate":
                     raise EFSError(f"Failed to create EFS security group: {e}")
                 # Lost a create race — another caller has the SG; the
                 # next iteration's find should pick it up. Cap retries
@@ -1112,27 +1143,30 @@ class EFSService(BaseService):
         )
 
     def _find_efs_security_group(
-        self, ec2, vpc_id: str, name: str,
+        self,
+        ec2,
+        vpc_id: str,
+        name: str,
     ) -> Optional[Dict[str, Any]]:
         try:
             response = ec2.describe_security_groups(
                 Filters=[
-                    {'Name': 'vpc-id', 'Values': [vpc_id]},
-                    {'Name': 'group-name', 'Values': [name]},
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "group-name", "Values": [name]},
                 ]
             )
         except ClientError as e:
             raise EFSError(f"Failed to search for security group: {e}")
-        security_groups = response.get('SecurityGroups', [])
+        security_groups = response.get("SecurityGroups", [])
         if not security_groups:
             return None
         sg = security_groups[0]
         self.log_info(f"Found existing EFS security group: {name}")
         return {
-            'security_group_id': sg['GroupId'],
-            'group_name': sg['GroupName'],
-            'vpc_id': sg['VpcId'],
-            'description': sg.get('Description'),
+            "security_group_id": sg["GroupId"],
+            "group_name": sg["GroupName"],
+            "vpc_id": sg["VpcId"],
+            "description": sg.get("Description"),
         }
 
     def _create_efs_security_group(
@@ -1155,29 +1189,29 @@ class EFSService(BaseService):
             VpcId=vpc_id,
             TagSpecifications=[
                 {
-                    'ResourceType': 'security-group',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': name},
-                        {'Key': 'CreatedBy', 'Value': 'remote-compose'},
+                    "ResourceType": "security-group",
+                    "Tags": [
+                        {"Key": "Name", "Value": name},
+                        {"Key": "CreatedBy", "Value": "remote-compose"},
                     ],
                 }
             ],
         )
 
-        security_group_id = response['GroupId']
+        security_group_id = response["GroupId"]
 
         # Add NFS inbound rule.
         ec2.authorize_security_group_ingress(
             GroupId=security_group_id,
             IpPermissions=[
                 {
-                    'IpProtocol': 'tcp',
-                    'FromPort': 2049,
-                    'ToPort': 2049,
-                    'IpRanges': [
+                    "IpProtocol": "tcp",
+                    "FromPort": 2049,
+                    "ToPort": 2049,
+                    "IpRanges": [
                         {
-                            'CidrIp': vpc_cidr,
-                            'Description': 'NFS from VPC',
+                            "CidrIp": vpc_cidr,
+                            "Description": "NFS from VPC",
                         }
                     ],
                 }
@@ -1186,15 +1220,13 @@ class EFSService(BaseService):
 
         self.log_info(f"Created EFS security group: {name} ({security_group_id})")
         self.notify_observers(
-            'efs_security_group_created',
-            security_group_id=security_group_id,
-            name=name
+            "efs_security_group_created", security_group_id=security_group_id, name=name
         )
         return {
-            'security_group_id': security_group_id,
-            'group_name': name,
-            'vpc_id': vpc_id,
-            'description': description or f"EFS security group for {name}",
+            "security_group_id": security_group_id,
+            "group_name": name,
+            "vpc_id": vpc_id,
+            "description": description or f"EFS security group for {name}",
         }
 
     def _get_vpc_cidr(
@@ -1208,12 +1240,12 @@ class EFSService(BaseService):
 
         try:
             response = ec2.describe_vpcs(VpcIds=[vpc_id])
-            vpcs = response.get('Vpcs', [])
+            vpcs = response.get("Vpcs", [])
 
             if not vpcs:
                 raise EFSError(f"VPC not found: {vpc_id}")
 
-            return vpcs[0].get('CidrBlock', '10.0.0.0/8')
+            return vpcs[0].get("CidrBlock", "10.0.0.0/8")
 
         except ClientError as e:
             raise EFSError(f"Failed to get VPC CIDR: {e}")
@@ -1247,13 +1279,13 @@ class EFSService(BaseService):
                 GroupId=security_group_id,
                 IpPermissions=[
                     {
-                        'IpProtocol': 'tcp',
-                        'FromPort': 2049,
-                        'ToPort': 2049,
-                        'UserIdGroupPairs': [
+                        "IpProtocol": "tcp",
+                        "FromPort": 2049,
+                        "ToPort": 2049,
+                        "UserIdGroupPairs": [
                             {
-                                'GroupId': source_security_group_id,
-                                'Description': f'NFS from {source_security_group_id}',
+                                "GroupId": source_security_group_id,
+                                "Description": f"NFS from {source_security_group_id}",
                             }
                         ],
                     }
@@ -1266,13 +1298,11 @@ class EFSService(BaseService):
             return True
 
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidPermission.Duplicate':
+            error_code = e.response["Error"]["Code"]
+            if error_code == "InvalidPermission.Duplicate":
                 self.log_debug(f"Rule already exists for {source_security_group_id}")
                 return True
-            raise EFSError(
-                f"Failed to authorize security group: {e}"
-            )
+            raise EFSError(f"Failed to authorize security group: {e}")
 
     # -------------------------------------------------------------------------
     # ECS Volume Configuration
@@ -1282,10 +1312,10 @@ class EFSService(BaseService):
         self,
         file_system_id: str,
         access_point_id: Optional[str] = None,
-        root_directory: str = '/',
+        root_directory: str = "/",
         volume_name: Optional[str] = None,
-        transit_encryption: str = 'ENABLED',
-        iam_authorization: str = 'DISABLED',
+        transit_encryption: str = "ENABLED",
+        iam_authorization: str = "DISABLED",
     ) -> Dict[str, Any]:
         """
         Get ECS task definition volume configuration for EFS.
@@ -1307,25 +1337,25 @@ class EFSService(BaseService):
         volume_name = volume_name or f"efs-{file_system_id[-8:]}"
 
         efs_volume_config = {
-            'fileSystemId': file_system_id,
-            'transitEncryption': transit_encryption,
+            "fileSystemId": file_system_id,
+            "transitEncryption": transit_encryption,
         }
 
         if access_point_id:
-            efs_volume_config['accessPointId'] = access_point_id
+            efs_volume_config["accessPointId"] = access_point_id
             # When using access points, root directory must be / or omitted
-            efs_volume_config['rootDirectory'] = '/'
+            efs_volume_config["rootDirectory"] = "/"
             # IAM authorization is required when using access points
-            efs_volume_config['authorizationConfig'] = {
-                'accessPointId': access_point_id,
-                'iam': iam_authorization,
+            efs_volume_config["authorizationConfig"] = {
+                "accessPointId": access_point_id,
+                "iam": iam_authorization,
             }
         else:
-            efs_volume_config['rootDirectory'] = root_directory
+            efs_volume_config["rootDirectory"] = root_directory
 
         return {
-            'name': volume_name,
-            'efsVolumeConfiguration': efs_volume_config,
+            "name": volume_name,
+            "efsVolumeConfiguration": efs_volume_config,
         }
 
     def get_ecs_mount_point(
@@ -1349,9 +1379,9 @@ class EFSService(BaseService):
             Dict with container mount point configuration
         """
         return {
-            'sourceVolume': volume_name,
-            'containerPath': container_path,
-            'readOnly': read_only,
+            "sourceVolume": volume_name,
+            "containerPath": container_path,
+            "readOnly": read_only,
         }
 
     def get_complete_ecs_efs_config(
@@ -1385,12 +1415,12 @@ class EFSService(BaseService):
         )
 
         mount_point = self.get_ecs_mount_point(
-            volume_name=volume_config['name'],
+            volume_name=volume_config["name"],
             container_path=container_path,
             read_only=read_only,
         )
 
         return {
-            'volume': volume_config,
-            'mount_point': mount_point,
+            "volume": volume_config,
+            "mount_point": mount_point,
         }

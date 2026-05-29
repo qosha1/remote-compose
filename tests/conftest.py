@@ -5,12 +5,11 @@ Pytest configuration and fixtures.
 import os
 import pytest
 import django
-from django.conf import settings
 
 
 def pytest_configure():
     """Configure Django settings for tests."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.settings')
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
     django.setup()
     # rc-8zz: opt all tests out of the post-rollout ECS event watcher by
     # default. The watcher polls describe_services for up to 60s after
@@ -25,19 +24,21 @@ def pytest_configure():
 # Shared model fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def cluster(db):
     """Shared ECSCluster fixture used across converter and infrastructure tests."""
     from remote_compose.models import ECSCluster
+
     return ECSCluster.objects.create(
-        name='test-cluster',
-        aws_cluster_name='test-cluster',
-        aws_cluster_arn='arn:aws:ecs:us-east-1:123456789:cluster/test-cluster',
-        aws_region='us-east-1',
+        name="test-cluster",
+        aws_cluster_name="test-cluster",
+        aws_cluster_arn="arn:aws:ecs:us-east-1:123456789:cluster/test-cluster",
+        aws_region="us-east-1",
         launch_type=ECSCluster.LaunchType.FARGATE,
         status=ECSCluster.ClusterStatus.ACTIVE,
-        subnet_ids=['subnet-123', 'subnet-456'],
-        security_group_ids=['sg-123'],
+        subnet_ids=["subnet-123", "subnet-456"],
+        security_group_ids=["sg-123"],
     )
 
 
@@ -45,7 +46,10 @@ def cluster(db):
 # Shared preprocessor helpers
 # ---------------------------------------------------------------------------
 
-def make_preprocessed_from_tuples(*services, named_volumes=None, warnings=None, errors=None):
+
+def make_preprocessed_from_tuples(
+    *services, named_volumes=None, warnings=None, errors=None
+):
     """
     Build a PreprocessedCompose from a variable number of service tuples.
 
@@ -58,6 +62,7 @@ def make_preprocessed_from_tuples(*services, named_volumes=None, warnings=None, 
         PreprocessedCompose,
         PreprocessedService,
     )
+
     svc_dict = {}
     for name, config, image, build_info in services:
         requires_build = build_info is not None
@@ -67,7 +72,7 @@ def make_preprocessed_from_tuples(*services, named_volumes=None, warnings=None, 
             image_name=image,
             build_info=build_info,
             requires_build=requires_build,
-            env_vars=config.get('environment', {}),
+            env_vars=config.get("environment", {}),
         )
     return PreprocessedCompose(
         services=svc_dict,
@@ -83,6 +88,7 @@ def make_preprocessed_from_services(*services):
     instances.
     """
     from remote_compose.services.compose_preprocessor import PreprocessedCompose
+
     svc_dict = {svc.name: svc for svc in services}
     return PreprocessedCompose(services=svc_dict)
 
@@ -120,9 +126,12 @@ def mock_ssh_success(mocker):
     mock_client.connect.return_value = None
     mock_client.exec_command.return_value = (
         mocker.MagicMock(),  # stdin
-        mocker.MagicMock(read=lambda: b'success', channel=mocker.MagicMock(recv_exit_status=lambda: 0)),  # stdout
-        mocker.MagicMock(read=lambda: b''),  # stderr
+        mocker.MagicMock(
+            read=lambda: b"success",
+            channel=mocker.MagicMock(recv_exit_status=lambda: 0),
+        ),  # stdout
+        mocker.MagicMock(read=lambda: b""),  # stderr
     )
 
-    mocker.patch('paramiko.SSHClient', return_value=mock_client)
+    mocker.patch("paramiko.SSHClient", return_value=mock_client)
     return mock_client

@@ -12,12 +12,8 @@ file when set (centralized key-management use case).
 
 from __future__ import annotations
 
-import os
-import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 def _bootstrap(db_dir: Path):
@@ -29,8 +25,8 @@ def _bootstrap(db_dir: Path):
     captured = {}
 
     def fake_configure(**kwargs):
-        captured["encryption_key"] = (
-            kwargs.get("REMOTE_COMPOSE", {}).get("ENCRYPTION_KEY")
+        captured["encryption_key"] = kwargs.get("REMOTE_COMPOSE", {}).get(
+            "ENCRYPTION_KEY"
         )
 
     fake_settings = MagicMock()
@@ -38,14 +34,18 @@ def _bootstrap(db_dir: Path):
     fake_settings.configure = fake_configure
 
     config = {
-        "project_name": "p", "cluster": "c", "region": "us-west-1",
+        "project_name": "p",
+        "cluster": "c",
+        "region": "us-west-1",
         "compose_file": "docker-compose.yml",
     }
 
-    with patch("django.conf.settings", fake_settings), \
-         patch("django.setup"), \
-         patch("django.core.management.call_command"), \
-         patch("pathlib.Path.home", return_value=db_dir):
+    with (
+        patch("django.conf.settings", fake_settings),
+        patch("django.setup"),
+        patch("django.core.management.call_command"),
+        patch("pathlib.Path.home", return_value=db_dir),
+    ):
         cli_mod._bootstrap_django(config)
     return captured.get("encryption_key")
 
@@ -59,7 +59,8 @@ class TestEncryptionKeyPersistence:
     def test_env_var_wins_over_file(self, tmp_path, monkeypatch):
         """REMOTE_COMPOSE_ENCRYPTION_KEY env var takes precedence."""
         monkeypatch.setenv(
-            "REMOTE_COMPOSE_ENCRYPTION_KEY", "from-env-var-key=",
+            "REMOTE_COMPOSE_ENCRYPTION_KEY",
+            "from-env-var-key=",
         )
         # Even with a stale on-disk file present, env wins.
         db_dir = tmp_path / ".remote-compose" / "p"

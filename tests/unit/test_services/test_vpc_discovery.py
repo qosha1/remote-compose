@@ -30,12 +30,14 @@ def svc():
     return s
 
 
-def _make_ec2(*, subnets=None, igws=None, natgws=None, route_tables=None,
-              vpcs=None):
+def _make_ec2(*, subnets=None, igws=None, natgws=None, route_tables=None, vpcs=None):
     ec2 = MagicMock()
-    ec2.describe_vpcs.return_value = {"Vpcs": vpcs or [
-        {"VpcId": "vpc-1", "CidrBlock": "10.0.0.0/16"},
-    ]}
+    ec2.describe_vpcs.return_value = {
+        "Vpcs": vpcs
+        or [
+            {"VpcId": "vpc-1", "CidrBlock": "10.0.0.0/16"},
+        ]
+    }
     ec2.describe_subnets.return_value = {"Subnets": subnets or []}
     ec2.describe_internet_gateways.return_value = {
         "InternetGateways": igws or [],
@@ -53,22 +55,34 @@ class TestDiscoverHappyPath:
     def test_full_topology_round_trips(self, svc):
         ec2 = _make_ec2(
             subnets=[
-                {"SubnetId": "subnet-pub1",
-                 "Tags": [{"Key": "Name", "Value": "c1-public-subnet-1"}]},
-                {"SubnetId": "subnet-pub2",
-                 "Tags": [{"Key": "Name", "Value": "c1-public-subnet-2"}]},
-                {"SubnetId": "subnet-priv1",
-                 "Tags": [{"Key": "Name", "Value": "c1-private-subnet-1"}]},
-                {"SubnetId": "subnet-priv2",
-                 "Tags": [{"Key": "Name", "Value": "c1-private-subnet-2"}]},
+                {
+                    "SubnetId": "subnet-pub1",
+                    "Tags": [{"Key": "Name", "Value": "c1-public-subnet-1"}],
+                },
+                {
+                    "SubnetId": "subnet-pub2",
+                    "Tags": [{"Key": "Name", "Value": "c1-public-subnet-2"}],
+                },
+                {
+                    "SubnetId": "subnet-priv1",
+                    "Tags": [{"Key": "Name", "Value": "c1-private-subnet-1"}],
+                },
+                {
+                    "SubnetId": "subnet-priv2",
+                    "Tags": [{"Key": "Name", "Value": "c1-private-subnet-2"}],
+                },
             ],
             igws=[{"InternetGatewayId": "igw-1"}],
             natgws=[{"NatGatewayId": "nat-1"}],
             route_tables=[
-                {"RouteTableId": "rtb-pub",
-                 "Tags": [{"Key": "Name", "Value": "c1-public-rt"}]},
-                {"RouteTableId": "rtb-priv",
-                 "Tags": [{"Key": "Name", "Value": "c1-private-rt"}]},
+                {
+                    "RouteTableId": "rtb-pub",
+                    "Tags": [{"Key": "Name", "Value": "c1-public-rt"}],
+                },
+                {
+                    "RouteTableId": "rtb-priv",
+                    "Tags": [{"Key": "Name", "Value": "c1-private-rt"}],
+                },
             ],
         )
         out = svc._discover_vpc_resources(ec2, "vpc-1", "c1")
@@ -83,12 +97,20 @@ class TestDiscoverHappyPath:
 
     def test_subnet_classification_falls_back_to_map_public_ip(self, svc):
         # Untagged subnet — classification falls back to MapPublicIpOnLaunch.
-        ec2 = _make_ec2(subnets=[
-            {"SubnetId": "subnet-pub-untagged",
-             "MapPublicIpOnLaunch": True, "Tags": []},
-            {"SubnetId": "subnet-priv-untagged",
-             "MapPublicIpOnLaunch": False, "Tags": []},
-        ])
+        ec2 = _make_ec2(
+            subnets=[
+                {
+                    "SubnetId": "subnet-pub-untagged",
+                    "MapPublicIpOnLaunch": True,
+                    "Tags": [],
+                },
+                {
+                    "SubnetId": "subnet-priv-untagged",
+                    "MapPublicIpOnLaunch": False,
+                    "Tags": [],
+                },
+            ]
+        )
         out = svc._discover_vpc_resources(ec2, "vpc-1", "c1")
         assert out["public_subnet_ids"] == ["subnet-pub-untagged"]
         assert out["private_subnet_ids"] == ["subnet-priv-untagged"]

@@ -47,14 +47,18 @@ def _paginator(pages):
 class TestFindByName:
     def test_reads_tags_from_describe_response_no_extra_call(self, svc):
         client = MagicMock()
-        client.get_paginator.return_value = _paginator([{
-            "FileSystems": [
+        client.get_paginator.return_value = _paginator(
+            [
                 {
-                    "FileSystemId": "fs-1",
-                    "Tags": [{"Key": "Name", "Value": "wanted"}],
-                },
-            ],
-        }])
+                    "FileSystems": [
+                        {
+                            "FileSystemId": "fs-1",
+                            "Tags": [{"Key": "Name", "Value": "wanted"}],
+                        },
+                    ],
+                }
+            ]
+        )
         # Stub helpers used downstream so they don't call AWS.
         svc._get_efs_client = MagicMock(return_value=client)
         svc._get_mount_target_ids = MagicMock(return_value=[])
@@ -67,14 +71,18 @@ class TestFindByName:
 
     def test_returns_none_when_no_match(self, svc):
         client = MagicMock()
-        client.get_paginator.return_value = _paginator([{
-            "FileSystems": [
+        client.get_paginator.return_value = _paginator(
+            [
                 {
-                    "FileSystemId": "fs-1",
-                    "Tags": [{"Key": "Name", "Value": "other"}],
-                },
-            ],
-        }])
+                    "FileSystems": [
+                        {
+                            "FileSystemId": "fs-1",
+                            "Tags": [{"Key": "Name", "Value": "other"}],
+                        },
+                    ],
+                }
+            ]
+        )
         svc._get_efs_client = MagicMock(return_value=client)
         svc._get_mount_target_ids = MagicMock(return_value=[])
         svc._format_file_system = MagicMock(return_value={})
@@ -86,11 +94,15 @@ class TestFindByName:
         # Some EFS responses may omit Tags entirely (untagged systems);
         # the iteration must not crash.
         client = MagicMock()
-        client.get_paginator.return_value = _paginator([{
-            "FileSystems": [
-                {"FileSystemId": "fs-untagged"},
-            ],
-        }])
+        client.get_paginator.return_value = _paginator(
+            [
+                {
+                    "FileSystems": [
+                        {"FileSystemId": "fs-untagged"},
+                    ],
+                }
+            ]
+        )
         svc._get_efs_client = MagicMock(return_value=client)
         svc._get_mount_target_ids = MagicMock(return_value=[])
         svc._format_file_system = MagicMock(return_value={})
@@ -99,16 +111,26 @@ class TestFindByName:
 
     def test_walks_multiple_pages(self, svc):
         client = MagicMock()
-        client.get_paginator.return_value = _paginator([
-            {"FileSystems": [
-                {"FileSystemId": "fs-a",
-                 "Tags": [{"Key": "Name", "Value": "miss-1"}]},
-            ]},
-            {"FileSystems": [
-                {"FileSystemId": "fs-b",
-                 "Tags": [{"Key": "Name", "Value": "wanted"}]},
-            ]},
-        ])
+        client.get_paginator.return_value = _paginator(
+            [
+                {
+                    "FileSystems": [
+                        {
+                            "FileSystemId": "fs-a",
+                            "Tags": [{"Key": "Name", "Value": "miss-1"}],
+                        },
+                    ]
+                },
+                {
+                    "FileSystems": [
+                        {
+                            "FileSystemId": "fs-b",
+                            "Tags": [{"Key": "Name", "Value": "wanted"}],
+                        },
+                    ]
+                },
+            ]
+        )
         svc._get_efs_client = MagicMock(return_value=client)
         svc._get_mount_target_ids = MagicMock(return_value=[])
         svc._format_file_system = MagicMock(return_value={"id": "fs-b"})

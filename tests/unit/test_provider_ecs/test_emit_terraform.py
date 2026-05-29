@@ -20,14 +20,27 @@ from remote_compose.provider.base import ProviderConfigError
 def _ctx(tmp_path: Path, **overrides) -> DeployContext:
     services = overrides.pop("services", None) or {
         "web": ServiceSpec(
-            name="web", cpu=256, memory=512, replicas=1, type="proxy",
-            public=True, port=80, health_check_path="/health",
+            name="web",
+            cpu=256,
+            memory=512,
+            replicas=1,
+            type="proxy",
+            public=True,
+            port=80,
+            health_check_path="/health",
         ),
         "api": ServiceSpec(
-            name="api", cpu=512, memory=1024, replicas=2, type="application",
+            name="api",
+            cpu=512,
+            memory=1024,
+            replicas=2,
+            type="application",
         ),
         "cache": ServiceSpec(
-            name="cache", cpu=256, memory=512, type="infrastructure",
+            name="cache",
+            cpu=256,
+            memory=512,
+            type="infrastructure",
         ),
     }
     return DeployContext(
@@ -43,7 +56,13 @@ def _ctx(tmp_path: Path, **overrides) -> DeployContext:
             }
         },
         tf_backend_config=overrides.pop(
-            "tf_backend", {"type": "s3", "bucket": "tf", "key": "myapp.tfstate", "region": "us-west-2"}
+            "tf_backend",
+            {
+                "type": "s3",
+                "bucket": "tf",
+                "key": "myapp.tfstate",
+                "region": "us-west-2",
+            },
         ),
         working_dir=tmp_path,
         services=services,
@@ -56,9 +75,17 @@ class TestEmitTerraformStructural:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(_ctx(tmp_path), out)
         expected = {
-            "backend.tf", "providers.tf", "variables.tf", "network.tf",
-            "security_groups.tf", "alb.tf", "iam.tf", "cluster.tf",
-            "services.tf", "outputs.tf", "README.md",
+            "backend.tf",
+            "providers.tf",
+            "variables.tf",
+            "network.tf",
+            "security_groups.tf",
+            "alb.tf",
+            "iam.tf",
+            "cluster.tf",
+            "services.tf",
+            "outputs.tf",
+            "README.md",
         }
         actual = {p.name for p in out.iterdir()}
         assert expected.issubset(actual), f"missing: {expected - actual}"
@@ -90,6 +117,7 @@ class TestEmitTerraformStructural:
         from unittest import mock
 
         from remote_compose.provider.ecs.provider import _default_session_factory
+
         ctx = _ctx(tmp_path, aws_profile="debuggai", region="us-west-1")
         with mock.patch("boto3.Session") as MockSession:
             _default_session_factory(ctx)
@@ -105,6 +133,7 @@ class TestEmitTerraformStructural:
         from botocore.exceptions import ProfileNotFound
 
         from remote_compose.provider.ecs.provider import _default_session_factory
+
         ctx = _ctx(tmp_path, aws_profile="ghost", region="us-west-1")
         calls = []
 
@@ -160,16 +189,23 @@ class TestServices:
         ECSProvider().emit_terraform(_ctx(tmp_path), out)
         services_tf = (out / "services.tf").read_text()
         import re
+
         counts = re.findall(r"desired_count\s*=\s*(\d+)", services_tf)
         assert "2" in counts, f"expected replicas=2 to appear; got {counts}"
         assert counts.count("1") >= 1
 
     def test_service_name_with_dash_sanitized_for_terraform(self, tmp_path):
-        ctx = _ctx(tmp_path, services={
-            "celery-worker": ServiceSpec(
-                name="celery-worker", cpu=1024, memory=2048, type="worker",
-            ),
-        })
+        ctx = _ctx(
+            tmp_path,
+            services={
+                "celery-worker": ServiceSpec(
+                    name="celery-worker",
+                    cpu=1024,
+                    memory=2048,
+                    type="worker",
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         services_tf = (out / "services.tf").read_text()
@@ -177,11 +213,20 @@ class TestServices:
         assert '"${var.project}/celery-worker"' in services_tf
 
     def test_invalid_launch_type_rejected(self, tmp_path):
-        ctx = _ctx(tmp_path, services={
-            "web": ServiceSpec(name="web", cpu=256, memory=512,
-                               type="application", launch_type="BOGUS"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            services={
+                "web": ServiceSpec(
+                    name="web",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    launch_type="BOGUS",
+                ),
+            },
+        )
         from remote_compose.provider.base import ProviderConfigError
+
         with pytest.raises(ProviderConfigError, match="launch_type"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
 
@@ -195,9 +240,14 @@ class TestAlb:
         assert "aws_lb_target_group" in alb_tf
 
     def test_alb_empty_when_no_public_service(self, tmp_path):
-        ctx = _ctx(tmp_path, services={
-            "worker": ServiceSpec(name="worker", cpu=256, memory=512, type="worker"),
-        })
+        ctx = _ctx(
+            tmp_path,
+            services={
+                "worker": ServiceSpec(
+                    name="worker", cpu=256, memory=512, type="worker"
+                ),
+            },
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         alb_tf = (out / "alb.tf").read_text()
@@ -233,9 +283,9 @@ class TestDeterminism:
         ECSProvider().emit_terraform(ctx, a)
         ECSProvider().emit_terraform(ctx, b)
         for name in sorted(p.name for p in a.iterdir()):
-            assert (a / name).read_bytes() == (b / name).read_bytes(), (
-                f"mismatch in {name}"
-            )
+            assert (a / name).read_bytes() == (
+                b / name
+            ).read_bytes(), f"mismatch in {name}"
 
 
 class TestSecretsLeakage:
@@ -243,9 +293,12 @@ class TestSecretsLeakage:
         sentinel = "SECRET_SENTINEL_abc123"
         env = tmp_path / ".app"
         env.write_text(f"SECRET_KEY={sentinel}\nOTHER=y\n")
-        ctx = _ctx(tmp_path, secrets=[
-            SecretRef(name="app", source="file", path=str(env)),
-        ])
+        ctx = _ctx(
+            tmp_path,
+            secrets=[
+                SecretRef(name="app", source="file", path=str(env)),
+            ],
+        )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         for tf in out.glob("*.tf"):
@@ -255,6 +308,7 @@ class TestSecretsLeakage:
 class TestRollbackLocalBackendRejected:
     def test_local_backend_rollback_raises(self, tmp_path):
         from remote_compose.provider.base import ProviderError
+
         ctx = _ctx(tmp_path, tf_backend={"type": "local"})
         with pytest.raises(ProviderError, match="local terraform backend"):
             ECSProvider().rollback(ctx)
@@ -270,13 +324,19 @@ class TestManagedBackupBucket:
             project=backup.pop("project", "myproj"),
             compose_path=tmp_path / "docker-compose.yml",
             rc_yml_v2={"backup": backup or {"bucket": "myproj-backups"}},
-            provider_config={"ecs": {
-                "region": "us-west-2", "cluster": "test", "vpc_cidr": "10.0.0.0/16",
-            }},
+            provider_config={
+                "ecs": {
+                    "region": "us-west-2",
+                    "cluster": "test",
+                    "vpc_cidr": "10.0.0.0/16",
+                }
+            },
             tf_backend_config={"type": "local"},
             working_dir=tmp_path,
             services={
-                "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
+                "api": ServiceSpec(
+                    name="api", cpu=512, memory=1024, type="application"
+                ),
             },
             secrets=[],
         )
@@ -284,7 +344,8 @@ class TestManagedBackupBucket:
     def test_backup_bucket_emitted_when_declared(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
-            self._ctx_with_backup(tmp_path, bucket="myproj-backups"), out,
+            self._ctx_with_backup(tmp_path, bucket="myproj-backups"),
+            out,
         )
         backup_tf = (out / "backup.tf").read_text()
         assert 'aws_s3_bucket" "backups"' in backup_tf
@@ -304,7 +365,9 @@ class TestManagedBackupBucket:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             self._ctx_with_backup(
-                tmp_path, bucket="external-team-bucket", bucket_managed=False,
+                tmp_path,
+                bucket="external-team-bucket",
+                bucket_managed=False,
             ),
             out,
         )
@@ -315,7 +378,9 @@ class TestManagedBackupBucket:
     def test_rc_test_project_force_destroy_true(self, tmp_path):
         out = tmp_path / "tf"
         ctx = self._ctx_with_backup(
-            tmp_path, project="rc-test-foo", bucket="rc-test-foo-backups",
+            tmp_path,
+            project="rc-test-foo",
+            bucket="rc-test-foo-backups",
         )
         ECSProvider().emit_terraform(ctx, out)
         assert "force_destroy = true" in (out / "backup.tf").read_text()
@@ -323,7 +388,9 @@ class TestManagedBackupBucket:
     def test_non_test_project_no_force_destroy(self, tmp_path):
         out = tmp_path / "tf"
         ctx = self._ctx_with_backup(
-            tmp_path, project="prod-app", bucket="prod-app-backups",
+            tmp_path,
+            project="prod-app",
+            bucket="prod-app-backups",
         )
         ECSProvider().emit_terraform(ctx, out)
         assert "force_destroy" not in (out / "backup.tf").read_text()
@@ -332,7 +399,9 @@ class TestManagedBackupBucket:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             self._ctx_with_backup(
-                tmp_path, bucket="x", retention_days=7,
+                tmp_path,
+                bucket="x",
+                retention_days=7,
             ),
             out,
         )
@@ -344,7 +413,9 @@ class TestManagedBackupBucket:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(
             self._ctx_with_backup(
-                tmp_path, bucket="x", retention_days="never",
+                tmp_path,
+                bucket="x",
+                retention_days="never",
             ),
             out,
         )
@@ -389,7 +460,10 @@ class TestEphemeralStorage:
         out = tmp_path / "tf"
         services = {
             "api": ServiceSpec(
-                name="api", cpu=1024, memory=4096, type="application",
+                name="api",
+                cpu=1024,
+                memory=4096,
+                type="application",
                 ephemeral_storage=40,
             ),
         }
@@ -406,8 +480,12 @@ class TestEphemeralStorage:
     def test_ephemeral_storage_on_ec2_raises(self, tmp_path):
         services = {
             "api": ServiceSpec(
-                name="api", cpu=1024, memory=4096, type="application",
-                launch_type="EC2", ephemeral_storage=40,
+                name="api",
+                cpu=1024,
+                memory=4096,
+                type="application",
+                launch_type="EC2",
+                ephemeral_storage=40,
             ),
         }
         with pytest.raises(ProviderConfigError, match="ephemeral_storage"):
@@ -419,7 +497,10 @@ class TestEphemeralStorage:
     def test_ephemeral_storage_out_of_range_raises(self, tmp_path, bad):
         services = {
             "api": ServiceSpec(
-                name="api", cpu=1024, memory=4096, type="application",
+                name="api",
+                cpu=1024,
+                memory=4096,
+                type="application",
                 ephemeral_storage=bad,
             ),
         }

@@ -8,7 +8,6 @@ proceed rather than continuing into a destructive state.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import boto3
 import pytest
@@ -22,7 +21,6 @@ from remote_compose.v1_migrate.translate import (
     translate_secrets_keep_arn,
 )
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -30,6 +28,7 @@ pytestmark = pytest.mark.integration
 # Helpers — write a v1 rc.yml + minimal AWS state, with one resource
 # deliberately missing.
 # ---------------------------------------------------------------------
+
 
 def _v1_yml(tmp_path, region="us-west-2", project="migrate-test"):
     p = tmp_path / "rc.yml"
@@ -50,6 +49,7 @@ def _v1_yml(tmp_path, region="us-west-2", project="migrate-test"):
 # ---------------------------------------------------------------------
 # (a) Missing SM secret ARN
 # ---------------------------------------------------------------------
+
 
 class TestMissingSecretFailsClosed:
     def test_translate_secrets_raises_when_arn_unknown(self, tmp_path):
@@ -72,6 +72,7 @@ class TestMissingSecretFailsClosed:
 # (b) Missing EFS volume → translate_efs raises
 # ---------------------------------------------------------------------
 
+
 class TestMissingEfsFailsClosed:
     def test_translate_efs_raises_when_no_filesystem(self, tmp_path):
         with mock_aws():
@@ -90,6 +91,7 @@ class TestMissingEfsFailsClosed:
 # (c) Missing ACM cert → translate_acm raises
 # ---------------------------------------------------------------------
 
+
 class TestMissingAcmFailsClosed:
     def test_translate_acm_raises_when_no_cert(self, tmp_path):
         with mock_aws():
@@ -100,13 +102,16 @@ class TestMissingAcmFailsClosed:
             )
             with pytest.raises(Exception) as exc_info:
                 translate_acm_in_place(inv)
-            assert "cert" in str(exc_info.value).lower() or \
-                   "acm" in str(exc_info.value).lower()
+            assert (
+                "cert" in str(exc_info.value).lower()
+                or "acm" in str(exc_info.value).lower()
+            )
 
 
 # ---------------------------------------------------------------------
 # (d) build_plan refuses to compose if any sub-translator raises
 # ---------------------------------------------------------------------
+
 
 class TestBuildPlanFailsClosedOnPartial:
     def test_partial_inventory_raises_plan_safety_error(self, tmp_path):

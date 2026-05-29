@@ -39,19 +39,19 @@ class InitializeDeploymentStep(PipelineStep):
             started_at=timezone.now(),
             environment=context.environment or {},
             metadata={
-                'type': 'ecs',
-                'cluster_name': context.cluster.name,
-                'cluster_arn': context.cluster.aws_cluster_arn,
-                'region': context.cluster.aws_region,
-                'image_tag': context.image_tag,
-                'dry_run': context.dry_run,
+                "type": "ecs",
+                "cluster_name": context.cluster.name,
+                "cluster_arn": context.cluster.aws_cluster_arn,
+                "region": context.cluster.aws_region,
+                "image_tag": context.image_tag,
+                "dry_run": context.dry_run,
             },
         )
 
         # Set relationships if available
         if context.target:
             deployment.target = context.target
-            if hasattr(context.target, 'contexts') and context.target.contexts.exists():
+            if hasattr(context.target, "contexts") and context.target.contexts.exists():
                 deployment.context = context.target.contexts.first()
 
         # Only save if we have required relationships
@@ -75,9 +75,11 @@ class InitializeDeploymentStep(PipelineStep):
         from django.utils import timezone
 
         if context.deployment:
-            context.deployment.status = 'failed'
+            context.deployment.status = "failed"
             context.deployment.completed_at = timezone.now()
-            context.deployment.error_message = "Deployment rolled back due to pipeline failure"
+            context.deployment.error_message = (
+                "Deployment rolled back due to pipeline failure"
+            )
 
             if context.deployment.id:
                 try:

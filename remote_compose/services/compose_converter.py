@@ -30,13 +30,27 @@ logger = logging.getLogger(__name__)
 
 # Fargate CPU/Memory combinations (CPU units -> allowed memory values in MB)
 FARGATE_CPU_MEMORY_MAP = {
-    '256': [512, 1024, 2048],
-    '512': [1024, 2048, 3072, 4096],
-    '1024': [2048, 3072, 4096, 5120, 6144, 7168, 8192],
-    '2048': [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384],
-    '4096': list(range(8192, 30721, 1024)),
-    '8192': list(range(16384, 61441, 4096)),
-    '16384': list(range(32768, 122881, 8192)),
+    "256": [512, 1024, 2048],
+    "512": [1024, 2048, 3072, 4096],
+    "1024": [2048, 3072, 4096, 5120, 6144, 7168, 8192],
+    "2048": [
+        4096,
+        5120,
+        6144,
+        7168,
+        8192,
+        9216,
+        10240,
+        11264,
+        12288,
+        13312,
+        14336,
+        15360,
+        16384,
+    ],
+    "4096": list(range(8192, 30721, 1024)),
+    "8192": list(range(16384, 61441, 4096)),
+    "16384": list(range(32768, 122881, 8192)),
 }
 
 
@@ -108,7 +122,7 @@ class ComposeToECSConverter(BaseService):
         if not compose_dict:
             raise ComposeConversionError("Empty compose file")
 
-        services = compose_dict.get('services', {})
+        services = compose_dict.get("services", {})
         if not services:
             raise ComposeConversionError("No services defined in compose file")
 
@@ -117,11 +131,21 @@ class ComposeToECSConverter(BaseService):
         total_memory = 0
         volumes = []
 
-        network_mode = 'awsvpc' if cluster.launch_type == ECSCluster.LaunchType.FARGATE else 'bridge'
+        network_mode = (
+            "awsvpc"
+            if cluster.launch_type == ECSCluster.LaunchType.FARGATE
+            else "bridge"
+        )
 
         for service_name, service_config in services.items():
-            container_def, service_cpu, service_memory, service_volumes = self._convert_service(
-                service_name, service_config, cluster.launch_type, network_mode, cluster.aws_region
+            container_def, service_cpu, service_memory, service_volumes = (
+                self._convert_service(
+                    service_name,
+                    service_config,
+                    cluster.launch_type,
+                    network_mode,
+                    cluster.aws_region,
+                )
             )
             container_definitions.append(container_def)
             total_cpu += service_cpu
@@ -153,7 +177,7 @@ class ComposeToECSConverter(BaseService):
         compose_file_path: str,
         cluster: ECSCluster,
         task_family_name: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ) -> ECSTaskDefinition:
         """
         Convert a docker-compose file to an ECS task definition.
@@ -182,7 +206,7 @@ class ComposeToECSConverter(BaseService):
 
     def convert_preprocessed(
         self,
-        preprocessed: 'PreprocessedCompose',
+        preprocessed: "PreprocessedCompose",
         cluster: ECSCluster,
         task_family_name: str,
         efs_config: Optional[Dict[str, Dict[str, str]]] = None,
@@ -219,26 +243,32 @@ class ComposeToECSConverter(BaseService):
         total_memory = 0
         all_volumes: Dict[str, Dict[str, Any]] = {}
 
-        network_mode = 'awsvpc' if cluster.launch_type == ECSCluster.LaunchType.FARGATE else 'bridge'
+        network_mode = (
+            "awsvpc"
+            if cluster.launch_type == ECSCluster.LaunchType.FARGATE
+            else "bridge"
+        )
 
         for service_name, service in active_services.items():
-            container_def, service_cpu, service_memory, service_volumes = self._convert_preprocessed_service(
-                service=service,
-                launch_type=cluster.launch_type,
-                network_mode=network_mode,
-                region=cluster.aws_region,
-                efs_config=efs_config,
+            container_def, service_cpu, service_memory, service_volumes = (
+                self._convert_preprocessed_service(
+                    service=service,
+                    launch_type=cluster.launch_type,
+                    network_mode=network_mode,
+                    region=cluster.aws_region,
+                    efs_config=efs_config,
+                )
             )
             container_definitions.append(container_def)
             total_cpu += service_cpu
             total_memory += service_memory
 
             for vol in service_volumes:
-                all_volumes.setdefault(vol['name'], vol)
+                all_volumes.setdefault(vol["name"], vol)
 
         # Add EFS volume definitions for named volumes
         for vol in self._convert_efs_volumes(preprocessed.named_volumes, efs_config):
-            all_volumes.setdefault(vol['name'], vol)
+            all_volumes.setdefault(vol["name"], vol)
 
         content_for_hash = json.dumps(preprocessed.to_dict(), sort_keys=True)
         compose_hash = hashlib.sha256(content_for_hash.encode()).hexdigest()
@@ -260,7 +290,7 @@ class ComposeToECSConverter(BaseService):
 
     def convert_per_service(
         self,
-        preprocessed: 'PreprocessedCompose',
+        preprocessed: "PreprocessedCompose",
         cluster: ECSCluster,
         project_name: str,
         efs_config: Optional[Dict[str, Dict[str, str]]] = None,
@@ -304,7 +334,11 @@ class ComposeToECSConverter(BaseService):
 
         active_services = self._validate_preprocessed(preprocessed, strict_mode)
 
-        network_mode = 'awsvpc' if cluster.launch_type == ECSCluster.LaunchType.FARGATE else 'bridge'
+        network_mode = (
+            "awsvpc"
+            if cluster.launch_type == ECSCluster.LaunchType.FARGATE
+            else "bridge"
+        )
 
         content_for_hash = json.dumps(preprocessed.to_dict(), sort_keys=True)
         compose_hash = hashlib.sha256(content_for_hash.encode()).hexdigest()
@@ -319,35 +353,41 @@ class ComposeToECSConverter(BaseService):
                 build_key = f"{os.path.normpath(service.build_info.context)}:{service.build_info.dockerfile}"
                 if build_key in shared_images:
                     service.image_name = shared_images[build_key]
-                    service.config['image'] = shared_images[build_key]
+                    service.config["image"] = shared_images[build_key]
 
             # Inject infrastructure environment variables
             if infrastructure_env:
-                self._apply_infrastructure_env(service, service_name, infrastructure_env)
+                self._apply_infrastructure_env(
+                    service, service_name, infrastructure_env
+                )
 
-            container_def, service_cpu, service_memory, service_volumes = self._convert_preprocessed_service(
-                service=service,
-                launch_type=cluster.launch_type,
-                network_mode=network_mode,
-                region=cluster.aws_region,
-                efs_config=efs_config,
+            container_def, service_cpu, service_memory, service_volumes = (
+                self._convert_preprocessed_service(
+                    service=service,
+                    launch_type=cluster.launch_type,
+                    network_mode=network_mode,
+                    region=cluster.aws_region,
+                    efs_config=efs_config,
+                )
             )
 
             # Per-service mode: each task has one container, so cross-container
             # dependencies (from compose depends_on/links) are invalid in ECS.
-            container_def.pop('dependsOn', None)
-            container_def.pop('links', None)
+            container_def.pop("dependsOn", None)
+            container_def.pop("links", None)
 
             # Move matching env vars to ECS secrets list
-            if secrets_arns and 'environment' in container_def:
+            if secrets_arns and "environment" in container_def:
                 self._apply_secrets(container_def, secrets_arns)
 
             # Collect volumes (service-level + EFS named volumes)
             all_volumes: Dict[str, Dict[str, Any]] = {}
             for vol in service_volumes:
-                all_volumes.setdefault(vol['name'], vol)
-            for vol in self._convert_efs_volumes(preprocessed.named_volumes, efs_config):
-                all_volumes.setdefault(vol['name'], vol)
+                all_volumes.setdefault(vol["name"], vol)
+            for vol in self._convert_efs_volumes(
+                preprocessed.named_volumes, efs_config
+            ):
+                all_volumes.setdefault(vol["name"], vol)
 
             # Per-service resource overrides
             resource_override = service_resources.get(service_name, {})
@@ -357,13 +397,13 @@ class ComposeToECSConverter(BaseService):
             # hard limits (cpu=256, memory=512) while the task gets the full
             # override allocation — so the container OOM-kills long before it
             # can use the memory the task was billed for.
-            override_cpu = resource_override.get('cpu')
-            override_memory = resource_override.get('memory')
+            override_cpu = resource_override.get("cpu")
+            override_memory = resource_override.get("memory")
             if override_cpu is not None:
-                container_def['cpu'] = int(override_cpu)
+                container_def["cpu"] = int(override_cpu)
                 service_cpu = int(override_cpu)
             if override_memory is not None:
-                container_def['memory'] = int(override_memory)
+                container_def["memory"] = int(override_memory)
                 service_memory = int(override_memory)
 
             task_family_name = sanitize_name(f"{project_name}-{service_name}")
@@ -397,9 +437,9 @@ class ComposeToECSConverter(BaseService):
 
     def _validate_preprocessed(
         self,
-        preprocessed: 'PreprocessedCompose',
+        preprocessed: "PreprocessedCompose",
         strict_mode: bool,
-    ) -> Dict[str, 'PreprocessedService']:
+    ) -> Dict[str, "PreprocessedService"]:
         """Validate preprocessed data and return active services."""
         if preprocessed.errors:
             raise ComposeConversionError(
@@ -443,10 +483,14 @@ class ComposeToECSConverter(BaseService):
             total_cpu, total_memory, override_cpu, override_memory
         )
 
-        existing = ECSTaskDefinition.objects.filter(
-            cluster=cluster,
-            name=task_family_name,
-        ).order_by('-revision').first()
+        existing = (
+            ECSTaskDefinition.objects.filter(
+                cluster=cluster,
+                name=task_family_name,
+            )
+            .order_by("-revision")
+            .first()
+        )
 
         revision = (existing.revision + 1) if existing else 1
 
@@ -460,40 +504,50 @@ class ComposeToECSConverter(BaseService):
             cpu=str(final_cpu),
             memory=str(final_memory),
             requires_compatibilities=(
-                ['FARGATE'] if cluster.launch_type == ECSCluster.LaunchType.FARGATE else ['EC2']
+                ["FARGATE"]
+                if cluster.launch_type == ECSCluster.LaunchType.FARGATE
+                else ["EC2"]
             ),
-            network_mode='awsvpc' if cluster.launch_type == ECSCluster.LaunchType.FARGATE else 'bridge',
+            network_mode=(
+                "awsvpc"
+                if cluster.launch_type == ECSCluster.LaunchType.FARGATE
+                else "bridge"
+            ),
             volumes=volumes,
             status=ECSTaskDefinition.Status.DRAFT,
         )
 
     @staticmethod
-    def _apply_secrets(container_def: Dict[str, Any], secrets_arns: Dict[str, str]) -> None:
+    def _apply_secrets(
+        container_def: Dict[str, Any], secrets_arns: Dict[str, str]
+    ) -> None:
         """Move env vars matching secrets_arns keys into ECS secrets list."""
         remaining_env = []
-        ecs_secrets = container_def.get('secrets', [])
-        for env_entry in container_def['environment']:
-            env_name = env_entry['name']
+        ecs_secrets = container_def.get("secrets", [])
+        for env_entry in container_def["environment"]:
+            env_name = env_entry["name"]
             if env_name in secrets_arns:
-                ecs_secrets.append({
-                    'name': env_name,
-                    'valueFrom': secrets_arns[env_name],
-                })
+                ecs_secrets.append(
+                    {
+                        "name": env_name,
+                        "valueFrom": secrets_arns[env_name],
+                    }
+                )
             else:
                 remaining_env.append(env_entry)
-        container_def['environment'] = remaining_env
+        container_def["environment"] = remaining_env
         if ecs_secrets:
-            container_def['secrets'] = ecs_secrets
+            container_def["secrets"] = ecs_secrets
 
     @staticmethod
     def _apply_infrastructure_env(
-        service: 'PreprocessedService',
+        service: "PreprocessedService",
         service_name: str,
         infrastructure_env: Dict[str, Any],
     ) -> None:
         """Inject infrastructure-derived env vars into a service's env_vars."""
         # Universal vars (stored under '_universal' key)
-        universal = infrastructure_env.get('_universal', {})
+        universal = infrastructure_env.get("_universal", {})
         if universal:
             for key, value in universal.items():
                 service.env_vars.setdefault(key, value)
@@ -516,7 +570,7 @@ class ComposeToECSConverter(BaseService):
 
     def _convert_preprocessed_service(
         self,
-        service: 'PreprocessedService',
+        service: "PreprocessedService",
         launch_type: str,
         network_mode: str,
         region: str,
@@ -538,57 +592,64 @@ class ComposeToECSConverter(BaseService):
         # Use pre-determined image name from preprocessing
         image = service.image_name
         if not image:
-            image = config.get('image')
+            image = config.get("image")
             if not image:
                 raise ComposeConversionError(
                     f"Service '{service.name}' has no image configured"
                 )
 
         container_def = {
-            'name': container_name,
-            'image': image,
-            'essential': config.get('essential', True),
+            "name": container_name,
+            "image": image,
+            "essential": config.get("essential", True),
         }
 
         cpu, memory = self._convert_resources(config, service.name)
-        container_def['cpu'] = cpu
-        container_def['memory'] = memory
+        container_def["cpu"] = cpu
+        container_def["memory"] = memory
 
-        if 'ports' in config:
-            port_mappings = self._convert_ports(config['ports'], network_mode)
+        if "ports" in config:
+            port_mappings = self._convert_ports(config["ports"], network_mode)
             # Add name to port mappings for ECS Service Connect compatibility
             for pm in port_mappings:
-                if 'name' not in pm:
-                    pm['name'] = container_name
-            container_def['portMappings'] = port_mappings
+                if "name" not in pm:
+                    pm["name"] = container_name
+            container_def["portMappings"] = port_mappings
 
         # Use pre-parsed environment variables from preprocessing
         environment = []
         for key, value in service.env_vars.items():
-            environment.append({'name': key, 'value': str(value) if value is not None else ''})
-        container_def['environment'] = environment
+            environment.append(
+                {"name": key, "value": str(value) if value is not None else ""}
+            )
+        container_def["environment"] = environment
 
-        if 'secrets' in config:
-            container_def['secrets'] = self._convert_secrets(
-                config['secrets'], region=region,
+        if "secrets" in config:
+            container_def["secrets"] = self._convert_secrets(
+                config["secrets"],
+                region=region,
             )
 
-        if 'command' in config:
-            container_def['command'] = self._convert_command(config['command'])
+        if "command" in config:
+            container_def["command"] = self._convert_command(config["command"])
 
-        if 'entrypoint' in config:
-            container_def['entryPoint'] = self._convert_command(config['entrypoint'])
+        if "entrypoint" in config:
+            container_def["entryPoint"] = self._convert_command(config["entrypoint"])
 
-        if 'working_dir' in config:
-            container_def['workingDirectory'] = config['working_dir']
+        if "working_dir" in config:
+            container_def["workingDirectory"] = config["working_dir"]
 
-        if 'user' in config:
-            container_def['user'] = str(config['user'])
+        if "user" in config:
+            container_def["user"] = str(config["user"])
 
-        if 'healthcheck' in config:
-            container_def['healthCheck'] = self._convert_healthcheck(config['healthcheck'])
+        if "healthcheck" in config:
+            container_def["healthCheck"] = self._convert_healthcheck(
+                config["healthcheck"]
+            )
 
-        container_def['logConfiguration'] = self._get_default_log_config(container_name, region)
+        container_def["logConfiguration"] = self._get_default_log_config(
+            container_name, region
+        )
 
         # Convert volumes (with optional EFS support)
         volumes = []
@@ -600,14 +661,14 @@ class ComposeToECSConverter(BaseService):
                 efs_config=efs_config,
             )
             if mounts:
-                container_def['mountPoints'] = mounts
+                container_def["mountPoints"] = mounts
             volumes = volume_defs
 
-        if 'depends_on' in config:
-            container_def['dependsOn'] = self._convert_depends_on(config['depends_on'])
+        if "depends_on" in config:
+            container_def["dependsOn"] = self._convert_depends_on(config["depends_on"])
 
-        if 'links' in config:
-            container_def['links'] = config['links']
+        if "links" in config:
+            container_def["links"] = config["links"]
 
         return container_def, cpu, memory, volumes
 
@@ -616,8 +677,8 @@ class ComposeToECSConverter(BaseService):
         name: str,
         config: Dict[str, Any],
         launch_type: str,
-        network_mode: str = 'awsvpc',
-        region: str = 'us-east-1',
+        network_mode: str = "awsvpc",
+        region: str = "us-east-1",
     ) -> Tuple[Dict[str, Any], int, int, List[Dict]]:
         """
         Convert a compose service to an ECS container definition.
@@ -627,9 +688,9 @@ class ComposeToECSConverter(BaseService):
         """
         container_name = sanitize_name(name)
 
-        image = config.get('image')
+        image = config.get("image")
         if not image:
-            build_config = config.get('build')
+            build_config = config.get("build")
             if build_config:
                 self._conversion_warnings.append(
                     f"Service '{name}' uses build context. "
@@ -637,60 +698,71 @@ class ComposeToECSConverter(BaseService):
                 )
                 image = f"{container_name}:latest"
             else:
-                raise ComposeConversionError(f"Service '{name}' has no image or build config")
+                raise ComposeConversionError(
+                    f"Service '{name}' has no image or build config"
+                )
 
         container_def = {
-            'name': container_name,
-            'image': image,
-            'essential': config.get('essential', True),
+            "name": container_name,
+            "image": image,
+            "essential": config.get("essential", True),
         }
 
         cpu, memory = self._convert_resources(config, name)
-        container_def['cpu'] = cpu
-        container_def['memory'] = memory
+        container_def["cpu"] = cpu
+        container_def["memory"] = memory
 
-        if 'ports' in config:
-            container_def['portMappings'] = self._convert_ports(config['ports'], network_mode)
-
-        environment = []
-        if 'environment' in config:
-            environment.extend(self._convert_environment(config['environment']))
-        container_def['environment'] = environment
-
-        if 'secrets' in config:
-            container_def['secrets'] = self._convert_secrets(
-                config['secrets'], region=region,
+        if "ports" in config:
+            container_def["portMappings"] = self._convert_ports(
+                config["ports"], network_mode
             )
 
-        if 'command' in config:
-            container_def['command'] = self._convert_command(config['command'])
+        environment = []
+        if "environment" in config:
+            environment.extend(self._convert_environment(config["environment"]))
+        container_def["environment"] = environment
 
-        if 'entrypoint' in config:
-            container_def['entryPoint'] = self._convert_command(config['entrypoint'])
+        if "secrets" in config:
+            container_def["secrets"] = self._convert_secrets(
+                config["secrets"],
+                region=region,
+            )
 
-        if 'working_dir' in config:
-            container_def['workingDirectory'] = config['working_dir']
+        if "command" in config:
+            container_def["command"] = self._convert_command(config["command"])
 
-        if 'user' in config:
-            container_def['user'] = str(config['user'])
+        if "entrypoint" in config:
+            container_def["entryPoint"] = self._convert_command(config["entrypoint"])
 
-        if 'healthcheck' in config:
-            container_def['healthCheck'] = self._convert_healthcheck(config['healthcheck'])
+        if "working_dir" in config:
+            container_def["workingDirectory"] = config["working_dir"]
 
-        container_def['logConfiguration'] = self._get_default_log_config(container_name, region)
+        if "user" in config:
+            container_def["user"] = str(config["user"])
+
+        if "healthcheck" in config:
+            container_def["healthCheck"] = self._convert_healthcheck(
+                config["healthcheck"]
+            )
+
+        container_def["logConfiguration"] = self._get_default_log_config(
+            container_name, region
+        )
 
         volumes = []
-        if 'volumes' in config:
-            mounts, volume_defs = self._convert_volumes(config['volumes'], container_name, launch_type)
+        if "volumes" in config:
+            mounts, volume_defs = self._convert_volumes(
+                config["volumes"], container_name, launch_type
+            )
             if mounts:
-                container_def['mountPoints'] = mounts
+                container_def["mountPoints"] = mounts
             volumes = volume_defs
 
-        if 'depends_on' in config:
-            container_def['dependsOn'] = self._convert_depends_on(config['depends_on'])
+        if "depends_on" in config:
+            container_def["dependsOn"] = self._convert_depends_on(config["depends_on"])
 
-        if 'links' in config:
-            container_def['links'] = config['links']
+        if "links" in config:
+            container_def["links"] = config["links"]
 
         return container_def, cpu, memory, volumes
 
@@ -707,29 +779,29 @@ class ComposeToECSConverter(BaseService):
         cpu = 256
         memory = 512
 
-        deploy = config.get('deploy', {})
-        resources = deploy.get('resources', {})
+        deploy = config.get("deploy", {})
+        resources = deploy.get("resources", {})
 
-        limits = resources.get('limits', {})
-        reservations = resources.get('reservations', {})
+        limits = resources.get("limits", {})
+        reservations = resources.get("reservations", {})
 
-        if 'cpus' in limits:
-            cpu = int(float(limits['cpus']) * 1024)
-        elif 'cpus' in reservations:
-            cpu = int(float(reservations['cpus']) * 1024)
+        if "cpus" in limits:
+            cpu = int(float(limits["cpus"]) * 1024)
+        elif "cpus" in reservations:
+            cpu = int(float(reservations["cpus"]) * 1024)
 
-        if 'memory' in limits:
-            memory = self._parse_memory(limits['memory'])
-        elif 'memory' in reservations:
-            memory = self._parse_memory(reservations['memory'])
+        if "memory" in limits:
+            memory = self._parse_memory(limits["memory"])
+        elif "memory" in reservations:
+            memory = self._parse_memory(reservations["memory"])
 
-        if 'mem_limit' in config:
-            memory = self._parse_memory(config['mem_limit'])
-        if 'mem_reservation' in config:
-            memory = max(memory, self._parse_memory(config['mem_reservation']))
+        if "mem_limit" in config:
+            memory = self._parse_memory(config["mem_limit"])
+        if "mem_reservation" in config:
+            memory = max(memory, self._parse_memory(config["mem_reservation"]))
 
-        if 'cpus' in config:
-            cpu = int(float(config['cpus']) * 1024)
+        if "cpus" in config:
+            cpu = int(float(config["cpus"]) * 1024)
 
         return cpu, memory
 
@@ -739,19 +811,23 @@ class ComposeToECSConverter(BaseService):
             return value
 
         memory_str = str(value).lower().strip()
-        match = re.match(r'^(\d+(?:\.\d+)?)\s*([kmgb])?(?:b)?$', memory_str)
+        match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgb])?(?:b)?$", memory_str)
 
         if not match:
-            logger.warning(f"Unrecognized memory format '{memory_str}', defaulting to 512 MiB")
+            logger.warning(
+                f"Unrecognized memory format '{memory_str}', defaulting to 512 MiB"
+            )
             return 512
 
         num = float(match.group(1))
-        unit = match.group(2) or 'm'
+        unit = match.group(2) or "m"
 
-        multipliers = {'k': 1/1024, 'm': 1, 'g': 1024, 'b': 1/1024/1024}
+        multipliers = {"k": 1 / 1024, "m": 1, "g": 1024, "b": 1 / 1024 / 1024}
         return int(num * multipliers.get(unit, 1))
 
-    def _convert_ports(self, ports: List, network_mode: str = 'awsvpc') -> List[Dict[str, Any]]:
+    def _convert_ports(
+        self, ports: List, network_mode: str = "awsvpc"
+    ) -> List[Dict[str, Any]]:
         """Convert port mappings.
 
         For awsvpc network mode (Fargate), host port must equal container port.
@@ -761,30 +837,34 @@ class ComposeToECSConverter(BaseService):
         for port in ports:
             if isinstance(port, int):
                 mapping = {
-                    'containerPort': port,
-                    'protocol': 'tcp',
+                    "containerPort": port,
+                    "protocol": "tcp",
                 }
                 # For awsvpc, host port must match container port
-                if network_mode == 'awsvpc':
-                    mapping['hostPort'] = port
+                if network_mode == "awsvpc":
+                    mapping["hostPort"] = port
                 mappings.append(mapping)
             elif isinstance(port, str):
-                parts = port.replace('-', ':').split(':')
-                container_port = int(parts[-1].split('/')[0])
-                protocol = 'udp' if '/udp' in port else 'tcp'
+                parts = port.replace("-", ":").split(":")
+                container_port = int(parts[-1].split("/")[0])
+                protocol = "udp" if "/udp" in port else "tcp"
 
                 mapping = {
-                    'containerPort': container_port,
-                    'protocol': protocol,
+                    "containerPort": container_port,
+                    "protocol": protocol,
                 }
 
                 # For awsvpc mode, host port must equal container port
-                if network_mode == 'awsvpc':
-                    mapping['hostPort'] = container_port
+                if network_mode == "awsvpc":
+                    mapping["hostPort"] = container_port
                     # Warn if a different host port was specified
                     if len(parts) >= 2:
                         host_port = parts[-2]
-                        if host_port and host_port.isdigit() and int(host_port) != container_port:
+                        if (
+                            host_port
+                            and host_port.isdigit()
+                            and int(host_port) != container_port
+                        ):
                             self._conversion_warnings.append(
                                 f"Port mapping {port}: host port changed to {container_port} "
                                 f"(awsvpc mode requires host port = container port)"
@@ -792,19 +872,19 @@ class ComposeToECSConverter(BaseService):
                 elif len(parts) >= 2:
                     host_port = parts[-2]
                     if host_port and host_port.isdigit():
-                        mapping['hostPort'] = int(host_port)
+                        mapping["hostPort"] = int(host_port)
 
                 mappings.append(mapping)
             elif isinstance(port, dict):
-                container_port = port.get('target', port.get('container_port'))
+                container_port = port.get("target", port.get("container_port"))
                 mapping = {
-                    'containerPort': container_port,
-                    'protocol': port.get('protocol', 'tcp'),
+                    "containerPort": container_port,
+                    "protocol": port.get("protocol", "tcp"),
                 }
-                if network_mode == 'awsvpc':
-                    mapping['hostPort'] = container_port
+                if network_mode == "awsvpc":
+                    mapping["hostPort"] = container_port
                 else:
-                    mapping['hostPort'] = port.get('published', port.get('host_port'))
+                    mapping["hostPort"] = port.get("published", port.get("host_port"))
                 mappings.append(mapping)
 
         return mappings
@@ -815,20 +895,27 @@ class ComposeToECSConverter(BaseService):
 
         if isinstance(env, dict):
             for key, value in env.items():
-                variables.append({'name': key, 'value': str(value) if value is not None else ''})
+                variables.append(
+                    {"name": key, "value": str(value) if value is not None else ""}
+                )
         elif isinstance(env, list):
             for item in env:
                 if isinstance(item, str):
-                    if '=' in item:
-                        key, value = item.split('=', 1)
-                        variables.append({'name': key, 'value': value})
+                    if "=" in item:
+                        key, value = item.split("=", 1)
+                        variables.append({"name": key, "value": value})
                     else:
                         self._conversion_warnings.append(
                             f"Environment variable '{item}' has no value and will be skipped"
                         )
                 elif isinstance(item, dict):
                     for key, value in item.items():
-                        variables.append({'name': key, 'value': str(value) if value is not None else ''})
+                        variables.append(
+                            {
+                                "name": key,
+                                "value": str(value) if value is not None else "",
+                            }
+                        )
 
         return variables
 
@@ -874,15 +961,17 @@ class ComposeToECSConverter(BaseService):
                     f"in AWS Secrets Manager"
                 )
             elif isinstance(secret, dict):
-                name = secret.get('source', secret.get('name', ''))
+                name = secret.get("source", secret.get("name", ""))
                 if name:
-                    ecs_secrets.append({
-                        'name': name.upper().replace('-', '_'),
-                        'valueFrom': (
-                            f"arn:aws:secretsmanager:{region}:"
-                            f"{self._account_id}:secret:{name}"
-                        ),
-                    })
+                    ecs_secrets.append(
+                        {
+                            "name": name.upper().replace("-", "_"),
+                            "valueFrom": (
+                                f"arn:aws:secretsmanager:{region}:"
+                                f"{self._account_id}:secret:{name}"
+                            ),
+                        }
+                    )
 
         return ecs_secrets
 
@@ -904,23 +993,25 @@ class ComposeToECSConverter(BaseService):
         """Convert health check to ECS format."""
         ecs_health = {}
 
-        test = healthcheck.get('test', [])
+        test = healthcheck.get("test", [])
         if isinstance(test, str):
-            ecs_health['command'] = ['CMD-SHELL', test]
+            ecs_health["command"] = ["CMD-SHELL", test]
         elif isinstance(test, list):
-            if test and test[0] in ('CMD', 'CMD-SHELL', 'NONE'):
-                ecs_health['command'] = test
+            if test and test[0] in ("CMD", "CMD-SHELL", "NONE"):
+                ecs_health["command"] = test
             else:
-                ecs_health['command'] = ['CMD'] + test
+                ecs_health["command"] = ["CMD"] + test
 
-        if 'interval' in healthcheck:
-            ecs_health['interval'] = self._parse_duration(healthcheck['interval'])
-        if 'timeout' in healthcheck:
-            ecs_health['timeout'] = self._parse_duration(healthcheck['timeout'])
-        if 'retries' in healthcheck:
-            ecs_health['retries'] = healthcheck['retries']
-        if 'start_period' in healthcheck:
-            ecs_health['startPeriod'] = self._parse_duration(healthcheck['start_period'])
+        if "interval" in healthcheck:
+            ecs_health["interval"] = self._parse_duration(healthcheck["interval"])
+        if "timeout" in healthcheck:
+            ecs_health["timeout"] = self._parse_duration(healthcheck["timeout"])
+        if "retries" in healthcheck:
+            ecs_health["retries"] = healthcheck["retries"]
+        if "start_period" in healthcheck:
+            ecs_health["startPeriod"] = self._parse_duration(
+                healthcheck["start_period"]
+            )
 
         return ecs_health
 
@@ -930,16 +1021,18 @@ class ComposeToECSConverter(BaseService):
             return value
 
         duration_str = str(value).lower().strip()
-        match = re.match(r'^(\d+)\s*([smh])?$', duration_str)
+        match = re.match(r"^(\d+)\s*([smh])?$", duration_str)
 
         if not match:
-            logger.warning(f"Unrecognized duration format '{duration_str}', defaulting to 30s")
+            logger.warning(
+                f"Unrecognized duration format '{duration_str}', defaulting to 30s"
+            )
             return 30
 
         num = int(match.group(1))
-        unit = match.group(2) or 's'
+        unit = match.group(2) or "s"
 
-        multipliers = {'s': 1, 'm': 60, 'h': 3600}
+        multipliers = {"s": 1, "m": 60, "h": 3600}
         return num * multipliers.get(unit, 1)
 
     # ------------------------------------------------------------------
@@ -979,46 +1072,49 @@ class ComposeToECSConverter(BaseService):
         for i, volume in enumerate(volumes):
             # Normalize raw compose entries into VolumeInfo objects
             if isinstance(volume, str):
-                parts = volume.split(':')
+                parts = volume.split(":")
                 if len(parts) < 2:
                     continue
                 source = parts[0]
                 target = parts[1]
-                read_only = len(parts) > 2 and 'ro' in parts[2]
+                read_only = len(parts) > 2 and "ro" in parts[2]
 
-                if source.startswith('/') or source.startswith('./'):
+                if source.startswith("/") or source.startswith("./"):
                     vol = VolumeInfo(
-                        source=source, target=target,
+                        source=source,
+                        target=target,
                         volume_type=VolumeType.HOST_PATH,
                         read_only=read_only,
                     )
                 else:
                     vol = VolumeInfo(
-                        source=source, target=target,
+                        source=source,
+                        target=target,
                         volume_type=VolumeType.NAMED,
                         read_only=read_only,
                     )
 
             elif isinstance(volume, dict) and not isinstance(volume, VolumeInfo):
-                source = volume.get('source', '')
-                target = volume.get('target', '')
-                read_only = volume.get('read_only', False)
-                raw_type = volume.get('type', volume.get('volume_type', 'volume'))
+                source = volume.get("source", "")
+                target = volume.get("target", "")
+                read_only = volume.get("read_only", False)
+                raw_type = volume.get("type", volume.get("volume_type", "volume"))
 
-                if raw_type == 'bind':
+                if raw_type == "bind":
                     vtype = VolumeType.BIND
-                elif raw_type == 'tmpfs':
+                elif raw_type == "tmpfs":
                     vtype = VolumeType.TMPFS
-                elif raw_type in ('host_path',):
+                elif raw_type in ("host_path",):
                     vtype = VolumeType.HOST_PATH
                 else:
                     vtype = VolumeType.NAMED
 
                 vol = VolumeInfo(
-                    source=source, target=target,
+                    source=source,
+                    target=target,
                     volume_type=vtype,
                     read_only=read_only,
-                    incompatible=volume.get('incompatible', False),
+                    incompatible=volume.get("incompatible", False),
                 )
 
             elif isinstance(volume, VolumeInfo):
@@ -1044,17 +1140,21 @@ class ComposeToECSConverter(BaseService):
                 # Check if this volume has EFS configuration
                 if volume_name in efs_config:
                     efs_conf = efs_config[volume_name]
-                    volume_def = self._create_efs_volume_definition(volume_name, efs_conf)
+                    volume_def = self._create_efs_volume_definition(
+                        volume_name, efs_conf
+                    )
                     volume_defs.append(volume_def)
                 else:
-                    if not any(v.get('name') == volume_name for v in volume_defs):
-                        volume_defs.append({'name': volume_name})
+                    if not any(v.get("name") == volume_name for v in volume_defs):
+                        volume_defs.append({"name": volume_name})
 
-                mount_points.append({
-                    'sourceVolume': volume_name,
-                    'containerPath': vol.target,
-                    'readOnly': vol.read_only,
-                })
+                mount_points.append(
+                    {
+                        "sourceVolume": volume_name,
+                        "containerPath": vol.target,
+                        "readOnly": vol.read_only,
+                    }
+                )
 
             elif vol.volume_type == VolumeType.TMPFS:
                 self._conversion_warnings.append(
@@ -1064,25 +1164,30 @@ class ComposeToECSConverter(BaseService):
             elif vol.volume_type in (VolumeType.HOST_PATH, VolumeType.BIND):
                 is_fargate = (
                     launch_type == ECSCluster.LaunchType.FARGATE
-                    or launch_type == 'fargate'
+                    or launch_type == "fargate"
                 )
                 if is_fargate:
-                    label = "Host path volumes" if vol.volume_type == VolumeType.HOST_PATH else "Bind mounts"
+                    label = (
+                        "Host path volumes"
+                        if vol.volume_type == VolumeType.HOST_PATH
+                        else "Bind mounts"
+                    )
                     self._conversion_warnings.append(
                         f"{label} not supported in Fargate: {vol.source}"
                     )
                     continue
 
                 volume_name = f"{container_name}-vol-{i}"
-                volume_defs.append({
-                    'name': volume_name,
-                    'host': {'sourcePath': vol.source}
-                })
-                mount_points.append({
-                    'sourceVolume': volume_name,
-                    'containerPath': vol.target,
-                    'readOnly': vol.read_only,
-                })
+                volume_defs.append(
+                    {"name": volume_name, "host": {"sourcePath": vol.source}}
+                )
+                mount_points.append(
+                    {
+                        "sourceVolume": volume_name,
+                        "containerPath": vol.target,
+                        "readOnly": vol.read_only,
+                    }
+                )
 
         return mount_points, volume_defs
 
@@ -1093,28 +1198,32 @@ class ComposeToECSConverter(BaseService):
     ) -> Dict[str, Any]:
         """Create an EFS volume definition for ECS."""
         volume_def: Dict[str, Any] = {
-            'name': volume_name,
-            'efsVolumeConfiguration': {
-                'fileSystemId': efs_conf['file_system_id'],
-                'transitEncryption': 'ENABLED',
-            }
+            "name": volume_name,
+            "efsVolumeConfiguration": {
+                "fileSystemId": efs_conf["file_system_id"],
+                "transitEncryption": "ENABLED",
+            },
         }
 
-        if 'access_point_id' in efs_conf:
-            volume_def['efsVolumeConfiguration']['authorizationConfig'] = {
-                'accessPointId': efs_conf['access_point_id'],
-                'iam': 'DISABLED',
+        if "access_point_id" in efs_conf:
+            volume_def["efsVolumeConfiguration"]["authorizationConfig"] = {
+                "accessPointId": efs_conf["access_point_id"],
+                "iam": "DISABLED",
             }
 
-        if 'root_directory' in efs_conf and 'access_point_id' not in efs_conf:
-            volume_def['efsVolumeConfiguration']['rootDirectory'] = efs_conf['root_directory']
+        if "root_directory" in efs_conf and "access_point_id" not in efs_conf:
+            volume_def["efsVolumeConfiguration"]["rootDirectory"] = efs_conf[
+                "root_directory"
+            ]
 
-        if efs_conf.get('iam_enabled'):
-            if 'authorizationConfig' in volume_def['efsVolumeConfiguration']:
-                volume_def['efsVolumeConfiguration']['authorizationConfig']['iam'] = 'ENABLED'
+        if efs_conf.get("iam_enabled"):
+            if "authorizationConfig" in volume_def["efsVolumeConfiguration"]:
+                volume_def["efsVolumeConfiguration"]["authorizationConfig"][
+                    "iam"
+                ] = "ENABLED"
             else:
-                volume_def['efsVolumeConfiguration']['authorizationConfig'] = {
-                    'iam': 'ENABLED'
+                volume_def["efsVolumeConfiguration"]["authorizationConfig"] = {
+                    "iam": "ENABLED"
                 }
 
         return volume_def
@@ -1128,7 +1237,7 @@ class ComposeToECSConverter(BaseService):
         volume_defs = []
 
         for volume_name, efs_conf in efs_config.items():
-            if 'file_system_id' not in efs_conf:
+            if "file_system_id" not in efs_conf:
                 self._conversion_warnings.append(
                     f"EFS config for volume '{volume_name}' missing file_system_id"
                 )
@@ -1155,37 +1264,47 @@ class ComposeToECSConverter(BaseService):
         if isinstance(depends_on, list):
             for dep in depends_on:
                 if isinstance(dep, str):
-                    dependencies.append({
-                        'containerName': sanitize_name(dep),
-                        'condition': 'START'
-                    })
+                    dependencies.append(
+                        {"containerName": sanitize_name(dep), "condition": "START"}
+                    )
                 elif isinstance(dep, dict):
                     for name, config in dep.items():
-                        condition = 'HEALTHY' if config.get('condition') == 'service_healthy' else 'START'
-                        dependencies.append({
-                            'containerName': sanitize_name(name),
-                            'condition': condition
-                        })
+                        condition = (
+                            "HEALTHY"
+                            if config.get("condition") == "service_healthy"
+                            else "START"
+                        )
+                        dependencies.append(
+                            {
+                                "containerName": sanitize_name(name),
+                                "condition": condition,
+                            }
+                        )
         elif isinstance(depends_on, dict):
             for name, config in depends_on.items():
-                condition = 'HEALTHY' if config.get('condition') == 'service_healthy' else 'START'
-                dependencies.append({
-                    'containerName': sanitize_name(name),
-                    'condition': condition
-                })
+                condition = (
+                    "HEALTHY"
+                    if config.get("condition") == "service_healthy"
+                    else "START"
+                )
+                dependencies.append(
+                    {"containerName": sanitize_name(name), "condition": condition}
+                )
 
         return dependencies
 
-    def _get_default_log_config(self, container_name: str, region: str = 'us-east-1') -> Dict[str, Any]:
+    def _get_default_log_config(
+        self, container_name: str, region: str = "us-east-1"
+    ) -> Dict[str, Any]:
         """Get default CloudWatch Logs configuration."""
         return {
-            'logDriver': 'awslogs',
-            'options': {
-                'awslogs-group': f'/ecs/{container_name}',
-                'awslogs-region': region,
-                'awslogs-stream-prefix': 'ecs',
-                'awslogs-create-group': 'true',
-            }
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": f"/ecs/{container_name}",
+                "awslogs-region": region,
+                "awslogs-stream-prefix": "ecs",
+                "awslogs-create-group": "true",
+            },
         }
 
     def _calculate_fargate_resources(

@@ -41,9 +41,7 @@ def load(path: str | Path) -> dict[str, Any]:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
-        raise ValueError(
-            f"rc.yml v1 must be a mapping, got {type(raw).__name__}"
-        )
+        raise ValueError(f"rc.yml v1 must be a mapping, got {type(raw).__name__}")
     return raw
 
 

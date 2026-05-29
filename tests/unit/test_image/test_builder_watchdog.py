@@ -6,14 +6,11 @@ and retries once without --cache-to.
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from remote_compose.image.builder import (
-    ImageBuildError,
     ImageBuildSpec,
     ImageBuilder,
     _disable_buildcache_set,
@@ -52,13 +49,16 @@ def _make_fake_popen(*, exit_code=0, hang=False, lines=None):
         if hang:
             # readline blocks until process is killed
             done = {"flag": False}
+
             def _readline():
                 if done["flag"]:
                     return ""
                 # Simulate blocking; we yield empty string only after kill
                 import time as _t
+
                 _t.sleep(0.05)
                 return ""
+
             proc.stdout = mock.Mock()
             proc.stdout.readline = _readline
             proc.stderr = mock.Mock()
@@ -67,6 +67,7 @@ def _make_fake_popen(*, exit_code=0, hang=False, lines=None):
             def _kill():
                 done["flag"] = True
                 proc.poll.side_effect = [exit_code or -9]
+
             proc.kill = _kill
         else:
             it_out = iter(lines + [""])
@@ -96,18 +97,20 @@ class TestWatchdogKillsHangAndRetriesWithoutCacheTo:
                 return _make_fake_popen(hang=True)(cmd, *args, **kwargs)
             return _make_fake_popen(exit_code=0)(cmd, *args, **kwargs)
 
-        with mock.patch("subprocess.Popen", side_effect=factory), \
-             mock.patch("subprocess.run") as srun:
+        with (
+            mock.patch("subprocess.Popen", side_effect=factory),
+            mock.patch("subprocess.run") as srun,
+        ):
             srun.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             tags = ImageBuilder(
-                docker_bin="docker", progress=events.append,
+                docker_bin="docker",
+                progress=events.append,
             ).build(spec)
 
         assert tags == spec.tags
         # Must have hit the watchdog warning + retried.
         assert any(
-            "buildkit went silent" in e and "cache-to" in e
-            for e in events
+            "buildkit went silent" in e and "cache-to" in e for e in events
         ), f"missing watchdog warning. events={events}"
         # Retry uses subprocess.run (no cache_to → simple path).
         assert srun.called, "retry should use subprocess.run after dropping cache_to"
@@ -121,15 +124,15 @@ class TestDisableBuildcacheEnvVar:
         with mock.patch("subprocess.run") as srun:
             srun.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             ImageBuilder(
-                docker_bin="docker", progress=events.append,
+                docker_bin="docker",
+                progress=events.append,
             ).build(spec)
         # Should have used subprocess.run (no cache → simple path) and
         # NOT included --cache-to in the command.
         assert srun.called
         cmd = srun.call_args.args[0]
         assert not any(c.startswith("--cache-") for c in cmd), (
-            f"cache args should be stripped when RC_DISABLE_BUILDCACHE=1. "
-            f"cmd={cmd}"
+            f"cache args should be stripped when RC_DISABLE_BUILDCACHE=1. " f"cmd={cmd}"
         )
 
     def test_unset_passes_cache_args_through(self, spec, monkeypatch):

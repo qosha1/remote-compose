@@ -42,7 +42,8 @@ def test_hash_stable_across_terraform_cache_pollution(tmp_path):
 def test_hash_differs_for_different_emitted_content(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
-    a.mkdir(); b.mkdir()
+    a.mkdir()
+    b.mkdir()
     _seed_emitted(a)
     _seed_emitted(b)
     (b / "main.tf").write_text("# MAIN different\n")

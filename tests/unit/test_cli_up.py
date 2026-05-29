@@ -9,14 +9,12 @@ acknowledgement, and v1-rejection.
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from remote_compose.cli import cli
-
 
 COMPOSE_FIXTURE = textwrap.dedent("""
 services:
@@ -43,6 +41,7 @@ def compose_file(tmp_path):
 # Missing rc.yml + no --from-compose -> clear error
 # ---------------------------------------------------------------------------
 
+
 def test_missing_rcyml_without_from_compose_errors(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
@@ -55,15 +54,27 @@ def test_missing_rcyml_without_from_compose_errors(runner, tmp_path):
 # Scaffold-then-deploy path
 # ---------------------------------------------------------------------------
 
+
 def test_scaffolds_rcyml_when_missing(runner, tmp_path, compose_file):
     rc_yml = tmp_path / "rc.yml"
     # Stub the deploy + secrets steps so we exercise just the scaffold.
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(
             cli,
-            ["-c", str(rc_yml), "up", "--from-compose", str(compose_file),
-             "--region", "us-west-1", "--aws-profile", "default"],
+            [
+                "-c",
+                str(rc_yml),
+                "up",
+                "--from-compose",
+                str(compose_file),
+                "--region",
+                "us-west-1",
+                "--aws-profile",
+                "default",
+            ],
         )
     assert result.exit_code == 0, result.output
     assert rc_yml.exists()
@@ -76,8 +87,10 @@ def test_scaffolds_rcyml_when_missing(runner, tmp_path, compose_file):
 def test_existing_rcyml_skips_scaffold(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: existing\n")
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True) as dispatch, \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True) as dispatch,
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     assert dispatch.called
@@ -90,12 +103,15 @@ def test_existing_rcyml_skips_scaffold(runner, tmp_path):
 # v1 rejection
 # ---------------------------------------------------------------------------
 
+
 def test_v1_rcyml_rejected(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("cluster: legacy\nregion: us-west-2\n")
     # Returns False on v1 -> rc up should raise ClickException.
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=False), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=False):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=False),
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=False),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code != 0
     assert "v2" in result.output.lower()
@@ -105,11 +121,14 @@ def test_v1_rcyml_rejected(runner, tmp_path):
 # --ttl acknowledgement (real enforcement is in rc-e5u.44.14)
 # ---------------------------------------------------------------------------
 
+
 def test_ttl_flag_is_acknowledged(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up", "--ttl", "4h"])
     assert result.exit_code == 0, result.output
     assert "ttl" in result.output.lower()
@@ -119,8 +138,10 @@ def test_ttl_flag_is_acknowledged(runner, tmp_path):
 def test_no_ttl_no_ack_message(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     # The "TTL acknowledged" line must NOT appear when --ttl wasn't passed
@@ -132,12 +153,17 @@ def test_no_ttl_no_ack_message(runner, tmp_path):
 # operate on, with a clear instruction to retry secrets push.
 # ---------------------------------------------------------------------------
 
+
 def test_secrets_push_failure_warns_but_succeeds(runner, tmp_path):
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text("version: 2\nproject: x\n")
-    with patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2",
-               side_effect=RuntimeError("boto3 lol")):
+    with (
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch(
+            "remote_compose.cli_commands.up._secrets_push_v2",
+            side_effect=RuntimeError("boto3 lol"),
+        ),
+    ):
         result = runner.invoke(cli, ["-c", str(rc_yml), "up"])
     assert result.exit_code == 0, result.output
     assert "warn" in result.output.lower()
@@ -155,6 +181,7 @@ def test_secrets_push_failure_warns_but_succeeds(runner, tmp_path):
 
 def test_domain_preflight_uses_rcyml_aws_profile_as_default(runner, tmp_path):
     import textwrap
+
     rc_yml = tmp_path / "rc.yml"
     rc_yml.write_text(textwrap.dedent("""
         version: 2
@@ -183,16 +210,23 @@ def test_domain_preflight_uses_rcyml_aws_profile_as_default(runner, tmp_path):
         sess.client.return_value = r53
         return sess
 
-    with patch("boto3.Session", side_effect=fake_session), \
-         patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True), \
-         patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True), \
-         patch("remote_compose.init_from_compose._patch_rc_yml_domain",
-               return_value={"public_service": "web", "domain": "x.rctest.example.com",
-                             "route53_zone": "rctest.example.com", "aliases": []}):
+    with (
+        patch("boto3.Session", side_effect=fake_session),
+        patch("remote_compose.cli_v2.dispatch_if_v2", return_value=True),
+        patch("remote_compose.cli_commands.up._secrets_push_v2", return_value=True),
+        patch(
+            "remote_compose.init_from_compose._patch_rc_yml_domain",
+            return_value={
+                "public_service": "web",
+                "domain": "x.rctest.example.com",
+                "route53_zone": "rctest.example.com",
+                "aliases": [],
+            },
+        ),
+    ):
         result = runner.invoke(
             cli,
-            ["-c", str(rc_yml), "up",
-             "--domain", "x.rctest.example.com"],
+            ["-c", str(rc_yml), "up", "--domain", "x.rctest.example.com"],
             catch_exceptions=False,
         )
 

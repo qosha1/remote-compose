@@ -8,7 +8,6 @@ Cover:
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -23,13 +22,13 @@ class TestRcInitRemoteBackend:
         from remote_compose.cli import cli as rc_cli
 
         # Stub the bootstrap helpers + STS so we don't touch real AWS.
-        with mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_bucket"
-        ) as bb, mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
-        ) as bl, mock.patch(
-            "boto3.Session"
-        ) as session_cls:
+        with (
+            mock.patch("remote_compose.state_backend.bootstrap.bootstrap_bucket") as bb,
+            mock.patch(
+                "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
+            ) as bl,
+            mock.patch("boto3.Session") as session_cls,
+        ):
             bb.return_value = "033937118837-rc-tfstate"
             bl.return_value = "rc-tfstate-locks"
             sts = mock.MagicMock()
@@ -40,8 +39,14 @@ class TestRcInitRemoteBackend:
             target = tmp_path / "rc.yml"
             result = runner.invoke(
                 rc_cli,
-                ["init", "--remote-backend", "--region", "us-west-2",
-                 "-o", str(target)],
+                [
+                    "init",
+                    "--remote-backend",
+                    "--region",
+                    "us-west-2",
+                    "-o",
+                    str(target),
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -58,13 +63,13 @@ class TestRcInitRemoteBackend:
         rc deploy from any box works without a second manual step."""
         from remote_compose.cli import cli as rc_cli
 
-        with mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_bucket"
-        ) as bb, mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
-        ) as bl, mock.patch(
-            "boto3.Session"
-        ) as session_cls:
+        with (
+            mock.patch("remote_compose.state_backend.bootstrap.bootstrap_bucket") as bb,
+            mock.patch(
+                "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
+            ) as bl,
+            mock.patch("boto3.Session") as session_cls,
+        ):
             bb.return_value = "033937118837-rc-tfstate"
             bl.return_value = "rc-tfstate-locks"
             sts = mock.MagicMock()
@@ -75,8 +80,14 @@ class TestRcInitRemoteBackend:
             target = tmp_path / "rc.yml"
             result = runner.invoke(
                 rc_cli,
-                ["init", "--remote-backend", "--region", "us-west-2",
-                 "-o", str(target)],
+                [
+                    "init",
+                    "--remote-backend",
+                    "--region",
+                    "us-west-2",
+                    "-o",
+                    str(target),
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -89,15 +100,17 @@ class TestRcInitRemoteBackend:
         default). Bootstrap helpers must NOT be called."""
         from remote_compose.cli import cli as rc_cli
 
-        with mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_bucket"
-        ) as bb, mock.patch(
-            "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
-        ) as bl:
+        with (
+            mock.patch("remote_compose.state_backend.bootstrap.bootstrap_bucket") as bb,
+            mock.patch(
+                "remote_compose.state_backend.bootstrap.bootstrap_lock_table"
+            ) as bl,
+        ):
             runner = CliRunner()
             target = tmp_path / "rc.yml"
             result = runner.invoke(
-                rc_cli, ["init", "-o", str(target)],
+                rc_cli,
+                ["init", "-o", str(target)],
             )
 
         assert result.exit_code == 0, result.output
@@ -114,8 +127,10 @@ class TestTerraformBackendValidation:
         """TerraformBackend.validate() raises ConfigError when type=s3 and
         bucket is missing."""
         from remote_compose.config._schema_types import (
-            ConfigError, TerraformBackend,
+            ConfigError,
+            TerraformBackend,
         )
+
         be = TerraformBackend(type="s3", key="x/y/z.tfstate", region="us-west-2")
         with pytest.raises(ConfigError, match="bucket"):
             be.validate()
@@ -124,8 +139,10 @@ class TestTerraformBackendValidation:
         """TerraformBackend.validate() raises ConfigError when type=s3 and
         key is missing."""
         from remote_compose.config._schema_types import (
-            ConfigError, TerraformBackend,
+            ConfigError,
+            TerraformBackend,
         )
+
         be = TerraformBackend(type="s3", bucket="my-bucket", region="us-west-2")
         with pytest.raises(ConfigError, match="key"):
             be.validate()
@@ -133,6 +150,7 @@ class TestTerraformBackendValidation:
     def test_s3_backend_with_required_fields_validates(self):
         """Happy path: bucket+key+region present → validate() returns clean."""
         from remote_compose.config._schema_types import TerraformBackend
+
         be = TerraformBackend(
             type="s3",
             bucket="my-bucket",
@@ -145,6 +163,7 @@ class TestTerraformBackendValidation:
     def test_local_backend_skips_s3_required_field_check(self):
         """Back-compat: type=local doesn't require bucket/key."""
         from remote_compose.config._schema_types import TerraformBackend
+
         be = TerraformBackend(type="local")
         be.validate()  # no raise
 
@@ -153,8 +172,12 @@ class TestTerraformBackendValidation:
         (recommended but not required). Concurrent deploys can corrupt state
         without it."""
         from remote_compose.config._schema_types import TerraformBackend
+
         be = TerraformBackend(
-            type="s3", bucket="b", key="k", region="us-west-2",
+            type="s3",
+            bucket="b",
+            key="k",
+            region="us-west-2",
             # dynamodb_table omitted on purpose
         )
         be.validate()  # no raise

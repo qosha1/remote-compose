@@ -20,16 +20,16 @@ from typing import Iterable
 @dataclass
 class InstanceShape:
     name: str
-    vcpu: int           # 1 vCPU = 1024 ECS CPU units
+    vcpu: int  # 1 vCPU = 1024 ECS CPU units
     memory_gib: int
 
 
 # Conservative t3 ladder. Add m5/m6i family via explicit instance_type.
 T3_LADDER: list[InstanceShape] = [
-    InstanceShape("t3.small",   vcpu=2, memory_gib=2),
-    InstanceShape("t3.medium",  vcpu=2, memory_gib=4),
-    InstanceShape("t3.large",   vcpu=2, memory_gib=8),
-    InstanceShape("t3.xlarge",  vcpu=4, memory_gib=16),
+    InstanceShape("t3.small", vcpu=2, memory_gib=2),
+    InstanceShape("t3.medium", vcpu=2, memory_gib=4),
+    InstanceShape("t3.large", vcpu=2, memory_gib=8),
+    InstanceShape("t3.xlarge", vcpu=4, memory_gib=16),
     InstanceShape("t3.2xlarge", vcpu=8, memory_gib=32),
 ]
 
@@ -70,7 +70,9 @@ def auto_size(
     """
     demands = [t for t in tasks if t.cpu_units > 0 or t.memory_mib > 0]
     if not demands:
-        return Sizing(instance_type=ladder[0].name, min_size=1, desired_size=1, max_size=2)
+        return Sizing(
+            instance_type=ladder[0].name, min_size=1, desired_size=1, max_size=2
+        )
 
     max_cpu_single = max(t.cpu_units for t in demands)
     max_mem_single = max(t.memory_mib for t in demands)

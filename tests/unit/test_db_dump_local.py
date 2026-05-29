@@ -10,7 +10,6 @@ don't have to remember sentinal-style port quirks (5434 vs 5432).
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -22,17 +21,17 @@ from remote_compose.dblocal import (
     inspect_container_env,
 )
 
-
 # ---------------------------------------------------------------------
 # inspect_container_env: shell out to `docker inspect` and parse env
 # ---------------------------------------------------------------------
+
 
 class TestInspectContainerEnv:
     def test_returns_env_dict(self):
         with mock.patch("subprocess.run") as run:
             run.return_value = mock.Mock(
                 returncode=0,
-                stdout=b'POSTGRES_USER=alice\nPOSTGRES_DB=mydb\nPOSTGRES_PORT=5434\n',
+                stdout=b"POSTGRES_USER=alice\nPOSTGRES_DB=mydb\nPOSTGRES_PORT=5434\n",
                 stderr=b"",
             )
             env = inspect_container_env("my_postgres")
@@ -43,7 +42,9 @@ class TestInspectContainerEnv:
     def test_missing_container_raises(self):
         with mock.patch("subprocess.run") as run:
             run.return_value = mock.Mock(
-                returncode=1, stdout=b"", stderr=b"No such container: nope",
+                returncode=1,
+                stdout=b"",
+                stderr=b"No such container: nope",
             )
             with pytest.raises(DumpLocalError, match="container"):
                 inspect_container_env("nope")
@@ -52,7 +53,7 @@ class TestInspectContainerEnv:
         with mock.patch("subprocess.run") as run:
             run.return_value = mock.Mock(
                 returncode=0,
-                stdout=b'\nFOO=1\n\nBAR=two\n',
+                stdout=b"\nFOO=1\n\nBAR=two\n",
                 stderr=b"",
             )
             env = inspect_container_env("c")
@@ -63,18 +64,24 @@ class TestInspectContainerEnv:
 # dump_local: orchestrates inspect + pg_dump
 # ---------------------------------------------------------------------
 
+
 class TestDumpLocal:
     def test_writes_file_returns_dumpresult(self, tmp_path):
         out = tmp_path / "x.dump"
+
         # Side effect that pretends pg_dump wrote 1MB to the open file fd.
         def fake_run(cmd, stdout=None, stderr=None, **_):
             if hasattr(stdout, "write"):
                 stdout.write(b"x" * (1024 * 1024))
             return mock.Mock(returncode=0, stdout=b"", stderr=b"")
-        with mock.patch("subprocess.run", side_effect=fake_run), \
-             mock.patch("remote_compose.dblocal.inspect_container_env") as inspect:
+
+        with (
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch("remote_compose.dblocal.inspect_container_env") as inspect,
+        ):
             inspect.return_value = {
-                "POSTGRES_USER": "alice", "POSTGRES_DB": "mydb",
+                "POSTGRES_USER": "alice",
+                "POSTGRES_DB": "mydb",
                 "POSTGRES_PORT": "5432",
             }
             result = dump_local(container="c", output_path=out)
@@ -87,10 +94,13 @@ class TestDumpLocal:
 
     def test_uses_postgres_port_from_env(self, tmp_path):
         out = tmp_path / "x.dump"
-        with mock.patch("subprocess.run") as run, \
-             mock.patch("remote_compose.dblocal.inspect_container_env") as inspect:
+        with (
+            mock.patch("subprocess.run") as run,
+            mock.patch("remote_compose.dblocal.inspect_container_env") as inspect,
+        ):
             inspect.return_value = {
-                "POSTGRES_USER": "u", "POSTGRES_DB": "d",
+                "POSTGRES_USER": "u",
+                "POSTGRES_DB": "d",
                 "POSTGRES_PORT": "5434",
             }
             run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
@@ -103,10 +113,15 @@ class TestDumpLocal:
 
     def test_explicit_port_overrides_container_env(self, tmp_path):
         out = tmp_path / "x.dump"
-        with mock.patch("subprocess.run") as run, \
-             mock.patch("remote_compose.dblocal.inspect_container_env") as inspect:
-            inspect.return_value = {"POSTGRES_USER": "u", "POSTGRES_DB": "d",
-                                    "POSTGRES_PORT": "5434"}
+        with (
+            mock.patch("subprocess.run") as run,
+            mock.patch("remote_compose.dblocal.inspect_container_env") as inspect,
+        ):
+            inspect.return_value = {
+                "POSTGRES_USER": "u",
+                "POSTGRES_DB": "d",
+                "POSTGRES_PORT": "5434",
+            }
             run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
             out.write_bytes(b"x")
             dump_local(container="c", output_path=out, port=9999)
@@ -130,21 +145,30 @@ class TestDumpLocal:
 
     def test_pg_dump_failure_raises_with_stderr(self, tmp_path):
         out = tmp_path / "x.dump"
-        with mock.patch("subprocess.run") as run, \
-             mock.patch("remote_compose.dblocal.inspect_container_env") as inspect:
+        with (
+            mock.patch("subprocess.run") as run,
+            mock.patch("remote_compose.dblocal.inspect_container_env") as inspect,
+        ):
             inspect.return_value = {"POSTGRES_USER": "u", "POSTGRES_DB": "d"}
             run.return_value = mock.Mock(
-                returncode=1, stdout=b"", stderr=b"connection refused",
+                returncode=1,
+                stdout=b"",
+                stderr=b"connection refused",
             )
             with pytest.raises(DumpLocalError, match="connection refused"):
                 dump_local(container="c", output_path=out)
 
     def test_creates_parent_directory_when_missing(self, tmp_path):
         out = tmp_path / "deep" / "path" / "x.dump"
-        with mock.patch("subprocess.run") as run, \
-             mock.patch("remote_compose.dblocal.inspect_container_env") as inspect:
-            inspect.return_value = {"POSTGRES_USER": "u", "POSTGRES_DB": "d",
-                                    "POSTGRES_PORT": "5432"}
+        with (
+            mock.patch("subprocess.run") as run,
+            mock.patch("remote_compose.dblocal.inspect_container_env") as inspect,
+        ):
+            inspect.return_value = {
+                "POSTGRES_USER": "u",
+                "POSTGRES_DB": "d",
+                "POSTGRES_PORT": "5432",
+            }
             run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
             # We don't actually write the file in this test; the parent
             # dir should still get created.
@@ -161,9 +185,11 @@ class TestDumpLocal:
 # Default output path naming
 # ---------------------------------------------------------------------
 
+
 class TestDefaultPath:
     def test_default_path_includes_project_and_timestamp(self):
         from remote_compose.dblocal import default_dump_path
+
         p = default_dump_path("rc-test-foo")
         assert p.name.startswith("rc-test-foo-")
         assert p.name.endswith(".dump")

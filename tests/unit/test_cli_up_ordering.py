@@ -28,17 +28,14 @@ from click.testing import CliRunner
 
 from remote_compose.cli import cli
 
-
-COMPOSE_FIXTURE = textwrap.dedent(
-    """
+COMPOSE_FIXTURE = textwrap.dedent("""
     services:
       web:
         image: nginx:alpine
         env_file: .env
         ports:
           - "80:80"
-    """
-)
+    """)
 
 
 @pytest.fixture
@@ -48,8 +45,7 @@ def runner():
 
 def _write_v2_stack(tmp_path):
     rc_yml = tmp_path / "rc.yml"
-    rc_yml.write_text(textwrap.dedent(
-        """
+    rc_yml.write_text(textwrap.dedent("""
         version: 2
         project: ordering-test
         compose_file: docker-compose.yml
@@ -66,8 +62,7 @@ def _write_v2_stack(tmp_path):
           - name: web
             source: file
             path: .env
-        """
-    ).strip())
+        """).strip())
     (tmp_path / "docker-compose.yml").write_text(COMPOSE_FIXTURE)
     (tmp_path / ".env").write_text("DATABASE_URL=postgres://x\n")
     return rc_yml
@@ -94,15 +89,21 @@ def test_rc_up_does_not_force_roll_until_secrets_populated(runner, tmp_path):
         def client_factory(svc_name, **_kw):
             client = MagicMock()
             if svc_name == "ecs":
+
                 def update_service(**kw):
                     if kw.get("forceNewDeployment"):
-                        boto_calls.append(("ecs.update_service.force", kw.get("service", "")))
+                        boto_calls.append(
+                            ("ecs.update_service.force", kw.get("service", ""))
+                        )
                     return {}
+
                 client.update_service.side_effect = update_service
             if svc_name == "secretsmanager":
+
                 def put_secret_value(**kw):
                     boto_calls.append(("sm.put_secret_value", kw.get("SecretId", "")))
                     return {}
+
                 client.put_secret_value.side_effect = put_secret_value
                 client.get_secret_value.return_value = {"SecretString": "{}"}
             return client
@@ -119,25 +120,40 @@ def test_rc_up_does_not_force_roll_until_secrets_populated(runner, tmp_path):
     # force-roll path inside provider.deploy actually fires (this is what
     # the sentinal stack experienced — services with build_context did
     # build+push, then force-rolled while SM secrets were still placeholders).
-    with patch("boto3.Session", side_effect=fake_session), \
-         patch(
-             "remote_compose.provider.ecs.provider.ECSProvider._build_and_push_images",
-             return_value=["web"],
-         ), \
-         patch("remote_compose.terraform.runner.TerraformRunner.init",
-               return_value=None), \
-         patch("remote_compose.terraform.runner.TerraformRunner.apply",
-               return_value=None), \
-         patch("remote_compose.terraform.runner.TerraformRunner.output",
-               return_value={"ecr_repositories": {"value": {
-                   "web": "111.dkr.ecr.us-west-1.amazonaws.com/ordering-test/web",
-               }}}), \
-         patch("remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path",
-               return_value=None), \
-         patch("remote_compose.provider.ecs.provider.ECSProvider._reconcile_orphan_log_groups",
-               return_value=None):
+    with (
+        patch("boto3.Session", side_effect=fake_session),
+        patch(
+            "remote_compose.provider.ecs.provider.ECSProvider._build_and_push_images",
+            return_value=["web"],
+        ),
+        patch(
+            "remote_compose.terraform.runner.TerraformRunner.init", return_value=None
+        ),
+        patch(
+            "remote_compose.terraform.runner.TerraformRunner.apply", return_value=None
+        ),
+        patch(
+            "remote_compose.terraform.runner.TerraformRunner.output",
+            return_value={
+                "ecr_repositories": {
+                    "value": {
+                        "web": "111.dkr.ecr.us-west-1.amazonaws.com/ordering-test/web",
+                    }
+                }
+            },
+        ),
+        patch(
+            "remote_compose.cli_v2.run_auto_on_deploy_hooks_for_path", return_value=None
+        ),
+        patch(
+            "remote_compose.provider.ecs.provider.ECSProvider._reconcile_orphan_log_groups",
+            return_value=None,
+        ),
+    ):
         result = runner.invoke(
-            cli, ["-c", str(rc_yml), "up"], catch_exceptions=False,
+            cli,
+            ["-c", str(rc_yml), "up"],
+            catch_exceptions=False,
         )
 
     # Find first force-roll and first secret-put.

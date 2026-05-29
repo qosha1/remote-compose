@@ -20,7 +20,6 @@ Other platforms: report-only with manual-install instructions.
 
 from __future__ import annotations
 
-import dataclasses
 import importlib
 import os
 import platform
@@ -30,7 +29,6 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from typing import Callable, Optional
-
 
 REQUIRED_TERRAFORM = (1, 5)
 REQUIRED_PYTHON = (3, 9)
@@ -64,7 +62,10 @@ def _detect_pkg_manager() -> Optional[str]:
 def _run(cmd: list[str], timeout: int = 120) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         return proc.returncode, proc.stdout, proc.stderr
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -83,9 +84,13 @@ def check_python() -> CheckResult:
         name="python",
         ok=ok,
         detail=f"{v.major}.{v.minor}.{v.micro}",
-        fix_hint=None if ok else (
-            f"upgrade to Python >= {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]} "
-            "via pyenv / official installer"
+        fix_hint=(
+            None
+            if ok
+            else (
+                f"upgrade to Python >= {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]} "
+                "via pyenv / official installer"
+            )
         ),
     )
 
@@ -141,7 +146,9 @@ def check_docker() -> CheckResult:
             fix_hint="install Docker Desktop (macOS/Windows) or `rc doctor --fix`",
             fixer=_fix_docker,
         )
-    rc, out, _ = _run([docker, "version", "--format", "{{.Client.Version}}"], timeout=10)
+    rc, out, _ = _run(
+        [docker, "version", "--format", "{{.Client.Version}}"], timeout=10
+    )
     if rc != 0:
         return CheckResult(
             name="docker",
@@ -220,14 +227,24 @@ def _fix_terraform() -> tuple[bool, str]:
                     return True, "brew relink terraform"
             # Fallback: tap the official HashiCorp tap + install
             _run(["brew", "tap", "hashicorp/tap"])
-            rc3, _, err3 = _run(["brew", "install", "hashicorp/tap/terraform"], timeout=600)
+            rc3, _, err3 = _run(
+                ["brew", "install", "hashicorp/tap/terraform"], timeout=600
+            )
             return rc3 == 0, err3 or "brew install hashicorp/tap/terraform"
         rc, _, err = _run(["brew", "install", "terraform"], timeout=600)
         return rc == 0, err or "brew install terraform"
     if pm == "apt":
         cmds = [
             ["sudo", "apt-get", "update"],
-            ["sudo", "apt-get", "install", "-y", "gnupg", "software-properties-common", "curl"],
+            [
+                "sudo",
+                "apt-get",
+                "install",
+                "-y",
+                "gnupg",
+                "software-properties-common",
+                "curl",
+            ],
         ]
         for cmd in cmds:
             rc, _, err = _run(cmd, timeout=300)
@@ -235,20 +252,28 @@ def _fix_terraform() -> tuple[bool, str]:
                 return False, err or f"failed: {' '.join(cmd)}"
         # HashiCorp apt repo
         rc, out, err = _run(
-            ["bash", "-c",
-             "curl -fsSL https://apt.releases.hashicorp.com/gpg | "
-             "sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && "
-             "echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] "
-             "https://apt.releases.hashicorp.com $(lsb_release -cs) main\" | "
-             "sudo tee /etc/apt/sources.list.d/hashicorp.list && "
-             "sudo apt-get update && sudo apt-get install -y terraform"],
+            [
+                "bash",
+                "-c",
+                "curl -fsSL https://apt.releases.hashicorp.com/gpg | "
+                "sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && "
+                'echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] '
+                'https://apt.releases.hashicorp.com $(lsb_release -cs) main" | '
+                "sudo tee /etc/apt/sources.list.d/hashicorp.list && "
+                "sudo apt-get update && sudo apt-get install -y terraform",
+            ],
             timeout=600,
         )
         return rc == 0, err or "apt install terraform"
     if pm == "dnf":
         rc, _, err = _run(
-            ["sudo", "dnf", "config-manager", "--add-repo",
-             "https://rpm.releases.hashicorp.com/fedora/hashicorp.repo"],
+            [
+                "sudo",
+                "dnf",
+                "config-manager",
+                "--add-repo",
+                "https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
+            ],
             timeout=120,
         )
         if rc != 0:

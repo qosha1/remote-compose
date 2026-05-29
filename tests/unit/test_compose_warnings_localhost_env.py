@@ -11,7 +11,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from remote_compose.compose_warnings import detect_localhost_host_in_env_file
 
@@ -38,6 +37,7 @@ def test_warns_when_postgres_host_localhost_and_postgres_service_exists(tmp_path
         "POSTGRES_HOST=localhost\nPOSTGRES_PORT=5434\n",
     )
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert len(warnings) == 1
@@ -50,6 +50,7 @@ def test_warns_when_postgres_host_localhost_and_postgres_service_exists(tmp_path
 def test_warns_for_127_0_0_1_too(tmp_path):
     compose_path = _scaffold(tmp_path, "POSTGRES_HOST=127.0.0.1\n")
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert len(warnings) == 1
@@ -70,6 +71,7 @@ def test_no_warning_when_no_matching_service(tmp_path):
         compose_yaml=compose_yaml,
     )
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert warnings == []
@@ -81,6 +83,7 @@ def test_no_warning_for_correct_postgres_host_value(tmp_path):
         "POSTGRES_HOST=postgres\nPOSTGRES_PORT=5434\n",
     )
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert warnings == []
@@ -90,6 +93,7 @@ def test_no_warning_for_bare_HOST_key(tmp_path):
     # Bare HOST=localhost is too generic to flag (could be SSH, mail, etc.)
     compose_path = _scaffold(tmp_path, "HOST=localhost\n")
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert warnings == []
@@ -98,6 +102,7 @@ def test_no_warning_for_bare_HOST_key(tmp_path):
 def test_handles_quoted_values(tmp_path):
     compose_path = _scaffold(tmp_path, 'POSTGRES_HOST="localhost"\n')
     import yaml as _y
+
     compose = _y.safe_load(compose_path.read_text())
     warnings = detect_localhost_host_in_env_file(compose, compose_path)
     assert len(warnings) == 1
@@ -114,6 +119,7 @@ def test_handles_missing_env_file_path(tmp_path):
             image: postgres:15
     """).strip())
     import yaml as _y
+
     compose_obj = _y.safe_load(compose.read_text())
     # No crash; just empty warnings.
     warnings = detect_localhost_host_in_env_file(compose_obj, compose)

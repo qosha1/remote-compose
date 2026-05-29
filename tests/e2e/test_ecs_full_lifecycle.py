@@ -17,13 +17,14 @@ import pytest
 from remote_compose.provider import DeployContext
 from remote_compose.provider.ecs import ECSProvider
 
-
 pytestmark = pytest.mark.e2e
 
 
 class TestECSFullLifecycle:
     def test_deploy_then_status_then_destroy(
-        self, e2e_lifecycle: DeployContext, provider: ECSProvider,
+        self,
+        e2e_lifecycle: DeployContext,
+        provider: ECSProvider,
     ) -> None:
         ctx = e2e_lifecycle
 
@@ -31,9 +32,9 @@ class TestECSFullLifecycle:
         result = provider.deploy(ctx)
         assert result.revision_id
         assert set(result.services) == {"web"}
-        assert "alb_dns_name" in result.terraform_outputs, (
-            "deploy should populate alb_dns_name in terraform outputs"
-        )
+        assert (
+            "alb_dns_name" in result.terraform_outputs
+        ), "deploy should populate alb_dns_name in terraform outputs"
 
         # STATUS — service should be registered with ECS even if not yet
         # running (no image has been pushed to ECR)
@@ -44,7 +45,9 @@ class TestECSFullLifecycle:
         # The e2e_lifecycle fixture's teardown destroys everything.
 
     def test_deploy_is_idempotent(
-        self, e2e_lifecycle: DeployContext, provider: ECSProvider,
+        self,
+        e2e_lifecycle: DeployContext,
+        provider: ECSProvider,
     ) -> None:
         ctx = e2e_lifecycle
 
@@ -52,14 +55,16 @@ class TestECSFullLifecycle:
         # second deploy with unchanged inputs — revision_id derives from
         # emitted module content, so must match
         second = provider.deploy(ctx)
-        assert first.revision_id == second.revision_id, (
-            "deploy must be idempotent — same inputs must yield same revision id"
-        )
+        assert (
+            first.revision_id == second.revision_id
+        ), "deploy must be idempotent — same inputs must yield same revision id"
 
 
 class TestECSRedeploy:
     def test_redeploy_returns_cleanly(
-        self, e2e_lifecycle: DeployContext, provider: ECSProvider,
+        self,
+        e2e_lifecycle: DeployContext,
+        provider: ECSProvider,
     ) -> None:
         ctx = e2e_lifecycle
         provider.deploy(ctx)
@@ -69,7 +74,9 @@ class TestECSRedeploy:
 
 class TestECSPlan:
     def test_plan_runs_after_deploy_and_returns_no_changes(
-        self, e2e_lifecycle: DeployContext, provider: ECSProvider,
+        self,
+        e2e_lifecycle: DeployContext,
+        provider: ECSProvider,
     ) -> None:
         ctx = e2e_lifecycle
         provider.deploy(ctx)

@@ -56,24 +56,30 @@ def migrate_group():
 # rc v1 migrate plan <v1_rc.yml>
 # ---------------------------------------------------------------------
 
+
 @migrate_group.command(name="plan")
 @click.argument(
     "v1_rc_yml",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
-    "--out", "out_dir",
-    default="./v2-migration", show_default=True,
+    "--out",
+    "out_dir",
+    default="./v2-migration",
+    show_default=True,
     type=click.Path(file_okay=False, path_type=Path),
     help="Where to write rc.yml.v2, imports.tf, MIGRATION_SUMMARY.md, runbook.json.",
 )
 @click.option(
-    "--inventory-snapshot", "inventory_snapshot",
-    default=None, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    "--inventory-snapshot",
+    "inventory_snapshot",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Pre-recorded boto3 inventory JSON (test mode; skips live AWS calls).",
 )
 @click.option(
-    "--aws-profile", "aws_profile",
+    "--aws-profile",
+    "aws_profile",
     default=None,
     help="boto3 profile to use. Defaults to the v1 rc.yml's aws_profile field.",
 )
@@ -88,7 +94,8 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
     if not force and (summary_path.exists() or rc_yml_v2_path.exists()):
         click.echo(
             f"refusing to overwrite existing files in {out_dir} — "
-            "re-run with --force.", err=True,
+            "re-run with --force.",
+            err=True,
         )
         raise click.exceptions.Exit(1)
 
@@ -97,10 +104,13 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
         try:
             import boto3
         except ImportError:
-            click.echo("boto3 required for live discovery (pip install boto3)", err=True)
+            click.echo(
+                "boto3 required for live discovery (pip install boto3)", err=True
+            )
             raise click.exceptions.Exit(1)
         # Parse the v1 yaml first to grab region+profile, then build session.
         from remote_compose.v1_migrate.discover import V1Stack
+
         try:
             stack_pre = V1Stack.from_yaml(v1_rc_yml)
         except DiscoveryError as exc:
@@ -134,8 +144,12 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
     # Pre-fill runbook with phase descriptors (entries get filled by `apply`).
     runbook_seed = [
         {
-            "phase": p.name, "started_at": "", "finished_at": None,
-            "ok": False, "undo_command": p.undo, "details": "",
+            "phase": p.name,
+            "started_at": "",
+            "finished_at": None,
+            "ok": False,
+            "undo_command": p.undo,
+            "details": "",
         }
         for p in plan.phases
     ]
@@ -161,19 +175,23 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
 # rc v1 migrate apply <v1_rc.yml>
 # ---------------------------------------------------------------------
 
+
 @migrate_group.command(name="apply")
 @click.argument(
     "v1_rc_yml",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
-    "--out", "out_dir",
-    default="./v2-migration", show_default=True,
+    "--out",
+    "out_dir",
+    default="./v2-migration",
+    show_default=True,
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Output dir from `rc v1 migrate plan`.",
 )
 @click.option(
-    "--sandbox-tfstate", "sandbox_tfstate",
+    "--sandbox-tfstate",
+    "sandbox_tfstate",
     default=None,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help=(
@@ -184,17 +202,25 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
     ),
 )
 @click.option(
-    "--inventory-snapshot", "inventory_snapshot",
-    default=None, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    "--inventory-snapshot",
+    "inventory_snapshot",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Pre-recorded inventory JSON (test mode).",
 )
 @click.option(
-    "--phase", "single_phase",
+    "--phase",
+    "single_phase",
     default=None,
-    type=click.Choice([
-        "validate", "emit_v2_terraform", "import_state",
-        "services_cutover", "decommission_v1",
-    ]),
+    type=click.Choice(
+        [
+            "validate",
+            "emit_v2_terraform",
+            "import_state",
+            "services_cutover",
+            "decommission_v1",
+        ]
+    ),
     help=(
         "Run a single named phase. Default: validate -> services_cutover -> "
         "decommission_v1 (boto3-only). The terraform phases (emit_v2_terraform, "
@@ -203,7 +229,11 @@ def migrate_plan(v1_rc_yml, out_dir, inventory_snapshot, aws_profile, force):
 )
 @click.option("--auto-approve", is_flag=True, help="Skip per-phase prompts (CI-only).")
 def migrate_apply(
-    v1_rc_yml, out_dir, sandbox_tfstate, inventory_snapshot, single_phase,
+    v1_rc_yml,
+    out_dir,
+    sandbox_tfstate,
+    inventory_snapshot,
+    single_phase,
     auto_approve,
 ):
     """Run the apply phases. Default: validate -> services_cutover ->
@@ -219,6 +249,7 @@ def migrate_apply(
             click.echo("boto3 required (pip install boto3)", err=True)
             raise click.exceptions.Exit(1)
         from remote_compose.v1_migrate.discover import V1Stack
+
         stack_pre = V1Stack.from_yaml(v1_rc_yml)
         aws_session = boto3.Session(
             region_name=stack_pre.region,
@@ -239,15 +270,21 @@ def migrate_apply(
     ecs_client = aws_session.client("ecs") if aws_session else None
     phase_factories = {
         "validate": lambda: ValidatePhase(plan=plan, aws_session=aws_session),
-        "emit_v2_terraform": lambda: EmitV2TerraformPhase(plan=plan, output_dir=out_dir),
+        "emit_v2_terraform": lambda: EmitV2TerraformPhase(
+            plan=plan, output_dir=out_dir
+        ),
         "import_state": lambda: ImportStatePhase(
-            plan=plan, output_dir=out_dir, sandbox_tfstate=sandbox_tfstate,
+            plan=plan,
+            output_dir=out_dir,
+            sandbox_tfstate=sandbox_tfstate,
         ),
         "services_cutover": lambda: ServicesCutoverPhase(
-            plan=plan, ecs_client=ecs_client,
+            plan=plan,
+            ecs_client=ecs_client,
         ),
         "decommission_v1": lambda: DecommissionV1Phase(
-            plan=plan, aws_session=aws_session,
+            plan=plan,
+            aws_session=aws_session,
             v1_rc_yml_path=v1_rc_yml,
             archive_dir=out_dir / "archive",
         ),
@@ -285,7 +322,8 @@ def migrate_apply(
         entry = RunbookEntry.begin(
             phase=name,
             undo_command=next(
-                (p.undo for p in plan.phases if p.name == name), "",
+                (p.undo for p in plan.phases if p.name == name),
+                "",
             ),
         )
         try:
@@ -310,5 +348,3 @@ def migrate_apply(
 
     write_runbook_json(entries, out_dir / "runbook.json")
     click.echo(f"\nrc v1 migrate apply — done. runbook: {out_dir/'runbook.json'}")
-
-

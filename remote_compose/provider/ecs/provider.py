@@ -39,7 +39,6 @@ from ..base import (
 )
 from .autosize import EC2TaskDemand, auto_size
 
-
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
@@ -155,9 +154,7 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     ecs = ecs or {}
     for key in require:
         if not ecs.get(key):
-            raise ProviderConfigError(
-                f"provider_config.ecs.{key} is required"
-            )
+            raise ProviderConfigError(f"provider_config.ecs.{key} is required")
     return ecs
 
 
@@ -266,10 +263,13 @@ class ECSProvider(Provider):
                         f"a POSIX octal string like '0755', got {vol_mode!r}"
                     )
                 vol_tf = _tf_name(vol_name)
-                efs_volumes.setdefault(vol_name, {
-                    "name": vol_name,
-                    "tf_name": vol_tf,
-                })
+                efs_volumes.setdefault(
+                    vol_name,
+                    {
+                        "name": vol_name,
+                        "tf_name": vol_tf,
+                    },
+                )
                 ap_tf = f"{_tf_name(name)}__{vol_tf}"
                 mount_view = {
                     "volume": vol_name,
@@ -418,10 +418,14 @@ class ECSProvider(Provider):
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
-                ec2_demands.append(EC2TaskDemand(
-                    name=name, cpu_units=spec.cpu, memory_mib=spec.memory,
-                    replicas=spec.replicas,
-                ))
+                ec2_demands.append(
+                    EC2TaskDemand(
+                        name=name,
+                        cpu_units=spec.cpu,
+                        memory_mib=spec.memory,
+                        replicas=spec.replicas,
+                    )
+                )
             if spec.public and spec.port and default_public is None:
                 default_public = svc_view
 
@@ -476,7 +480,7 @@ class ECSProvider(Provider):
         file_secrets: list[dict[str, Any]] = []
         aws_sm_secrets: list[dict[str, Any]] = []
         secrets_view: list[dict[str, Any]] = []
-        project_dir = (ctx.compose_path.parent if ctx.compose_path else Path.cwd())
+        project_dir = ctx.compose_path.parent if ctx.compose_path else Path.cwd()
         for sec in ctx.secrets or []:
             if sec.source == "file":
                 tf_sec_name = _tf_name(sec.name)
@@ -490,52 +494,58 @@ class ECSProvider(Provider):
                 try:
                     file_keys = env_file_keys(file_path)
                 except EnvFileError as exc:
-                    raise ProviderConfigError(
-                        f"secret {sec.name!r}: {exc}"
-                    ) from exc
+                    raise ProviderConfigError(f"secret {sec.name!r}: {exc}") from exc
                 if not file_keys:
                     raise ProviderConfigError(
                         f"secret {sec.name!r}: {file_path} has no KEY=value entries"
                     )
-                file_secrets.append({
-                    "name": sec.name,
-                    "tf_name": tf_sec_name,
-                    "path": str(file_path),
-                    "keys": file_keys,
-                })
+                file_secrets.append(
+                    {
+                        "name": sec.name,
+                        "tf_name": tf_sec_name,
+                        "path": str(file_path),
+                        "keys": file_keys,
+                    }
+                )
                 # One task-def secrets[] entry per KEY in the file, pointing
                 # at the same SM secret ARN with a JSON-key selector.
                 for key in file_keys:
-                    secrets_view.append({
-                        "env_name": key,
-                        "value_from_ref": (
-                            f'"${{aws_secretsmanager_secret.{tf_sec_name}.arn}}'
-                            f':{key}::"'
-                        ),
-                        # rc-12d: track which rc.yml secret this entry came
-                        # from so per-service env_file scoping can filter.
-                        "source_secret_name": sec.name,
-                    })
+                    secrets_view.append(
+                        {
+                            "env_name": key,
+                            "value_from_ref": (
+                                f'"${{aws_secretsmanager_secret.{tf_sec_name}.arn}}'
+                                f':{key}::"'
+                            ),
+                            # rc-12d: track which rc.yml secret this entry came
+                            # from so per-service env_file scoping can filter.
+                            "source_secret_name": sec.name,
+                        }
+                    )
             elif sec.source == "aws_sm":
                 if not sec.arn:
                     raise ProviderConfigError(
                         f"secret {sec.name!r}: source=aws_sm requires arn"
                     )
-                aws_sm_secrets.append({
-                    "name": sec.name,
-                    "arn": sec.arn,
-                })
+                aws_sm_secrets.append(
+                    {
+                        "name": sec.name,
+                        "arn": sec.arn,
+                    }
+                )
                 # Pre-existing SM secret; we don't know its shape, so the
                 # whole value lands in one env var. Users wanting key splits
                 # on aws_sm should reference sub-keys via sec.ref (future).
-                secrets_view.append({
-                    "env_name": _env_name_for_secret(sec.name),
-                    "value_from_ref": f'"{sec.arn}"',
-                    # rc-12d: aws_sm secrets are global (rc.yml-declared,
-                    # not per-service env_file scoped) — None means
-                    # "attach to every service".
-                    "source_secret_name": None,
-                })
+                secrets_view.append(
+                    {
+                        "env_name": _env_name_for_secret(sec.name),
+                        "value_from_ref": f'"{sec.arn}"',
+                        # rc-12d: aws_sm secrets are global (rc.yml-declared,
+                        # not per-service env_file scoped) — None means
+                        # "attach to every service".
+                        "source_secret_name": None,
+                    }
+                )
             elif sec.source in {"k8s_secret", "gcp_sm"}:
                 # Not applicable to the ECS provider — silently skip. Another
                 # provider would consume these.
@@ -551,7 +561,9 @@ class ECSProvider(Provider):
         # substitute the terraform reference string; for aws_sm, the literal.
         all_secret_arns: list[str] = []
         for sec in file_secrets:
-            all_secret_arns.append(f"${{aws_secretsmanager_secret.{sec['tf_name']}.arn}}")
+            all_secret_arns.append(
+                f"${{aws_secretsmanager_secret.{sec['tf_name']}.arn}}"
+            )
         for sec in aws_sm_secrets:
             all_secret_arns.append(sec["arn"])
 
@@ -630,16 +642,18 @@ class ECSProvider(Provider):
                     continue
                 filtered.append(s)
             if override_keys:
-                filtered = [
-                    s for s in filtered if s["env_name"] not in override_keys
-                ]
+                filtered = [s for s in filtered if s["env_name"] not in override_keys]
             svc_view["secrets"] = filtered
         default_target_port = default_public["port"] if default_public else 80
-        default_health_check_path = (
-            (default_public or {}).get("health_check_path") or "/"
-        )
+        default_health_check_path = (default_public or {}).get(
+            "health_check_path"
+        ) or "/"
 
-        ec2_capacity_cfg = self._resolve_ec2_capacity(ecs_cfg, ec2_demands) if has_ec2_service else None
+        ec2_capacity_cfg = (
+            self._resolve_ec2_capacity(ecs_cfg, ec2_demands)
+            if has_ec2_service
+            else None
+        )
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
         # not opted out via bucket_managed=false, terraform creates and
@@ -656,8 +670,11 @@ class ECSProvider(Provider):
         has_managed_backup_bucket = bool(backup_bucket) and backup_managed
 
         domain_info = self._resolve_domain(
-            ctx, ecs_cfg, has_public_service,
-            domained_services, alias_hostnames,
+            ctx,
+            ecs_cfg,
+            has_public_service,
+            domained_services,
+            alias_hostnames,
         )
 
         environment = "rc-test" if ctx.project.startswith("rc-test-") else None
@@ -715,7 +732,9 @@ class ECSProvider(Provider):
             "default_target_has_own_tg": bool(
                 default_public and default_public.get("domain")
             ),
-            "backend_block": render_backend_block(ctx.tf_backend_config or {"type": "local"}),
+            "backend_block": render_backend_block(
+                ctx.tf_backend_config or {"type": "local"}
+            ),
             "has_managed_backup_bucket": has_managed_backup_bucket,
             "backup_bucket": backup_bucket,
             "backup_retention_days": backup_retention_value,
@@ -741,6 +760,7 @@ class ECSProvider(Provider):
         # unreachable secondary ports. Run here so any caller of
         # provider.plan(ctx) — not only the CLI dispatcher — gets them.
         from ...compose_warnings import collect_compose_warnings
+
         warnings = collect_compose_warnings(ctx.compose_path, ctx.rc_yml_v2)
         return PlanResult(
             create=summary.create,
@@ -813,8 +833,11 @@ class ECSProvider(Provider):
                 warnings=warnings,
             )
         pushed = self._build_and_push_images(
-            ctx, outputs, warnings,
-            services_filter=services_filter, requested_tag=tag,
+            ctx,
+            outputs,
+            warnings,
+            services_filter=services_filter,
+            requested_tag=tag,
         )
         if pushed and not getattr(ctx, "skip_force_roll", False):
             # ECS won't pull a new :latest automatically — force it.
@@ -825,7 +848,11 @@ class ECSProvider(Provider):
 
         return DeployResult(
             revision_id=_revision_id_from_dir(out_dir),
-            services=sorted(services_filter) if services_filter else sorted(ctx.services.keys()),
+            services=(
+                sorted(services_filter)
+                if services_filter
+                else sorted(ctx.services.keys())
+            ),
             duration_s=time.monotonic() - start,
             terraform_outputs=outputs,
             warnings=warnings,
@@ -942,15 +969,22 @@ class ECSProvider(Provider):
         }
 
         pushed = self._build_and_push_images(
-            ctx, synthetic_outputs, warnings,
-            services_filter=services_filter, requested_tag=tag,
+            ctx,
+            synthetic_outputs,
+            warnings,
+            services_filter=services_filter,
+            requested_tag=tag,
         )
         if pushed:
             self._force_new_deployments(ctx, pushed)
 
         return DeployResult(
             revision_id=f"{ctx.project}-no-state-{int(start)}",
-            services=sorted(services_filter) if services_filter else sorted(ctx.services.keys()),
+            services=(
+                sorted(services_filter)
+                if services_filter
+                else sorted(ctx.services.keys())
+            ),
             duration_s=time.monotonic() - start,
             terraform_outputs={},
             warnings=warnings,
@@ -1035,9 +1069,7 @@ class ECSProvider(Provider):
         # Shared BuildKit cache repo (rc-e5u.45.2). Optional — older stacks
         # whose terraform predates the buildcache resource won't have this
         # output and we just degrade to no-cache builds.
-        buildcache_repo = (
-            (outputs.get("buildcache_repository") or {}).get("value")
-        )
+        buildcache_repo = (outputs.get("buildcache_repository") or {}).get("value")
 
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
         from ...no_cache_state import consume_no_cache
@@ -1077,17 +1109,13 @@ class ECSProvider(Provider):
         # When user passed --tag X (and X != latest), see if X already
         # exists in ECR and short-circuit to "re-tag existing → latest".
         ecr_client = None
-        skip_when_tag_exists = (
-            requested_tag is not None and requested_tag != "latest"
-        )
+        skip_when_tag_exists = requested_tag is not None and requested_tag != "latest"
 
         pushed: list[str] = []
         for spec in to_build:
             repo_url = repos.get(spec.name)
             if not repo_url:
-                msg = (
-                    f"service {spec.name!r}: no ECR repo in terraform outputs"
-                )
+                msg = f"service {spec.name!r}: no ECR repo in terraform outputs"
                 warnings.append(msg)
                 self._emit(f"  WARN: {msg}; skipping image build+push")
                 continue
@@ -1101,7 +1129,9 @@ class ECSProvider(Provider):
                 if ecr_client is None:
                     ecr_client = session.client("ecr")
                 manifest = self._ecr_image_manifest(
-                    ecr_client, repo_name, requested_tag,
+                    ecr_client,
+                    repo_name,
+                    requested_tag,
                 )
                 if manifest is not None:
                     # Image exists in ECR — skip docker build entirely.
@@ -1146,7 +1176,9 @@ class ECSProvider(Provider):
 
     @staticmethod
     def _ecr_image_manifest(
-        ecr_client: Any, repo_name: str, tag: str,
+        ecr_client: Any,
+        repo_name: str,
+        tag: str,
     ) -> Optional[str]:
         """Return the image manifest JSON for ``<repo>:<tag>`` or None if the
         tag doesn't exist. Other ECR errors propagate so the caller sees them
@@ -1169,7 +1201,10 @@ class ECSProvider(Provider):
 
     @staticmethod
     def _ecr_retag(
-        ecr_client: Any, repo_name: str, manifest: str, new_tag: str,
+        ecr_client: Any,
+        repo_name: str,
+        manifest: str,
+        new_tag: str,
     ) -> None:
         """Apply ``new_tag`` to the image identified by ``manifest`` in
         ``repo_name``. Idempotent — ECR's put_image with an existing manifest
@@ -1204,6 +1239,7 @@ class ECSProvider(Provider):
           RC_BUILD_CONTEXT_BLOCK_GB (default 5)
         """
         import os as _os
+
         try:
             warn_gb = float(_os.environ.get("RC_BUILD_CONTEXT_WARN_GB", "1"))
             block_gb = float(_os.environ.get("RC_BUILD_CONTEXT_BLOCK_GB", "5"))
@@ -1212,9 +1248,13 @@ class ECSProvider(Provider):
         warn_b = int(warn_gb * 1024 * 1024 * 1024)
         block_b = int(block_gb * 1024 * 1024 * 1024)
         force = _os.environ.get("RC_FORCE_LARGE_CONTEXT", "").lower() in {
-            "1", "true", "yes", "on",
+            "1",
+            "true",
+            "yes",
+            "on",
         }
         from ...compose_warnings import _build_context_size, _human_bytes
+
         seen: set[str] = set()
         block_msgs: list[str] = []
         for spec in to_build:
@@ -1262,10 +1302,13 @@ class ECSProvider(Provider):
             self.progress(message)
             return
         import sys
+
         print(message, file=sys.stderr)
 
     def _check_local_state_lock(
-        self, out_dir: Path, ctx: DeployContext,
+        self,
+        out_dir: Path,
+        ctx: DeployContext,
     ) -> None:
         """Pre-flight: surface a held local terraform state lock fast.
 
@@ -1286,6 +1329,7 @@ class ECSProvider(Provider):
         if not lock_file.exists():
             return
         import json as _json
+
         try:
             info = _json.loads(lock_file.read_text())
         except (OSError, _json.JSONDecodeError):
@@ -1308,7 +1352,9 @@ class ECSProvider(Provider):
         )
 
     def _reconcile_orphan_log_groups(
-        self, ctx: DeployContext, runner: TerraformRunner,
+        self,
+        ctx: DeployContext,
+        runner: TerraformRunner,
     ) -> None:
         """Import an AWS-side orphan container-insights log group, if any.
 
@@ -1333,9 +1379,7 @@ class ECSProvider(Provider):
         """
         ecs_cfg = _ecs_cfg(ctx)
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
-        log_group_name = (
-            f"/aws/ecs/containerinsights/{cluster_name}/performance"
-        )
+        log_group_name = f"/aws/ecs/containerinsights/{cluster_name}/performance"
 
         try:
             session = self.session_factory(ctx)
@@ -1343,9 +1387,9 @@ class ECSProvider(Provider):
             resp = logs.describe_log_groups(logGroupNamePrefix=log_group_name)
             groups = resp.get("logGroups", [])
             existing = [
-                g for g in groups
-                if isinstance(g, dict)
-                and g.get("logGroupName") == log_group_name
+                g
+                for g in groups
+                if isinstance(g, dict) and g.get("logGroupName") == log_group_name
             ]
             if not existing:
                 return
@@ -1367,8 +1411,7 @@ class ECSProvider(Provider):
                 log_group_name,
             )
             self._emit(
-                f"imported orphan log group {log_group_name} into "
-                f"terraform state"
+                f"imported orphan log group {log_group_name} into " f"terraform state"
             )
             return
         except TerraformError as exc:
@@ -1432,7 +1475,9 @@ class ECSProvider(Provider):
             )
 
     def _reconcile_orphan_backup_bucket(
-        self, ctx: DeployContext, runner: TerraformRunner,
+        self,
+        ctx: DeployContext,
+        runner: TerraformRunner,
     ) -> None:
         """rc-nae: import an AWS-side S3 bucket whose name matches
         backup.bucket but isn't in terraform state.
@@ -1587,7 +1632,10 @@ class ECSProvider(Provider):
         self._watch_post_rollout_errors(client, cluster, rolled_names)
 
     def _watch_post_rollout_errors(
-        self, client: Any, cluster: str, services: list[str],
+        self,
+        client: Any,
+        cluster: str,
+        services: list[str],
     ) -> None:
         """rc-8zz: poll ECS service events for ~60s after force-roll;
         surface IAM/secret/ECR placement errors clearly + early.
@@ -1601,6 +1649,7 @@ class ECSProvider(Provider):
         operators can tune.
         """
         import os as _os
+
         budget = int(_os.environ.get("RC_POST_ROLLOUT_WATCH_S", "60"))
         if budget <= 0 or not services:
             return
@@ -1644,7 +1693,8 @@ class ECSProvider(Provider):
         while time.monotonic() < deadline:
             try:
                 desc = client.describe_services(
-                    cluster=cluster, services=services,
+                    cluster=cluster,
+                    services=services,
                 )
             except Exception as exc:  # noqa: BLE001
                 # rc-x19: same as above — warn rather than silently abort
@@ -1706,8 +1756,7 @@ class ECSProvider(Provider):
             for svc_name, count in flapping.items():
                 sample = flap_sample.get(svc_name, "").strip()[:200]
                 self._emit(
-                    f"    {svc_name}: {count} unhealthy events. "
-                    f"Last: {sample}"
+                    f"    {svc_name}: {count} unhealthy events. " f"Last: {sample}"
                 )
             self._emit(
                 "  Likely causes: (1) health_check_grace_period too short "
@@ -1797,10 +1846,15 @@ class ECSProvider(Provider):
         for name in service_names:
             s = reported.get(name)
             if s is None:
-                statuses.append(ServiceStatus(
-                    name=name, desired=0, running=0, health="unknown",
-                    last_event="service not found",
-                ))
+                statuses.append(
+                    ServiceStatus(
+                        name=name,
+                        desired=0,
+                        running=0,
+                        health="unknown",
+                        last_event="service not found",
+                    )
+                )
                 continue
             running = int(s.get("runningCount", 0))
             desired = int(s.get("desiredCount", 0))
@@ -1826,12 +1880,17 @@ class ECSProvider(Provider):
                 health = base_health
             events = s.get("events") or []
             last_event = events[0]["message"] if events else None
-            statuses.append(ServiceStatus(
-                name=name, desired=desired, running=running,
-                health=health, last_event=last_event,
-                running_revision=running_rev,
-                latest_revision=latest_rev,
-            ))
+            statuses.append(
+                ServiceStatus(
+                    name=name,
+                    desired=desired,
+                    running=running,
+                    health=health,
+                    last_event=last_event,
+                    running_revision=running_rev,
+                    latest_revision=latest_rev,
+                )
+            )
 
         cluster_health = (
             "healthy"
@@ -1942,9 +2001,6 @@ class ECSProvider(Provider):
         spawn itself fails.
         """
         import os as _os
-        import re as _re
-        import shlex
-        import subprocess
 
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
@@ -1963,6 +2019,7 @@ class ECSProvider(Provider):
         # override via RC_EXEC_WAIT_TIMEOUT_S env var to keep mocked
         # ecs_client.list_tasks=[] from looping for 5 min.
         import os as _os_env
+
         wait_budget = int(_os_env.environ.get("RC_EXEC_WAIT_TIMEOUT_S", "300"))
         wait_interval = float(_os_env.environ.get("RC_EXEC_WAIT_INTERVAL_S", "5"))
         deadline = time.monotonic() + wait_budget
@@ -1973,10 +2030,15 @@ class ECSProvider(Provider):
         # heartbeat fires every RC_HEARTBEAT_INTERVAL_S (default 30s).
         # Skipped when wait_budget=0 (test paths).
         from ...heartbeat import heartbeat as _hb
-        _hb_ctx = _hb(
-            self.progress,
-            f"waiting for service {service!r} to be exec-ready",
-        ) if wait_budget > 0 else None
+
+        _hb_ctx = (
+            _hb(
+                self.progress,
+                f"waiting for service {service!r} to be exec-ready",
+            )
+            if wait_budget > 0
+            else None
+        )
         if _hb_ctx is not None:
             _hb_ctx.__enter__()
         # rc-0ev: also fetch the service's CURRENT taskDefinitionArn so
@@ -1988,7 +2050,8 @@ class ECSProvider(Provider):
         current_td_arn: Optional[str] = None
         try:
             svc_desc = ecs_client.describe_services(
-                cluster=cluster, services=[service],
+                cluster=cluster,
+                services=[service],
             )
             services_list = svc_desc.get("services") or []
             if services_list:
@@ -1996,9 +2059,12 @@ class ECSProvider(Provider):
         except Exception:  # noqa: BLE001
             current_td_arn = None
         while True:
-            tasks = ecs_client.list_tasks(
-                cluster=cluster, serviceName=service, desiredStatus="RUNNING"
-            ).get("taskArns") or []
+            tasks = (
+                ecs_client.list_tasks(
+                    cluster=cluster, serviceName=service, desiredStatus="RUNNING"
+                ).get("taskArns")
+                or []
+            )
             if tasks:
                 # Prefer a task whose ExecuteCommandAgent is RUNNING AND
                 # whose enableExecuteCommand is True AND whose
@@ -2040,7 +2106,7 @@ class ECSProvider(Provider):
                     for c in containers:
                         if not isinstance(c, dict):
                             continue
-                        for ag in (c.get("managedAgents") or []):
+                        for ag in c.get("managedAgents") or []:
                             if not isinstance(ag, dict):
                                 continue
                             if ag.get("name") == "ExecuteCommandAgent":
@@ -2054,10 +2120,7 @@ class ECSProvider(Provider):
                     # rc-0ev: prefer matching-revision tasks; remember
                     # the old-revision exec-ready task as a fallback.
                     arn = t.get("taskArn")
-                    if (
-                        current_td_arn
-                        and t.get("taskDefinitionArn") == current_td_arn
-                    ):
+                    if current_td_arn and t.get("taskDefinitionArn") == current_td_arn:
                         preferred = arn
                         break
                     if preferred_old_revision is None:
@@ -2076,7 +2139,8 @@ class ECSProvider(Provider):
                 # If NO task we saw was explicitly blocked, fall through
                 # to the first task ARN from list_tasks (pre-46.6 behavior).
                 fallback = next(
-                    (a for a in tasks if a not in exec_blocked_tasks), None,
+                    (a for a in tasks if a not in exec_blocked_tasks),
+                    None,
                 )
                 if fallback:
                     task_arn = fallback
@@ -2125,16 +2189,29 @@ class ECSProvider(Provider):
         # broken in-container SSM agent; without this the user sees
         # nothing until the 10-min timeout fires.
         from ...heartbeat import heartbeat as _hb2
+
         if interactive:
             with _hb2(
-                self.progress, f"executing in {service!r} (interactive)",
+                self.progress,
+                f"executing in {service!r} (interactive)",
             ):
                 return self._exec_interactive_tty(
-                    cluster, task_arn, service, command, region, env,
+                    cluster,
+                    task_arn,
+                    service,
+                    command,
+                    region,
+                    env,
                 )
         with _hb2(self.progress, f"executing in {service!r}"):
             return self._exec_capture(
-                cluster, task_arn, service, command, region, env, timeout,
+                cluster,
+                task_arn,
+                service,
+                command,
+                region,
+                env,
+                timeout,
             )
 
     _SENTINEL_BEGIN = "__RC_EXEC_BEGIN__"
@@ -2142,8 +2219,14 @@ class ECSProvider(Provider):
     _SENTINEL_EXIT = "__RC_EXEC_EXIT__"
 
     def _exec_capture(
-        self, cluster: str, task_arn: str, container: str,
-        command: list[str], region: Optional[str], env: dict, timeout: int,
+        self,
+        cluster: str,
+        task_arn: str,
+        container: str,
+        command: list[str],
+        region: Optional[str],
+        env: dict,
+        timeout: int,
     ) -> ExecResult:
         import re as _re
         import shlex
@@ -2164,12 +2247,18 @@ class ECSProvider(Provider):
         wrapped = f"sh -c {shlex.quote(wrapped_inner)}"
 
         aws_cmd = [
-            "aws", "ecs", "execute-command",
-            "--cluster", cluster,
-            "--task", task_arn,
-            "--container", container,
+            "aws",
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task_arn,
+            "--container",
+            container,
             "--interactive",
-            "--command", wrapped,
+            "--command",
+            wrapped,
         ]
         if region:
             aws_cmd.extend(["--region", region])
@@ -2185,8 +2274,11 @@ class ECSProvider(Provider):
         )
         try:
             proc = subprocess.run(
-                aws_cmd, stdin=keepalive.stdout,
-                capture_output=True, env=env, timeout=timeout,
+                aws_cmd,
+                stdin=keepalive.stdout,
+                capture_output=True,
+                env=env,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             return ExecResult(
@@ -2221,7 +2313,8 @@ class ECSProvider(Provider):
         return ExecResult(
             exit_code=proc.returncode or 1,
             stdout=raw_out,
-            stderr=raw_err or (
+            stderr=raw_err
+            or (
                 "exec failed: SSM session ended without our sentinels — "
                 "check that ECS Exec is enabled (provider does this on v2 "
                 "deploys) and that the task role carries ssmmessages:* perms"
@@ -2229,19 +2322,31 @@ class ECSProvider(Provider):
         )
 
     def _exec_interactive_tty(
-        self, cluster: str, task_arn: str, container: str,
-        command: list[str], region: Optional[str], env: dict,
+        self,
+        cluster: str,
+        task_arn: str,
+        container: str,
+        command: list[str],
+        region: Optional[str],
+        env: dict,
     ) -> ExecResult:
         import os as _os
         import shlex
+
         user_cmd = " ".join(shlex.quote(c) for c in command)
         aws_cmd = [
-            "aws", "ecs", "execute-command",
-            "--cluster", cluster,
-            "--task", task_arn,
-            "--container", container,
+            "aws",
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task_arn,
+            "--container",
+            container,
             "--interactive",
-            "--command", user_cmd,
+            "--command",
+            user_cmd,
         ]
         if region:
             aws_cmd.extend(["--region", region])
@@ -2280,11 +2385,13 @@ class ECSProvider(Provider):
         alias_hostnames = alias_hostnames or []
         legacy_domain = ecs_cfg.get("domain") or (ctx.rc_yml_v2 or {}).get("domain")
         # Collect every distinct hostname that needs a cert + R53 record.
-        all_domains: list[str] = sorted({
-            *(s["domain"] for s in domained_services),
-            *alias_hostnames,
-            *([legacy_domain] if legacy_domain else []),
-        })
+        all_domains: list[str] = sorted(
+            {
+                *(s["domain"] for s in domained_services),
+                *alias_hostnames,
+                *([legacy_domain] if legacy_domain else []),
+            }
+        )
         if not all_domains:
             return None
         if not has_public_service:
@@ -2309,9 +2416,7 @@ class ECSProvider(Provider):
             )
         certificate_arn = tls.get("certificate_arn")
         if tls_mode == "manual" and not certificate_arn:
-            raise ProviderConfigError(
-                "tls.mode=manual requires tls.certificate_arn"
-            )
+            raise ProviderConfigError("tls.mode=manual requires tls.certificate_arn")
         return {
             "domain": primary,
             "zone": zone,
@@ -2362,8 +2467,12 @@ class ECSProvider(Provider):
 
 _EMITTED_SUFFIXES = (".tf",)
 _EMITTED_EXTRAS = {"README.md"}
-_IGNORED_TOP_LEVEL = {".terraform", ".terraform.lock.hcl",
-                      "terraform.tfstate", "terraform.tfstate.backup"}
+_IGNORED_TOP_LEVEL = {
+    ".terraform",
+    ".terraform.lock.hcl",
+    "terraform.tfstate",
+    "terraform.tfstate.backup",
+}
 
 
 def _revision_id_from_dir(out_dir: Path) -> str:

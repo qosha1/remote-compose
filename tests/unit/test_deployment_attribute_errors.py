@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Bug 1: Status enum sanity
 # ---------------------------------------------------------------------------
@@ -23,12 +22,14 @@ import pytest
 class TestDeploymentStatusEnum:
     def test_running_exists(self):
         from remote_compose.models import Deployment
+
         # The valid name. Code referenced this but used IN_PROGRESS.
         assert hasattr(Deployment.Status, "RUNNING")
         assert Deployment.Status.RUNNING == "running"
 
     def test_in_progress_does_not_exist(self):
         from remote_compose.models import Deployment
+
         # If someone re-adds IN_PROGRESS, the codebase should rename
         # uses to RUNNING (or both, but with explicit aliasing).
         assert not hasattr(Deployment.Status, "IN_PROGRESS")
@@ -42,6 +43,7 @@ class TestDeploymentStatusEnum:
 class TestDeploymentDurationIsReadonly:
     def test_duration_is_a_property_not_a_field(self):
         from remote_compose.models import Deployment
+
         # If duration were a regular descriptor (like a Django field),
         # ``__class__.duration`` would be a ``DeferredAttribute``. Its
         # being a property means assignment raises AttributeError.
@@ -61,6 +63,7 @@ class TestDeploymentDurationIsReadonly:
 class TestDeploymentLogFieldName:
     def test_log_level_field_exists(self):
         from remote_compose.models import DeploymentLog
+
         # Django model class lets us inspect _meta.get_fields().
         names = {f.name for f in DeploymentLog._meta.get_fields()}
         assert "log_level" in names
@@ -81,9 +84,7 @@ class TestSourceSideFixes:
     integration test would crash at runtime."""
 
     def test_no_in_progress_reference_in_deployment_service(self):
-        path = (
-            "remote_compose/services/ecs_deployment_service.py"
-        )
+        path = "remote_compose/services/ecs_deployment_service.py"
         with open(path) as f:
             text = f.read()
         assert "Deployment.Status.IN_PROGRESS" not in text
@@ -91,17 +92,13 @@ class TestSourceSideFixes:
     def test_no_assignment_to_deployment_dot_duration(self):
         # We allow ``deployment._duration = ...`` (dead but harmless),
         # but ``deployment.duration = ...`` raises AttributeError.
-        path = (
-            "remote_compose/services/ecs_deployment_service.py"
-        )
+        path = "remote_compose/services/ecs_deployment_service.py"
         with open(path) as f:
             text = f.read()
         assert "deployment.duration =" not in text
 
     def test_management_command_uses_log_level(self):
-        path = (
-            "remote_compose/management/commands/ecs_service.py"
-        )
+        path = "remote_compose/management/commands/ecs_service.py"
         with open(path) as f:
             text = f.read()
         assert "log.log_level" in text

@@ -25,8 +25,11 @@ def runner():
     return CliRunner()
 
 
-def _record(project="proj-a", expires_in: timedelta = timedelta(hours=2),
-            created_ago: timedelta = timedelta(minutes=30)):
+def _record(
+    project="proj-a",
+    expires_in: timedelta = timedelta(hours=2),
+    created_ago: timedelta = timedelta(minutes=30),
+):
     now = datetime.now(timezone.utc)
     expires = now + expires_in
     created = now - created_ago
@@ -49,6 +52,7 @@ def _record(project="proj-a", expires_in: timedelta = timedelta(hours=2),
 # _format_relative_time helper
 # ---------------------------------------------------------------------------
 
+
 class TestFormatRelativeTime:
     def test_minutes_in_future(self):
         now = datetime(2026, 4, 26, 12, 0, 0, tzinfo=timezone.utc)
@@ -57,13 +61,19 @@ class TestFormatRelativeTime:
 
     def test_hours_minutes_in_future(self):
         now = datetime(2026, 4, 26, 12, 0, 0, tzinfo=timezone.utc)
-        future = (now + timedelta(hours=2, minutes=15)).isoformat().replace("+00:00", "Z")
+        future = (
+            (now + timedelta(hours=2, minutes=15)).isoformat().replace("+00:00", "Z")
+        )
         # When days=0 we include hours+minutes; when days>0 we drop minutes.
         assert _format_relative_time(future, now) == "in 2h 15m"
 
     def test_days_in_future_drops_minutes(self):
         now = datetime(2026, 4, 26, 12, 0, 0, tzinfo=timezone.utc)
-        future = (now + timedelta(days=3, hours=4, minutes=20)).isoformat().replace("+00:00", "Z")
+        future = (
+            (now + timedelta(days=3, hours=4, minutes=20))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         assert _format_relative_time(future, now) == "in 3d 4h"
 
     def test_past_renders_with_ago_suffix(self):
@@ -83,6 +93,7 @@ class TestFormatRelativeTime:
 # ---------------------------------------------------------------------------
 # rc list --ephemeral table output
 # ---------------------------------------------------------------------------
+
 
 class TestListEphemeralTable:
     def test_empty_registry_friendly_message(self, runner):
@@ -133,6 +144,7 @@ class TestListEphemeralTable:
 # ---------------------------------------------------------------------------
 # rc list --ephemeral --json
 # ---------------------------------------------------------------------------
+
 
 class TestListEphemeralJson:
     def test_empty_registry_yields_empty_array(self, runner):

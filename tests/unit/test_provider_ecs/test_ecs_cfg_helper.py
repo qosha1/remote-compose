@@ -55,7 +55,9 @@ class TestEcsCfgTypeValidation:
 
     def test_raises_when_ecs_not_dict(self):
         ctx = _ctx({"ecs": ["list-not-dict"]})
-        with pytest.raises(ProviderConfigError, match="provider_config.ecs must be a dict"):
+        with pytest.raises(
+            ProviderConfigError, match="provider_config.ecs must be a dict"
+        ):
             _ecs_cfg(ctx)
 
 
@@ -67,18 +69,24 @@ class TestEcsCfgRequireKnob:
 
     def test_raises_when_required_key_missing(self):
         ctx = _ctx({"ecs": {"cluster": "c"}})
-        with pytest.raises(ProviderConfigError, match="provider_config.ecs.region is required"):
+        with pytest.raises(
+            ProviderConfigError, match="provider_config.ecs.region is required"
+        ):
             _ecs_cfg(ctx, require=("region",))
 
     def test_raises_when_required_key_empty_string(self):
         # Falsy values count as missing — '' is not a valid region.
         ctx = _ctx({"ecs": {"region": ""}})
-        with pytest.raises(ProviderConfigError, match="provider_config.ecs.region is required"):
+        with pytest.raises(
+            ProviderConfigError, match="provider_config.ecs.region is required"
+        ):
             _ecs_cfg(ctx, require=("region",))
 
     def test_raises_first_missing_key_name(self):
         ctx = _ctx({"ecs": {}})
-        with pytest.raises(ProviderConfigError, match="provider_config.ecs.region is required"):
+        with pytest.raises(
+            ProviderConfigError, match="provider_config.ecs.region is required"
+        ):
             _ecs_cfg(ctx, require=("region", "cluster"))
 
     def test_no_require_returns_partial_config(self):

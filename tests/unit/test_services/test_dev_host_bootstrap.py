@@ -8,11 +8,8 @@ Each source plugin produces cloud-init YAML for an EC2 dev-host bootstrap.
 Plugins: GitSource (default for sentinel), ImageSource, LocalSource, ScriptSource.
 """
 
-from pathlib import Path
-
 import pytest
 import yaml
-
 
 pytestmark = pytest.mark.unit
 
@@ -301,7 +298,10 @@ class TestMultiGitSource:
                 {"url": "https://github.com/owner/sentinal.git"},
                 {"url": "https://github.com/owner/browser-mgr.git"},
             ],
-            compose_filenames=["docker-compose.full.yml", "docker-compose.browser-mgr.yml"],
+            compose_filenames=[
+                "docker-compose.full.yml",
+                "docker-compose.browser-mgr.yml",
+            ],
         ).render_user_data()
 
         # Both filenames must appear in the bootstrap (wait + up loops)
@@ -374,7 +374,7 @@ class TestClaudeConfigTarball:
         (claude_dir / "agents").mkdir()
         (claude_dir / "agents" / "my-agent.md").write_text("---\nname: x\n---\nbody")
         json_path = tmp_path / ".claude.json"
-        json_path.write_text('{}')
+        json_path.write_text("{}")
 
         tarball = _build_claude_config_tarball(claude_dir, json_path)
 
@@ -391,8 +391,15 @@ class TestClaudeConfigTarball:
 
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
-        for d in ("projects", "backups", "cache", "history.jsonl",
-                  "shell-snapshots", "telemetry", "statsig"):
+        for d in (
+            "projects",
+            "backups",
+            "cache",
+            "history.jsonl",
+            "shell-snapshots",
+            "telemetry",
+            "statsig",
+        ):
             p = claude_dir / d
             if d.endswith(".jsonl"):
                 p.write_text("history")
@@ -406,10 +413,19 @@ class TestClaudeConfigTarball:
         with tarfile.open(tarball, "r:gz") as tar:
             names = tar.getnames()
 
-        for excluded in ("projects", "backups", "cache", "history.jsonl",
-                         "shell-snapshots", "telemetry", "statsig"):
+        for excluded in (
+            "projects",
+            "backups",
+            "cache",
+            "history.jsonl",
+            "shell-snapshots",
+            "telemetry",
+            "statsig",
+        ):
             for n in names:
-                assert excluded not in n, f"tarball should not contain {excluded}, found {n}"
+                assert (
+                    excluded not in n
+                ), f"tarball should not contain {excluded}, found {n}"
 
     def test_includes_hooks_dir_when_present(self, tmp_path):
         """Hooks copied to the box so local SessionStart/Stop hooks fire there
@@ -442,9 +458,11 @@ class TestClaudeConfigTarball:
         monkeypatch.setenv("HOME", str(tmp_path))
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
-        (claude_dir / ".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"sk-x"}}')
+        (claude_dir / ".credentials.json").write_text(
+            '{"claudeAiOauth":{"accessToken":"sk-x"}}'
+        )
         json_path = tmp_path / ".claude.json"
-        json_path.write_text('{}')
+        json_path.write_text("{}")
 
         tarball = _build_claude_config_tarball(claude_dir, json_path)
         with tarfile.open(tarball, "r:gz") as tar:
@@ -497,7 +515,9 @@ class TestSanitizedSourceRepr:
         from remote_compose.cli_commands.dev import _sanitized_source_repr
         from remote_compose.dev_host.bootstrap import GitSource
 
-        out = _sanitized_source_repr(GitSource(url="https://github.com/x/y.git", ref="main"))
+        out = _sanitized_source_repr(
+            GitSource(url="https://github.com/x/y.git", ref="main")
+        )
 
         assert "https://github.com/x/y.git" in out
         assert "main" in out
@@ -597,9 +617,15 @@ class TestSourceAutodetect:
         subprocess.run(
             [
                 "git",
-                "-c", "user.email=test@example.com",
-                "-c", "user.name=test",
-                "commit", "--allow-empty", "-m", "init", "-q",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+                "-q",
             ],
             cwd=repo,
             check=True,
