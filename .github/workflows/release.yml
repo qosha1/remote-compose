@@ -31,9 +31,9 @@ jobs:
     # blocking the release. Deploy does NOT depend on this.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -52,9 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -82,7 +82,7 @@ jobs:
           pip install build
           python -m build --wheel --sdist .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/
@@ -101,7 +101,7 @@ jobs:
       name: pypi
       url: https://pypi.org/project/remote-compose/
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: distributions
           path: dist/
@@ -128,9 +128,9 @@ jobs:
     # already happened; the dispatched run is for re-testing).
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: distributions
           path: dist/
@@ -168,9 +168,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ['3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 

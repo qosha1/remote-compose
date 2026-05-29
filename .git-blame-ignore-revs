@@ -1,0 +1,7 @@
+# Revisions to ignore in `git blame` (bulk formatting / no-behavior-change).
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically.
+
+# style: black-format repo + fix all flake8 lint (rc-nq6.2)
+ecba907ae4fcb6c1cda4e8e76084be27e277de1e

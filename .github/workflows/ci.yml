@@ -24,6 +24,32 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    # rc-nq6.2: blocking format + lint gate. black is the single authority on
+    # formatting/line-length; flake8 (config in .flake8, E501 delegated to
+    # black) catches unused imports, dead code, undefined names, etc.
+    name: Lint (black + flake8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,ecs]"
+
+      - name: black --check
+        run: black --check remote_compose/ tests/ scripts/
+
+      - name: flake8
+        run: flake8 remote_compose/ tests/ scripts/
+
   fast-tier:
     name: Unit + contract (py${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -35,9 +61,9 @@ jobs:
         # so a single OS catches the vast majority of regressions cheaply.
         python: ['3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: 'pip'
