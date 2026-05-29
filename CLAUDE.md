@@ -139,6 +139,23 @@ Conventions:
   at module level so the marker is inherited by every test in the file.
 - Same convention for `tests/e2e/`.
 
+CI & enforcement (what the gate checks — see `.github/workflows/`):
+- `ci.yml` (blocking, every PR/push): `lint` (black --check + flake8, config
+  in `.flake8` — black owns line length, E501 ignored) · `fast-tier`
+  (unit+contract on ubuntu py3.11/3.12 + macOS py3.12) · `coverage`
+  (fast-tier with `--cov-fail-under=57` — a ratchet floor, raise as the suite
+  grows). Branch protection (repo settings) makes these required to merge.
+- Random order: `pytest-randomly` auto-activates, so the gate runs in a
+  randomized order each time and prints `--randomly-seed=N` (reproduce a
+  failure with `pytest -p randomly --randomly-seed=N`). The suite is
+  order-independent — keep it that way.
+- Runtime budget: a `conftest.py` hook fails the run if any unit/contract
+  test's call phase exceeds 8s (override `RC_TEST_SLOW_BUDGET_S`) without
+  `@pytest.mark.slow`. Either speed the test up or mark it slow.
+- Hang guard: CI passes `--timeout=60` (pytest-timeout) on the fast tier.
+- `flaky.yml` (nightly, non-blocking): runs the fast tier 3x with fresh
+  seeds + a `--reruns` rerun report to surface flaky / order-dependent tests.
+
 ## Scripts
 
 - `scripts/deploy_to_ecs.py`: CLI tool for ECS deployments
