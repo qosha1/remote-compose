@@ -16,6 +16,7 @@ Feature work deferred to dedicated follow-ups:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -1262,6 +1263,15 @@ class ECSProvider(Provider):
         # whose terraform predates the buildcache resource won't have this
         # output and we just degrade to no-cache builds.
         buildcache_repo = (outputs.get("buildcache_repository") or {}).get("value")
+        # Adopted / `--no-state` stacks build+push without ever running
+        # terraform, so there's no `buildcache_repository` output to read and
+        # every deploy rebuilds the (heavy pip/apt) layers cold. Let CI or an
+        # operator point at a pre-created cache repo via RC_BUILDCACHE_REPO so
+        # those deploys get layer caching too. Terraform output wins when both
+        # are set; RC_DISABLE_BUILDCACHE (handled in ImageBuilder) still opts
+        # out entirely.
+        if not buildcache_repo:
+            buildcache_repo = os.environ.get("RC_BUILDCACHE_REPO") or None
 
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
         from ...no_cache_state import consume_no_cache

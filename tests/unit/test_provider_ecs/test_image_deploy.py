@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -406,6 +407,73 @@ class TestBuildcacheRepoWired:
         assert not any("buildx" in c for c in cmds)
         for c in cmds:
             assert not any(arg.startswith("--cache-") for arg in c)
+
+    def test_cache_args_emitted_from_env_when_no_terraform_output(
+        self,
+        tmp_path,
+        mock_session,
+    ):
+        # Adopted / --no-state stacks have no buildcache_repository output;
+        # RC_BUILDCACHE_REPO supplies the cache repo so they still cache.
+        ctx = self._ctx_with_builds(tmp_path)
+        runner = self._runner_with_buildcache(tmp_path, buildcache=False)
+        provider = ECSProvider(
+            runner_factory=lambda d: runner,
+            session_factory=lambda c: mock_session,
+        )
+        token = base64.b64encode(b"AWS:pw").decode()
+        mock_session.client.return_value.get_authorization_token.return_value = {
+            "authorizationData": [
+                {
+                    "authorizationToken": token,
+                    "proxyEndpoint": "https://111.dkr.ecr.us-east-1.amazonaws.com",
+                }
+            ],
+        }
+        popen_cmds: list[list] = []
+
+        def _fake_popen(cmd, *args, **kwargs):
+            popen_cmds.append(cmd)
+            proc = mock.Mock()
+            proc.stdout = mock.Mock()
+            proc.stdout.readline.return_value = ""
+            proc.stdout.close = mock.Mock()
+            proc.stderr = mock.Mock()
+            proc.stderr.readline.return_value = ""
+            proc.stderr.close = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.kill = mock.Mock()
+            return proc
+
+        env_repo = "111.dkr.ecr.us-east-1.amazonaws.com/img-test/buildcache"
+        with (
+            mock.patch.dict(os.environ, {"RC_BUILDCACHE_REPO": env_repo}),
+            mock.patch("subprocess.run") as sub_run,
+            mock.patch("subprocess.Popen", side_effect=_fake_popen),
+        ):
+            sub_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            provider.deploy(ctx)
+
+        cmds = popen_cmds + [c.args[0] for c in sub_run.call_args_list]
+        buildx_cmds = [
+            c
+            for c in cmds
+            if len(c) >= 3
+            and c[0].rsplit("/", 1)[-1] == "docker"
+            and c[1] == "buildx"
+            and c[2] == "build"
+        ]
+        assert len(buildx_cmds) == 1, (
+            f"expected one `docker buildx build` from RC_BUILDCACHE_REPO, "
+            f"got {buildx_cmds!r}"
+        )
+        cmd = buildx_cmds[0]
+        cache_ref = f"{env_repo}:api-cache"
+        cf_idx = cmd.index("--cache-from")
+        ct_idx = cmd.index("--cache-to")
+        assert cmd[cf_idx + 1] == f"type=registry,ref={cache_ref}"
+        assert cmd[ct_idx + 1] == f"type=registry,ref={cache_ref},mode=max"
 
 
 class TestBuildcacheTerraformEmitted:
