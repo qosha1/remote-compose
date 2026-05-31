@@ -6,7 +6,7 @@
 resource "aws_security_group" "efs" {
   name        = "${var.project}-efs"
   description = "EFS - NFS 2049 from ECS tasks only."
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = {{ vpc_id_ref }}
 
   ingress {
     from_port       = 2049
@@ -42,7 +42,7 @@ resource "aws_efs_mount_target" "{{ vol.tf_name }}" {
   # Tasks run in public subnets (rc-e5u.25) so mount targets live there too.
   count           = local.public_subnet_count
   file_system_id  = aws_efs_file_system.{{ vol.tf_name }}.id
-  subnet_id       = aws_subnet.public[count.index].id
+  subnet_id       = {{ public_subnet_idx_ref }}
   security_groups = [aws_security_group.efs.id]
 }
 {%- endfor %}
@@ -101,7 +101,7 @@ resource "aws_efs_file_system" "{{ dev_efs_volume.tf_name }}" {
 resource "aws_efs_mount_target" "{{ dev_efs_volume.tf_name }}" {
   count           = local.public_subnet_count
   file_system_id  = aws_efs_file_system.{{ dev_efs_volume.tf_name }}.id
-  subnet_id       = aws_subnet.public[count.index].id
+  subnet_id       = {{ public_subnet_idx_ref }}
   security_groups = [aws_security_group.efs.id]
 }
 

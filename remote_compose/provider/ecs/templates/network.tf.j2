@@ -1,6 +1,22 @@
 data "aws_availability_zones" "available" {
   state = "available"
 }
+{%- if existing_vpc %}
+
+# rc-a57: deploy INTO an existing VPC (provider_config.ecs.vpc_id). rc creates
+# no VPC/IGW/subnets/route-tables — the existing VPC owns egress + routing, and
+# its DHCP options are left untouched (see service_discovery.tf.j2). Downstream
+# templates read these locals via the *_ref aliases, so they stay agnostic.
+data "aws_vpc" "main" {
+  id = "{{ existing_vpc_id }}"
+}
+
+locals {
+  rc_public_subnet_ids  = [{% for s in public_subnet_ids %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+  rc_private_subnet_ids = [{% for s in private_subnet_ids %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+  public_subnet_count   = {{ public_subnet_ids | length }}
+}
+{%- else %}
 
 # rc-e5u.46.9: subnet count exposed as a static local so dependent
 # resources (efs_mount_target, route_table_association, ...) can use it
@@ -65,3 +81,4 @@ resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
+{%- endif %}

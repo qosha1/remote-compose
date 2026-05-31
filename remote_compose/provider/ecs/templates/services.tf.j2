@@ -176,8 +176,8 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
     # only permits inbound from the ALB SG + self, so the public IP is not
     # an exposure - it is just an egress path. Private-subnet + NAT variant
     # is tracked in rc-e5u.25.
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.tasks.id]
+    subnets          = {{ public_subnet_ids_ref }}
+    security_groups  = [aws_security_group.tasks.id{% for sg in extra_security_group_ids %}, "{{ sg }}"{% endfor %}]
     assign_public_ip = true
   }
 

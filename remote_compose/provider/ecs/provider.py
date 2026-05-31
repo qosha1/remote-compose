@@ -158,6 +158,49 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
+def preflight_existing_vpc(ecs_cfg: dict[str, Any], ec2_client: Any) -> None:
+    """Validate an adopted VPC + subnets against live AWS before emitting (rc-a57).
+
+    No-op unless ``vpc_id`` is set. Verifies the VPC exists, every declared
+    subnet exists AND belongs to that VPC, and the public subnets span >= 2
+    AZs (the ALB requires it). Raises ProviderConfigError with a clear message
+    so the failure surfaces as a named rc error rather than a terraform stack
+    trace. Uses a vpc-id Filter (not SubnetIds) so a stale id is reported as
+    "not in vpc" rather than raising a botocore InvalidSubnetID error.
+    """
+    vpc_id = ecs_cfg.get("vpc_id")
+    if not vpc_id:
+        return
+    public = list(ecs_cfg.get("public_subnet_ids") or [])
+    private = list(ecs_cfg.get("private_subnet_ids") or [])
+
+    vpcs = ec2_client.describe_vpcs(VpcIds=[vpc_id]).get("Vpcs", [])
+    if not vpcs:
+        raise ProviderConfigError(
+            f"provider_config.ecs.vpc_id {vpc_id!r} not found in this account/region"
+        )
+
+    in_vpc = {
+        s["SubnetId"]: s
+        for s in ec2_client.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        ).get("Subnets", [])
+    }
+    declared = list(dict.fromkeys(public + private))
+    missing = [s for s in declared if s not in in_vpc]
+    if missing:
+        raise ProviderConfigError(
+            f"subnet(s) {missing} not found in vpc {vpc_id} "
+            "(check the ids belong to provider_config.ecs.vpc_id)"
+        )
+    azs = {in_vpc[s]["AvailabilityZone"] for s in public}
+    if len(azs) < 2:
+        raise ProviderConfigError(
+            "provider_config.ecs.public_subnet_ids must span >= 2 availability "
+            f"zones for the ALB (got {sorted(azs)})"
+        )
+
+
 class ECSProvider(Provider):
     name = "ecs"
 
@@ -190,6 +233,47 @@ class ECSProvider(Provider):
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         vpc_cidr = ecs_cfg.get("vpc_cidr", VPC_CIDR_DEFAULT)
         aws_profile = ecs_cfg.get("aws_profile")
+
+        # Existing-VPC support (rc-a57): a GENERAL, opt-in capability. With
+        # vpc_id set, rc deploys INTO an existing VPC instead of creating one —
+        # needed where the stack must share a VPC + security group with peer
+        # systems (same-VPC SG-referencing + Cloud Map DNS that cross-VPC
+        # peering can't replicate). Strictly additive: with no vpc_id the
+        # emitted terraform is byte-identical to before (see network.tf.j2 +
+        # the rendering-alias context keys below). AWS pre-flight validation of
+        # the ids lives in preflight_existing_vpc(); here we only validate the
+        # config SHAPE.
+        existing_vpc_id = ecs_cfg.get("vpc_id")
+        public_subnet_ids = list(ecs_cfg.get("public_subnet_ids") or [])
+        private_subnet_ids = list(ecs_cfg.get("private_subnet_ids") or [])
+        extra_security_group_ids = list(ecs_cfg.get("security_group_ids") or [])
+        if existing_vpc_id and not public_subnet_ids:
+            raise ProviderConfigError(
+                "provider_config.ecs.vpc_id requires public_subnet_ids "
+                "(>= 2 subnets across AZs for the ALB + Fargate tasks)"
+            )
+        if public_subnet_ids and not existing_vpc_id:
+            raise ProviderConfigError(
+                "provider_config.ecs.public_subnet_ids requires vpc_id "
+                "(subnet ids are only meaningful when adopting an existing VPC)"
+            )
+        existing_vpc = bool(existing_vpc_id)
+        if not private_subnet_ids:
+            private_subnet_ids = public_subnet_ids
+        # Rendering aliases keep the create path byte-identical: in create mode
+        # these are exactly the original resource references; in adopt mode they
+        # point at the data source + network locals. Templates read these so they
+        # never branch on existing_vpc themselves.
+        if existing_vpc:
+            vpc_id_ref = "data.aws_vpc.main.id"
+            public_subnet_ids_ref = "local.rc_public_subnet_ids"
+            public_subnet_idx_ref = "local.rc_public_subnet_ids[count.index]"
+            private_subnet_ids_ref = "local.rc_private_subnet_ids"
+        else:
+            vpc_id_ref = "aws_vpc.main.id"
+            public_subnet_ids_ref = "aws_subnet.public[*].id"
+            public_subnet_idx_ref = "aws_subnet.public[count.index].id"
+            private_subnet_ids_ref = "aws_subnet.private[*].id"
 
         default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
         if default_launch_type not in {"FARGATE", "EC2"}:
@@ -683,6 +767,18 @@ class ECSProvider(Provider):
             "project": ctx.project,
             "region": region,
             "vpc_cidr": vpc_cidr,
+            # Existing-VPC support (rc-a57). existing_vpc gates network.tf.j2
+            # between create (default) and adopt; the *_ref aliases let the
+            # other templates stay agnostic.
+            "existing_vpc": existing_vpc,
+            "existing_vpc_id": existing_vpc_id,
+            "public_subnet_ids": public_subnet_ids,
+            "private_subnet_ids": private_subnet_ids,
+            "extra_security_group_ids": extra_security_group_ids,
+            "vpc_id_ref": vpc_id_ref,
+            "public_subnet_ids_ref": public_subnet_ids_ref,
+            "public_subnet_idx_ref": public_subnet_idx_ref,
+            "private_subnet_ids_ref": private_subnet_ids_ref,
             "cluster_name": cluster_name,
             "aws_profile": aws_profile,
             "environment": environment,
@@ -749,7 +845,20 @@ class ECSProvider(Provider):
     # Plan / Deploy / Destroy / Redeploy
     # -----------------------------------------------------------------
 
+    def preflight(self, ctx: DeployContext) -> None:
+        """AWS pre-flight for adopted-VPC configs (rc-a57). No-op unless
+        provider_config.ecs.vpc_id is set; otherwise verifies the VPC + subnets
+        against live AWS so a bad id fails as a clear rc error, not a terraform
+        stack trace."""
+        ecs_cfg = _ecs_cfg(ctx)
+        if not ecs_cfg.get("vpc_id"):
+            return
+        session = self.session_factory(ctx)
+        ec2 = session.client("ec2", region_name=ecs_cfg.get("region"))
+        preflight_existing_vpc(ecs_cfg, ec2)
+
     def plan(self, ctx: DeployContext) -> PlanResult:
+        self.preflight(ctx)
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
         runner = self.runner_factory(out_dir)
@@ -784,6 +893,8 @@ class ECSProvider(Provider):
                     f"--services lists service(s) not in this stack: {sorted(unknown)}. "
                     f"Known: {sorted(ctx.services.keys())}"
                 )
+
+        self.preflight(ctx)
 
         # No-state deploy mode (rc-5h8.11): when ctx.skip_terraform is True,
         # we bypass emit_terraform / init / apply / outputs entirely and just

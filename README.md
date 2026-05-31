@@ -143,8 +143,25 @@ provider_config:
     cluster: my-app-prod
     region: us-west-1
     aws_profile: myprofile
-    vpc_cidr: 10.0.0.0/16
+    vpc_cidr: 10.0.0.0/16               # CIDR for the VPC rc creates (default mode)
     route53_zone: rctest.example.com   # override if zone != domain[-2:]
+
+    # --- Deploy into an EXISTING VPC (optional) -------------------------------
+    # By default rc creates its own VPC. Set vpc_id to deploy INTO an existing
+    # one instead — use this when the stack must share a VPC + security group
+    # with peer systems (so same-VPC SG references + Cloud Map DNS work, which
+    # cross-VPC peering can't replicate). All four keys are opt-in; omit them
+    # and behavior is unchanged.
+    #   vpc_id: vpc-0abc123                       # adopt this VPC (vpc_cidr unused)
+    #   public_subnet_ids: [subnet-a, subnet-b]   # >=2 AZs, PUBLIC (IGW route) —
+    #                                             # ALB + Fargate (assign_public_ip)
+    #   private_subnet_ids: [subnet-c, subnet-d]  # optional; defaults to public
+    #   security_group_ids: [sg-mesh]             # extra SGs attached to every
+    #                                             # task (join an existing mesh)
+    # rc pre-flights the VPC + subnets against AWS before deploying. In adopt
+    # mode rc creates NO VPC/IGW/subnets/route-tables and does NOT touch the
+    # VPC's DHCP options, so cross-service discovery must use FQDNs
+    # (<svc>.<project>.local) rather than short names.
 
 terraform:
   output_dir: ./terraform/${provider}

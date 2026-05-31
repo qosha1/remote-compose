@@ -37,7 +37,7 @@ resource "aws_iam_instance_profile" "ec2_instance" {
 resource "aws_security_group" "ec2_instances" {
   name        = "${var.project}-ec2-instances"
   description = "ECS EC2 instances - only talk to ALB and within VPC."
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = {{ vpc_id_ref }}
 
   ingress {
     from_port       = 0
@@ -85,7 +85,7 @@ resource "aws_launch_template" "ec2" {
 
 resource "aws_autoscaling_group" "ec2" {
   name                = "${var.project}-ec2-asg"
-  vpc_zone_identifier = aws_subnet.private[*].id
+  vpc_zone_identifier = {{ private_subnet_ids_ref }}
   min_size            = {{ ec2_capacity.min_size }}
   max_size            = {{ ec2_capacity.max_size }}
   desired_capacity    = {{ ec2_capacity.desired_size }}
