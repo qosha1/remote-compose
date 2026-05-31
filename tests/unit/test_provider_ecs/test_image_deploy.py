@@ -374,7 +374,10 @@ class TestBuildcacheRepoWired:
         cf_idx = cmd.index("--cache-from")
         ct_idx = cmd.index("--cache-to")
         assert cmd[cf_idx + 1] == f"type=registry,ref={cache_ref}"
-        assert cmd[ct_idx + 1] == f"type=registry,ref={cache_ref},mode=max"
+        assert cmd[ct_idx + 1] == (
+            f"type=registry,ref={cache_ref},mode=max"
+            ",image-manifest=true,oci-mediatypes=true"
+        )
 
     def test_cache_args_absent_when_buildcache_missing(
         self,
@@ -473,7 +476,10 @@ class TestBuildcacheRepoWired:
         cf_idx = cmd.index("--cache-from")
         ct_idx = cmd.index("--cache-to")
         assert cmd[cf_idx + 1] == f"type=registry,ref={cache_ref}"
-        assert cmd[ct_idx + 1] == f"type=registry,ref={cache_ref},mode=max"
+        assert cmd[ct_idx + 1] == (
+            f"type=registry,ref={cache_ref},mode=max"
+            ",image-manifest=true,oci-mediatypes=true"
+        )
 
 
 class TestBuildcacheTerraformEmitted:

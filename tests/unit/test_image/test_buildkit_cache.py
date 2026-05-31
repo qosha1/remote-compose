@@ -113,7 +113,10 @@ class TestCacheToWritesModeMax:
         spec.cache_to = [ref]
         cmd = _run(spec)
         idx = cmd.index("--cache-to")
-        assert cmd[idx + 1] == f"type=registry,ref={ref},mode=max"
+        assert cmd[idx + 1] == (
+            f"type=registry,ref={ref},mode=max"
+            ",image-manifest=true,oci-mediatypes=true"
+        )
 
     def test_cache_to_alone_also_routes_through_buildx(self, spec):
         spec.cache_to = ["1.example.com/c:a"]

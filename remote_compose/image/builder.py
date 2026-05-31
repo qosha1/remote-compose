@@ -175,7 +175,15 @@ class ImageBuilder:
             # mode=max exports every intermediate layer (not just final-stage)
             # — without it cache hits only land on the last stage and the
             # `pip install` layer rebuilds every time.
-            cmd += ["--cache-to", f"type=registry,ref={ref},mode=max"]
+            # image-manifest=true,oci-mediatypes=true: ECR rejects buildkit's
+            # default cache manifest (the manifest-list form) — it only accepts
+            # an OCI image manifest. Without these the cache export to ECR fails
+            # and nothing persists. Harmless on registries that accept either.
+            cmd += [
+                "--cache-to",
+                f"type=registry,ref={ref},mode=max"
+                ",image-manifest=true,oci-mediatypes=true",
+            ]
         for tag in spec.tags:
             cmd += ["-t", tag]
         cmd.append(str(spec.context))
