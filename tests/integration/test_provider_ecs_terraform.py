@@ -300,3 +300,62 @@ class TestExistingVpcHclValidates:
         assert 'data "aws_vpc" "main"' in net
         # adopt mode must not touch the existing VPC's DHCP options
         assert "aws_vpc_dhcp_options" not in (out / "service_discovery.tf").read_text()
+
+
+def _shared_image_ctx(tmp_path):
+    """rc-44i: 3 services share one build (django pattern) -> ONE ECR repo +
+    siblings reference it. Truth-tests that the deduped emission (gated
+    aws_ecr_repository + outputs) is valid terraform (catches dangling refs)."""
+    shared = dict(context=str(tmp_path / "app"), dockerfile="Dockerfile")
+    (tmp_path / "app").mkdir(exist_ok=True)
+
+    def svc(name, **extra):
+        return ServiceSpec(
+            name=name,
+            cpu=256,
+            memory=512,
+            build_context=shared["context"],
+            dockerfile=shared["dockerfile"],
+            **extra,
+        )
+
+    return DeployContext(
+        project="itest",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            "django": svc("django", type="application"),
+            "celery-worker": svc("celery-worker", type="worker"),
+            "celery-beat": svc("celery-beat", type="worker"),
+        },
+        secrets=[],
+    )
+
+
+@requires_terraform
+class TestSharedImageHclValidates:
+    """rc-44i truth test: deduped shared-image emission is valid terraform."""
+
+    def test_shared_image_init_and_validate(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_shared_image_ctx(tmp_path), out)
+        runner = TerraformRunner(out)
+        runner.init(backend=False)
+        runner.validate()
+
+    def test_one_repo_three_task_defs(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_shared_image_ctx(tmp_path), out)
+        services_tf = (out / "services.tf").read_text()
+        assert services_tf.count('resource "aws_ecr_repository" "django"') == 1
+        assert 'resource "aws_ecr_repository" "celery_beat"' not in services_tf
+        assert services_tf.count('resource "aws_ecs_task_definition"') == 3

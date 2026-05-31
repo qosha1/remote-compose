@@ -476,6 +476,18 @@ diagram.
 
 ---
 
+## Image builds — shared-image dedup
+
+When several services share one build (same context + dockerfile + target +
+build args — the standard Django layout where `django` and the `celery-*`
+workers run the *same* image, differing only by `command`), rc builds and
+pushes that image **once** to a single ECR repo and points the sibling task
+definitions at it. Without this, an N-service app pushes the same image to N
+repos — and because ECR stores layer blobs per-repo, that's N full uploads
+(hours on a slow uplink). The repo owner is the alphabetically-first service in
+the group; nothing to configure. Services with a unique build or a pre-built
+`image:` are unaffected.
+
 ## Build & test
 
 ```bash

@@ -158,6 +158,64 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
+def image_group_owners(services: dict[str, Any]) -> dict[str, str]:
+    """Map each build-having service to the OWNER of its image group (rc-44i).
+
+    Services sharing a build identity — resolved context + dockerfile + target +
+    build_args — produce an identical image (the Django pattern: django +
+    celery-* run the same image, differing only by command). rc builds + pushes
+    that image ONCE to the owner's ECR repo and points sibling task defs at it,
+    instead of N full pushes to N repos (ECR stores layer blobs per-repo, so N
+    repos = N uploads — hours on a slow uplink).
+
+    Owner = the FIRST service of the group in declaration order (the order
+    services appear in compose/rc.yml, preserved by the dict). For the Django
+    layout that's `django` (declared before its `celery-*` workers), so the
+    shared repo is named after the service the image belongs to. Deterministic
+    for a given config; general — no per-stack logic. Services without a
+    build_context use a pre-built image and are not grouped.
+    """
+    groups: dict[tuple, list[str]] = {}
+    for name, spec in services.items():
+        if not getattr(spec, "build_context", None):
+            continue
+        identity = (
+            str(spec.build_context),
+            spec.dockerfile or "",
+            spec.target or "",
+            frozenset((spec.build_args or {}).items()),
+        )
+        groups.setdefault(identity, []).append(name)
+    owners: dict[str, str] = {}
+    for members in groups.values():
+        owner = members[0]  # first-declared service in the group
+        for member in members:
+            owners[member] = owner
+    return owners
+
+
+def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
+    """The service specs to actually build+push (rc-44i): one OWNER per image
+    group, never the siblings (their task def references the owner image). A
+    services_filter naming a sibling maps to its owner so the shared image is
+    still rebuilt. Order follows sorted service name for determinism."""
+    owners = image_group_owners(services)
+    members: dict[str, set] = {}
+    for name, owner in owners.items():
+        members.setdefault(owner, set()).add(name)
+    build_owners = [
+        spec
+        for name, spec in sorted(services.items())
+        if spec.build_context and owners.get(name, name) == name
+    ]
+    if services_filter is None:
+        return build_owners
+    allowed = set(services_filter)
+    return [
+        spec for spec in build_owners if members.get(spec.name, {spec.name}) & allowed
+    ]
+
+
 def preflight_existing_vpc(ecs_cfg: dict[str, Any], ec2_client: Any) -> None:
     """Validate an adopted VPC + subnets against live AWS before emitting (rc-a57).
 
@@ -281,6 +339,10 @@ class ECSProvider(Provider):
                 f"provider_config.ecs.default_launch_type must be FARGATE or EC2, "
                 f"got {default_launch_type!r}"
             )
+
+        # Shared-image dedup (rc-44i): which service owns each build group's
+        # ECR repo. Computed once; consulted per-service below.
+        image_owners = image_group_owners(ctx.services)
 
         services_view = []
         default_public = None
@@ -487,6 +549,13 @@ class ECSProvider(Provider):
                 # def uses it verbatim instead of an ECR placeholder.
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
+                # Shared-image dedup (rc-44i). Services sharing a build identity
+                # share ONE ECR repo: the owner emits aws_ecr_repository, siblings
+                # reference the owner's image. A service that isn't a build-group
+                # sibling owns its own repo (image_owners.get -> itself), so
+                # single-build / image-only stacks emit exactly as before.
+                "owns_image_repo": image_owners.get(name, name) == name,
+                "image_repo_tf_name": _tf_name(image_owners.get(name, name)),
                 "ephemeral_storage": spec.ephemeral_storage,
                 # Extra container ports (compose ports[] beyond the primary).
                 # Reachable intra-VPC via the tasks SG; not wired to ALB.
@@ -1123,10 +1192,7 @@ class ECSProvider(Provider):
         Used by ``rc deploy --services X --tag v1.2`` for instant rollback /
         deploy of known-good images. See rc-e5u.45.3.
         """
-        to_build = [s for s in ctx.services.values() if s.build_context]
-        if services_filter is not None:
-            allowed = set(services_filter)
-            to_build = [s for s in to_build if s.name in allowed]
+        to_build = _services_to_build(ctx.services, services_filter)
         # rc-2v8 (extended): check build-context sizes BEFORE running
         # docker build. Without this, a 6GB+ context goes straight to
         # buildkit and the user only learns they should have written a
