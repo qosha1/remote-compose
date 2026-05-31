@@ -402,6 +402,64 @@ class TestPerServiceDomain:
         # since django's TG IS the default.
         assert 'aws_lb_target_group" "default"' not in alb
 
+    def test_default_target_flag_wins_over_alphabetical_first(self, tmp_path):
+        """Regression (debuggai-api admin-console/flower): with multiple
+        public services each declaring their own domain, the listener default
+        action must resolve to the service flagged `default_target` — NOT the
+        alphabetically first one. `celery-flower` (alpha < nginx) was wrongly
+        becoming the catch-all, so unmatched hosts (admin-console.debugg.ai)
+        hit flower's 401 instead of nginx."""
+        ctx = DeployContext(
+            project="combo",
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={},
+            provider_config={
+                "ecs": {
+                    "region": "us-west-2",
+                    "cluster": "combo",
+                    "vpc_cidr": "10.0.0.0/16",
+                    "domain": "apex.example.com",
+                    "route53_zone": "example.com",
+                }
+            },
+            tf_backend_config={"type": "local"},
+            working_dir=tmp_path,
+            services={
+                # Alphabetically first public+port service. WITHOUT the fix it
+                # would wrongly win the listener default action.
+                "celery-flower": ServiceSpec(
+                    name="celery-flower",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    public=True,
+                    port=5555,
+                    domain="flower.example.com",
+                ),
+                # Explicitly flagged default target — must win regardless of
+                # alphabetical order.
+                "nginx": ServiceSpec(
+                    name="nginx",
+                    cpu=256,
+                    memory=512,
+                    type="proxy",
+                    public=True,
+                    port=80,
+                    domain="api.example.com",
+                    default_target=True,
+                ),
+            },
+            secrets=[],
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        alb = (out / "alb.tf").read_text()
+        assert "default_target_group_arn = aws_lb_target_group.nginx.arn" in alb
+        assert (
+            "default_target_group_arn = aws_lb_target_group.celery_flower.arn"
+            not in alb
+        )
+
     def test_backward_compat_single_domain_still_works(self, tmp_path):
         # Old shape: only provider_config.ecs.domain set, no per-service
         # domain. Should still emit the original single-domain ALB+ACM+R53

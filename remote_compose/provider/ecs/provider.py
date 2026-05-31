@@ -568,6 +568,8 @@ class ECSProvider(Provider):
                 # rules; only cert SANs + R53 records. Catch-all default
                 # action carries the traffic.
                 "aliases": list(spec.aliases or []) if spec.public else [],
+                # Explicit ALB catch-all selection (see ServiceSpec.default_target).
+                "default_target": bool(spec.default_target) if spec.public else False,
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
@@ -581,6 +583,19 @@ class ECSProvider(Provider):
                 )
             if spec.public and spec.port and default_public is None:
                 default_public = svc_view
+
+        # The loop above iterates services alphabetically, so default_public is
+        # the alphabetically-first public+port service — a silent, surprising
+        # choice when several services are public (e.g. celery-flower sorts
+        # before nginx and would wrongly become the catch-all). When a service
+        # explicitly sets default_target=true, honor it: it wins regardless of
+        # name order. First flagged service wins if more than one is set.
+        default_target_view = next(
+            (s for s in services_view if s.get("default_target") and s.get("port")),
+            None,
+        )
+        if default_target_view is not None:
+            default_public = default_target_view
 
         has_public_service = default_public is not None
         # Any service with a compose `build:` context drives BuildKit cache
