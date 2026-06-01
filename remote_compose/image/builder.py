@@ -133,6 +133,51 @@ class ImageBuilder:
     # Internals
     # -----------------------------------------------------------------
 
+    _BUILDX_BUILDER = "rc-cache"
+
+    def _ensure_buildx_builder(self) -> Optional[str]:
+        """Ensure a docker-container buildx builder exists for registry cache.
+
+        Returns the builder name, or None if buildx / the container driver
+        isn't available (caller then degrades to a plain cache-less build).
+        Idempotent: reuses the builder across deploys once created.
+        """
+        name = self._BUILDX_BUILDER
+        try:
+            inspect = subprocess.run(
+                [self.docker_bin, "buildx", "inspect", name],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            self._emit("  WARN: docker not found — building without cache.")
+            return None
+        if inspect.returncode == 0:
+            return name
+        create = subprocess.run(
+            [
+                self.docker_bin,
+                "buildx",
+                "create",
+                "--name",
+                name,
+                "--driver",
+                "docker-container",
+                "--bootstrap",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if create.returncode != 0:
+            self._emit(
+                "  WARN: could not create a docker-container buildx builder "
+                f"({create.stderr.strip()[:200]}) — building WITHOUT registry "
+                "cache. Install/enable buildx to get layer caching."
+            )
+            return None
+        self._emit(f"  created buildx builder {name!r} (docker-container driver)")
+        return name
+
     def _run_build(
         self,
         spec: ImageBuildSpec,
@@ -140,8 +185,19 @@ class ImageBuilder:
         cache_to: list[str],
     ) -> list[str]:
         use_buildx = bool(cache_from or cache_to)
+        builder_name = None
         if use_buildx:
-            cmd = [self.docker_bin, "buildx", "build"]
+            # Registry cache export (--cache-to type=registry) needs the
+            # docker-container driver — the default `docker` driver can't
+            # export cache. rc owns a dedicated builder so callers (and CI)
+            # don't have to set one up. If buildx/the driver isn't available,
+            # degrade to a plain cache-less build rather than failing.
+            builder_name = self._ensure_buildx_builder()
+            if builder_name is None:
+                use_buildx = False
+                cache_from, cache_to = [], []
+        if use_buildx:
+            cmd = [self.docker_bin, "buildx", "build", "--builder", builder_name]
             # --load brings the built image into the local docker image
             # store so the subsequent `docker push` (against each tag) can
             # find it. Without --load buildx would only export to the

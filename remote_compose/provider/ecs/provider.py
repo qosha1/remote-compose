@@ -1259,19 +1259,27 @@ class ECSProvider(Provider):
             self._emit(f"  WARN: {msg}")
             return []
 
-        # Shared BuildKit cache repo (rc-e5u.45.2). Optional — older stacks
-        # whose terraform predates the buildcache resource won't have this
-        # output and we just degrade to no-cache builds.
+        # Shared BuildKit cache repo (rc-e5u.45.2). Managed stacks get it as a
+        # terraform output. Adopted / `--no-state` stacks never run terraform,
+        # so there's no output and every deploy rebuilds the (heavy pip/apt)
+        # layers cold. For those, rc derives a sibling cache repo from the
+        # project's own ECR registry and ensures it exists (see below) — same
+        # layer caching with zero extra config. Resolution order:
+        #   1. terraform `buildcache_repository` output (managed stacks)
+        #   2. RC_BUILDCACHE_REPO env (explicit operator override)
+        #   3. derived <registry>/<project>/buildcache (adopted/--no-state)
+        # `buildcache_managed` tracks whether the repo already exists (cases 1
+        # and 2 are caller-owned; case 3 rc must create). RC_DISABLE_BUILDCACHE
+        # (handled in ImageBuilder) still opts out of caching entirely.
         buildcache_repo = (outputs.get("buildcache_repository") or {}).get("value")
-        # Adopted / `--no-state` stacks build+push without ever running
-        # terraform, so there's no `buildcache_repository` output to read and
-        # every deploy rebuilds the (heavy pip/apt) layers cold. Let CI or an
-        # operator point at a pre-created cache repo via RC_BUILDCACHE_REPO so
-        # those deploys get layer caching too. Terraform output wins when both
-        # are set; RC_DISABLE_BUILDCACHE (handled in ImageBuilder) still opts
-        # out entirely.
+        buildcache_managed = bool(buildcache_repo)
         if not buildcache_repo:
             buildcache_repo = os.environ.get("RC_BUILDCACHE_REPO") or None
+            buildcache_managed = bool(buildcache_repo)
+        if not buildcache_repo:
+            registry_host = next(iter(repos.values())).split("/", 1)[0]
+            buildcache_repo = f"{registry_host}/{ctx.project}/buildcache"
+            buildcache_managed = False
 
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
         from ...no_cache_state import consume_no_cache
@@ -1306,6 +1314,13 @@ class ECSProvider(Provider):
                     f"buildcache auth failed ({cache_host}): {exc!s} — "
                     f"falling back to no-cache builds"
                 )
+                buildcache_repo = None
+        # When rc derived the cache repo (adopted/--no-state stack), create it
+        # if it doesn't exist yet — the terraform path provisions this repo for
+        # managed stacks, so rc owns it here. Best-effort: a perms/quota failure
+        # degrades to no-cache rather than blocking the deploy.
+        if buildcache_repo and not buildcache_managed:
+            if not self._ensure_buildcache_repo(session, buildcache_repo):
                 buildcache_repo = None
 
         # When user passed --tag X (and X != latest), see if X already
@@ -1375,6 +1390,52 @@ class ECSProvider(Provider):
             pusher.push(tags)
             pushed.append(spec.name)
         return pushed
+
+    def _ensure_buildcache_repo(self, session: Any, repo_url: str) -> bool:
+        """Ensure the derived buildcache ECR repo exists (create if missing).
+
+        Mirrors the terraform-managed buildcache repo for adopted/--no-state
+        stacks: an untagged-expiry lifecycle keeps the cache from growing
+        without bound. Returns True if the repo is usable, False on any
+        permission/quota error so the caller degrades to no-cache builds
+        rather than failing the deploy.
+        """
+        repo_name = repo_url.split("/", 1)[1] if "/" in repo_url else repo_url
+        ecr = session.client("ecr")
+        try:
+            ecr.describe_repositories(repositoryNames=[repo_name])
+            return True  # already exists
+        except Exception:  # noqa: BLE001 - most likely RepositoryNotFound
+            pass
+        try:
+            ecr.create_repository(repositoryName=repo_name)
+        except Exception as exc:  # noqa: BLE001
+            # A concurrent deploy may have created it between describe+create;
+            # that's fine. Anything else (perms/quota) → degrade to no-cache.
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code != "RepositoryAlreadyExistsException":
+                self._emit(
+                    f"  could not create buildcache repo {repo_name}: {exc!s} "
+                    f"— falling back to no-cache builds"
+                )
+                return False
+        # Best-effort: expire untagged cache blobs after 14 days so the repo
+        # doesn't grow without bound (each service keeps one mutable
+        # <svc>-cache tag, so only superseded layers age out). Never fatal.
+        try:
+            ecr.put_lifecycle_policy(
+                repositoryName=repo_name,
+                lifecyclePolicyText=(
+                    '{"rules":[{"rulePriority":1,"selection":'
+                    '{"tagStatus":"untagged","countType":"sinceImagePushed",'
+                    '"countUnit":"days","countNumber":14},'
+                    '"action":{"type":"expire"}}]}'
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        self._emit(f"  buildcache repo {repo_name} ready (rc-managed)")
+        return True
 
     @staticmethod
     def _ecr_image_manifest(
