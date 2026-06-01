@@ -35,6 +35,7 @@ resource "aws_ecr_lifecycle_policy" "buildcache" {
 {%- endif %}
 
 {%- for svc in services %}
+{%- if svc.owns_image_repo %}
 resource "aws_ecr_repository" "{{ svc.tf_name }}" {
   name                 = "${var.project}/{{ svc.name }}"
   image_tag_mutability = "MUTABLE"
@@ -44,6 +45,7 @@ resource "aws_ecr_repository" "{{ svc.tf_name }}" {
     scan_on_push = true
   }
 }
+{%- endif %}
 
 resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   family                   = "${var.project}-{{ svc.name }}"
@@ -57,11 +59,11 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   container_definitions = jsonencode([{
     name      = "{{ svc.name }}"
 {%- if svc.has_build_context %}
-    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+    image     = "${aws_ecr_repository.{{ svc.image_repo_tf_name }}.repository_url}:latest"
 {%- elif svc.compose_image %}
     image     = "{{ svc.compose_image }}"
 {%- else %}
-    image     = "${aws_ecr_repository.{{ svc.tf_name }}.repository_url}:latest"
+    image     = "${aws_ecr_repository.{{ svc.image_repo_tf_name }}.repository_url}:latest"
 {%- endif %}
     essential = true
 {%- if svc.command %}
@@ -176,8 +178,8 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
     # only permits inbound from the ALB SG + self, so the public IP is not
     # an exposure - it is just an egress path. Private-subnet + NAT variant
     # is tracked in rc-e5u.25.
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.tasks.id]
+    subnets          = {{ public_subnet_ids_ref }}
+    security_groups  = [aws_security_group.tasks.id{% for sg in extra_security_group_ids %}, "{{ sg }}"{% endfor %}]
     assign_public_ip = true
   }
 

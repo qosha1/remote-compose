@@ -113,7 +113,10 @@ class TestCacheToWritesModeMax:
         spec.cache_to = [ref]
         cmd = _run(spec)
         idx = cmd.index("--cache-to")
-        assert cmd[idx + 1] == f"type=registry,ref={ref},mode=max"
+        assert cmd[idx + 1] == (
+            f"type=registry,ref={ref},mode=max"
+            ",image-manifest=true,oci-mediatypes=true"
+        )
 
     def test_cache_to_alone_also_routes_through_buildx(self, spec):
         spec.cache_to = ["1.example.com/c:a"]
@@ -137,3 +140,86 @@ class TestCacheCombinedWithOtherFlags:
         assert any(c == "--cache-to" for c in cmd)
         # Tag still applied.
         assert "-t" in cmd
+
+
+class TestBuildxBuilderManagement:
+    """rc owns a dedicated docker-container buildx builder so callers/CI
+    don't have to set one up. It's created on demand, reused, and the build
+    degrades to a plain cache-less `docker build` if buildx isn't available.
+    """
+
+    def _build(self, spec, *, inspect_rc=0, create_rc=0, inspect_raises=None):
+        runs: list = []
+        popens: list = []
+
+        def _fake_run(cmd, *a, **k):
+            runs.append(cmd)
+            if cmd[1:3] == ["buildx", "inspect"]:
+                if inspect_raises is not None:
+                    raise inspect_raises
+                return mock.Mock(returncode=inspect_rc, stdout="", stderr="")
+            if cmd[1:3] == ["buildx", "create"]:
+                return mock.Mock(returncode=create_rc, stdout="", stderr="boom")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def _fake_popen(cmd, *a, **k):
+            popens.append(cmd)
+            proc = mock.Mock()
+            proc.stdout = mock.Mock()
+            proc.stdout.readline.return_value = ""
+            proc.stdout.close = mock.Mock()
+            proc.stderr = mock.Mock()
+            proc.stderr.readline.return_value = ""
+            proc.stderr.close = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.kill = mock.Mock()
+            return proc
+
+        with (
+            mock.patch("subprocess.run", side_effect=_fake_run),
+            mock.patch("subprocess.Popen", side_effect=_fake_popen),
+        ):
+            ImageBuilder(docker_bin="docker").build(spec)
+        return runs, popens
+
+    def test_existing_builder_reused_via_builder_flag(self, spec):
+        spec.cache_from = ["1.example.com/c:web-cache"]
+        spec.cache_to = ["1.example.com/c:web-cache"]
+        runs, popens = self._build(spec, inspect_rc=0)
+        # inspect found it → no create
+        assert not any(c[1:3] == ["buildx", "create"] for c in runs)
+        build = popens[0]
+        bi = build.index("--builder")
+        assert build[bi + 1] == "rc-cache"
+
+    def test_missing_builder_is_created(self, spec):
+        spec.cache_from = ["1.example.com/c:web-cache"]
+        spec.cache_to = ["1.example.com/c:web-cache"]
+        runs, popens = self._build(spec, inspect_rc=1, create_rc=0)
+        create = [c for c in runs if c[1:3] == ["buildx", "create"]]
+        assert len(create) == 1
+        assert "--driver" in create[0] and "docker-container" in create[0]
+        assert "--builder" in popens[0]
+
+    def test_degrades_to_plain_build_when_builder_unavailable(self, spec):
+        # buildx create fails (e.g. no container driver) → plain docker build,
+        # cache args dropped, deploy still proceeds.
+        spec.cache_from = ["1.example.com/c:web-cache"]
+        spec.cache_to = ["1.example.com/c:web-cache"]
+        runs, popens = self._build(spec, inspect_rc=1, create_rc=1)
+        # No buildx build ran; the build fell back to `docker build`.
+        assert not popens
+        build = [c for c in runs if c[:2] == ["docker", "build"]]
+        assert len(build) == 1
+        assert "buildx" not in build[0]
+        assert not any(c.startswith("--cache-") for c in build[0])
+
+    def test_degrades_when_docker_missing(self, spec):
+        spec.cache_from = ["1.example.com/c:web-cache"]
+        spec.cache_to = ["1.example.com/c:web-cache"]
+        runs, popens = self._build(spec, inspect_raises=FileNotFoundError("docker"))
+        assert not popens
+        build = [c for c in runs if c[:2] == ["docker", "build"]]
+        assert len(build) == 1
+        assert not any(c.startswith("--cache-") for c in build[0])

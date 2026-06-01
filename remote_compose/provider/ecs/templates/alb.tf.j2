@@ -4,7 +4,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = {{ public_subnet_ids_ref }}
 }
 
 {%- if not default_target_has_own_tg %}
@@ -17,7 +17,7 @@ resource "aws_lb_target_group" "default" {
   name_prefix = substr("${var.project}-", 0, 6)
   port        = {{ default_target_port }}
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = {{ vpc_id_ref }}
   target_type = "ip"
 
   health_check {
@@ -90,7 +90,7 @@ resource "aws_lb_target_group" "{{ dsvc.tf_name }}" {
   name_prefix = substr("${var.project}-{{ dsvc.tf_name }}-", 0, 6)
   port        = {{ dsvc.port }}
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = {{ vpc_id_ref }}
   target_type = "ip"
 
   health_check {

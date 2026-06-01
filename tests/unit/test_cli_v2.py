@@ -257,6 +257,39 @@ class TestComposeBuildTarget:
         # ServiceSpec exposes 'target' so ImageBuildSpec gets it.
         assert ctx.services["api"].target == "production"
 
+    def test_default_target_flows_to_service_spec(self, tmp_path, monkeypatch):
+        # Regression (debuggai-api): default_target was parsed by the schema
+        # but dropped in build_deploy_context, so the provider could never
+        # honor it and the ALB catch-all fell to the alphabetically-first
+        # public service. Lock the passthrough end to end.
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services:\n  nginx:\n    image: nginx:latest\n")
+        rc = tmp_path / "rc.yml"
+        _write(
+            rc,
+            {
+                "version": 2,
+                "project": "p",
+                "compose_file": "docker-compose.yml",
+                "provider": "fake",
+                "services": {
+                    "nginx": {
+                        "cpu": 256,
+                        "memory": 512,
+                        "public": True,
+                        "port": 80,
+                        "default_target": True,
+                    }
+                },
+            },
+        )
+        monkeypatch.chdir(tmp_path)
+        version, raw, v2 = load_rc_yml(rc)
+        ctx = build_deploy_context(v2, raw, rc)
+        assert ctx.services["nginx"].default_target is True
+
 
 # Helper that asserts the new 5-tuple shape of _service_build_info.
 def _service_build_info_full(svc_compose, compose_path):

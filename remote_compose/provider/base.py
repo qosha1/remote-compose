@@ -86,6 +86,13 @@ class ServiceSpec:
     # dedicated target group + ALB listener rule (host_header) + R53 record
     # for this service, and adds the name to the ACM cert SANs.
     domain: Optional[str] = None
+    # ALB listener default action (catch-all) selection. When a public+port
+    # service sets this True it becomes the target for traffic that matches no
+    # host-header rule (unmatched hosts + service aliases). Without it the
+    # provider falls back to the first public+port service in alphabetical
+    # order, which silently routes unmatched hosts to whatever sorts first
+    # (e.g. celery-flower before nginx). Only one service should set it.
+    default_target: bool = False
     # Extra hostnames the SAME service should answer for. Each adds a cert
     # SAN + R53 record but no ALB listener rule — the default action
     # catches them. Used when a fronting service (nginx) handles internal

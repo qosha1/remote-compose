@@ -15,7 +15,9 @@ output "alb_dns_name" {
 output "ecr_repositories" {
   value = {
 {%- for svc in services %}
+{%- if svc.owns_image_repo %}
     "{{ svc.name }}" = aws_ecr_repository.{{ svc.tf_name }}.repository_url
+{%- endif %}
 {%- endfor %}
   }
 }

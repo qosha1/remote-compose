@@ -732,6 +732,7 @@ def build_deploy_context(
                     compose_path,
                 ),
                 domain=svc.domain,
+                default_target=bool(svc.default_target),
                 aliases=list(svc.aliases or []),
                 env_file_secret_names=list(per_service_secret_names.get(name, [])),
             )

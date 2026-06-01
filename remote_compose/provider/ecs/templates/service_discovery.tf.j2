@@ -8,8 +8,9 @@
 
 resource "aws_service_discovery_private_dns_namespace" "main" {
   name = "${var.project}.local"
-  vpc  = aws_vpc.main.id
+  vpc  = {{ vpc_id_ref }}
 }
+{%- if not existing_vpc %}
 
 resource "aws_vpc_dhcp_options" "main" {
   domain_name         = "${var.project}.local"
@@ -17,9 +18,10 @@ resource "aws_vpc_dhcp_options" "main" {
 }
 
 resource "aws_vpc_dhcp_options_association" "main" {
-  vpc_id          = aws_vpc.main.id
+  vpc_id          = {{ vpc_id_ref }}
   dhcp_options_id = aws_vpc_dhcp_options.main.id
 }
+{%- endif %}
 
 {%- for svc in services %}
 resource "aws_service_discovery_service" "{{ svc.tf_name }}" {

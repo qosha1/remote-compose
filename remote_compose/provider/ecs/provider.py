@@ -16,6 +16,7 @@ Feature work deferred to dedicated follow-ups:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -158,6 +159,107 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
+def image_group_owners(services: dict[str, Any]) -> dict[str, str]:
+    """Map each build-having service to the OWNER of its image group (rc-44i).
+
+    Services sharing a build identity — resolved context + dockerfile + target +
+    build_args — produce an identical image (the Django pattern: django +
+    celery-* run the same image, differing only by command). rc builds + pushes
+    that image ONCE to the owner's ECR repo and points sibling task defs at it,
+    instead of N full pushes to N repos (ECR stores layer blobs per-repo, so N
+    repos = N uploads — hours on a slow uplink).
+
+    Owner = the FIRST service of the group in declaration order (the order
+    services appear in compose/rc.yml, preserved by the dict). For the Django
+    layout that's `django` (declared before its `celery-*` workers), so the
+    shared repo is named after the service the image belongs to. Deterministic
+    for a given config; general — no per-stack logic. Services without a
+    build_context use a pre-built image and are not grouped.
+    """
+    groups: dict[tuple, list[str]] = {}
+    for name, spec in services.items():
+        if not getattr(spec, "build_context", None):
+            continue
+        identity = (
+            str(spec.build_context),
+            spec.dockerfile or "",
+            spec.target or "",
+            frozenset((spec.build_args or {}).items()),
+        )
+        groups.setdefault(identity, []).append(name)
+    owners: dict[str, str] = {}
+    for members in groups.values():
+        owner = members[0]  # first-declared service in the group
+        for member in members:
+            owners[member] = owner
+    return owners
+
+
+def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
+    """The service specs to actually build+push (rc-44i): one OWNER per image
+    group, never the siblings (their task def references the owner image). A
+    services_filter naming a sibling maps to its owner so the shared image is
+    still rebuilt. Order follows sorted service name for determinism."""
+    owners = image_group_owners(services)
+    members: dict[str, set] = {}
+    for name, owner in owners.items():
+        members.setdefault(owner, set()).add(name)
+    build_owners = [
+        spec
+        for name, spec in sorted(services.items())
+        if spec.build_context and owners.get(name, name) == name
+    ]
+    if services_filter is None:
+        return build_owners
+    allowed = set(services_filter)
+    return [
+        spec for spec in build_owners if members.get(spec.name, {spec.name}) & allowed
+    ]
+
+
+def preflight_existing_vpc(ecs_cfg: dict[str, Any], ec2_client: Any) -> None:
+    """Validate an adopted VPC + subnets against live AWS before emitting (rc-a57).
+
+    No-op unless ``vpc_id`` is set. Verifies the VPC exists, every declared
+    subnet exists AND belongs to that VPC, and the public subnets span >= 2
+    AZs (the ALB requires it). Raises ProviderConfigError with a clear message
+    so the failure surfaces as a named rc error rather than a terraform stack
+    trace. Uses a vpc-id Filter (not SubnetIds) so a stale id is reported as
+    "not in vpc" rather than raising a botocore InvalidSubnetID error.
+    """
+    vpc_id = ecs_cfg.get("vpc_id")
+    if not vpc_id:
+        return
+    public = list(ecs_cfg.get("public_subnet_ids") or [])
+    private = list(ecs_cfg.get("private_subnet_ids") or [])
+
+    vpcs = ec2_client.describe_vpcs(VpcIds=[vpc_id]).get("Vpcs", [])
+    if not vpcs:
+        raise ProviderConfigError(
+            f"provider_config.ecs.vpc_id {vpc_id!r} not found in this account/region"
+        )
+
+    in_vpc = {
+        s["SubnetId"]: s
+        for s in ec2_client.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        ).get("Subnets", [])
+    }
+    declared = list(dict.fromkeys(public + private))
+    missing = [s for s in declared if s not in in_vpc]
+    if missing:
+        raise ProviderConfigError(
+            f"subnet(s) {missing} not found in vpc {vpc_id} "
+            "(check the ids belong to provider_config.ecs.vpc_id)"
+        )
+    azs = {in_vpc[s]["AvailabilityZone"] for s in public}
+    if len(azs) < 2:
+        raise ProviderConfigError(
+            "provider_config.ecs.public_subnet_ids must span >= 2 availability "
+            f"zones for the ALB (got {sorted(azs)})"
+        )
+
+
 class ECSProvider(Provider):
     name = "ecs"
 
@@ -191,12 +293,57 @@ class ECSProvider(Provider):
         vpc_cidr = ecs_cfg.get("vpc_cidr", VPC_CIDR_DEFAULT)
         aws_profile = ecs_cfg.get("aws_profile")
 
+        # Existing-VPC support (rc-a57): a GENERAL, opt-in capability. With
+        # vpc_id set, rc deploys INTO an existing VPC instead of creating one —
+        # needed where the stack must share a VPC + security group with peer
+        # systems (same-VPC SG-referencing + Cloud Map DNS that cross-VPC
+        # peering can't replicate). Strictly additive: with no vpc_id the
+        # emitted terraform is byte-identical to before (see network.tf.j2 +
+        # the rendering-alias context keys below). AWS pre-flight validation of
+        # the ids lives in preflight_existing_vpc(); here we only validate the
+        # config SHAPE.
+        existing_vpc_id = ecs_cfg.get("vpc_id")
+        public_subnet_ids = list(ecs_cfg.get("public_subnet_ids") or [])
+        private_subnet_ids = list(ecs_cfg.get("private_subnet_ids") or [])
+        extra_security_group_ids = list(ecs_cfg.get("security_group_ids") or [])
+        if existing_vpc_id and not public_subnet_ids:
+            raise ProviderConfigError(
+                "provider_config.ecs.vpc_id requires public_subnet_ids "
+                "(>= 2 subnets across AZs for the ALB + Fargate tasks)"
+            )
+        if public_subnet_ids and not existing_vpc_id:
+            raise ProviderConfigError(
+                "provider_config.ecs.public_subnet_ids requires vpc_id "
+                "(subnet ids are only meaningful when adopting an existing VPC)"
+            )
+        existing_vpc = bool(existing_vpc_id)
+        if not private_subnet_ids:
+            private_subnet_ids = public_subnet_ids
+        # Rendering aliases keep the create path byte-identical: in create mode
+        # these are exactly the original resource references; in adopt mode they
+        # point at the data source + network locals. Templates read these so they
+        # never branch on existing_vpc themselves.
+        if existing_vpc:
+            vpc_id_ref = "data.aws_vpc.main.id"
+            public_subnet_ids_ref = "local.rc_public_subnet_ids"
+            public_subnet_idx_ref = "local.rc_public_subnet_ids[count.index]"
+            private_subnet_ids_ref = "local.rc_private_subnet_ids"
+        else:
+            vpc_id_ref = "aws_vpc.main.id"
+            public_subnet_ids_ref = "aws_subnet.public[*].id"
+            public_subnet_idx_ref = "aws_subnet.public[count.index].id"
+            private_subnet_ids_ref = "aws_subnet.private[*].id"
+
         default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
         if default_launch_type not in {"FARGATE", "EC2"}:
             raise ProviderConfigError(
                 f"provider_config.ecs.default_launch_type must be FARGATE or EC2, "
                 f"got {default_launch_type!r}"
             )
+
+        # Shared-image dedup (rc-44i): which service owns each build group's
+        # ECR repo. Computed once; consulted per-service below.
+        image_owners = image_group_owners(ctx.services)
 
         services_view = []
         default_public = None
@@ -403,6 +550,13 @@ class ECSProvider(Provider):
                 # def uses it verbatim instead of an ECR placeholder.
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
+                # Shared-image dedup (rc-44i). Services sharing a build identity
+                # share ONE ECR repo: the owner emits aws_ecr_repository, siblings
+                # reference the owner's image. A service that isn't a build-group
+                # sibling owns its own repo (image_owners.get -> itself), so
+                # single-build / image-only stacks emit exactly as before.
+                "owns_image_repo": image_owners.get(name, name) == name,
+                "image_repo_tf_name": _tf_name(image_owners.get(name, name)),
                 "ephemeral_storage": spec.ephemeral_storage,
                 # Extra container ports (compose ports[] beyond the primary).
                 # Reachable intra-VPC via the tasks SG; not wired to ALB.
@@ -415,6 +569,8 @@ class ECSProvider(Provider):
                 # rules; only cert SANs + R53 records. Catch-all default
                 # action carries the traffic.
                 "aliases": list(spec.aliases or []) if spec.public else [],
+                # Explicit ALB catch-all selection (see ServiceSpec.default_target).
+                "default_target": bool(spec.default_target) if spec.public else False,
             }
             services_view.append(svc_view)
             if launch_type == "EC2":
@@ -428,6 +584,19 @@ class ECSProvider(Provider):
                 )
             if spec.public and spec.port and default_public is None:
                 default_public = svc_view
+
+        # The loop above iterates services alphabetically, so default_public is
+        # the alphabetically-first public+port service — a silent, surprising
+        # choice when several services are public (e.g. celery-flower sorts
+        # before nginx and would wrongly become the catch-all). When a service
+        # explicitly sets default_target=true, honor it: it wins regardless of
+        # name order. First flagged service wins if more than one is set.
+        default_target_view = next(
+            (s for s in services_view if s.get("default_target") and s.get("port")),
+            None,
+        )
+        if default_target_view is not None:
+            default_public = default_target_view
 
         has_public_service = default_public is not None
         # Any service with a compose `build:` context drives BuildKit cache
@@ -683,6 +852,18 @@ class ECSProvider(Provider):
             "project": ctx.project,
             "region": region,
             "vpc_cidr": vpc_cidr,
+            # Existing-VPC support (rc-a57). existing_vpc gates network.tf.j2
+            # between create (default) and adopt; the *_ref aliases let the
+            # other templates stay agnostic.
+            "existing_vpc": existing_vpc,
+            "existing_vpc_id": existing_vpc_id,
+            "public_subnet_ids": public_subnet_ids,
+            "private_subnet_ids": private_subnet_ids,
+            "extra_security_group_ids": extra_security_group_ids,
+            "vpc_id_ref": vpc_id_ref,
+            "public_subnet_ids_ref": public_subnet_ids_ref,
+            "public_subnet_idx_ref": public_subnet_idx_ref,
+            "private_subnet_ids_ref": private_subnet_ids_ref,
             "cluster_name": cluster_name,
             "aws_profile": aws_profile,
             "environment": environment,
@@ -749,7 +930,20 @@ class ECSProvider(Provider):
     # Plan / Deploy / Destroy / Redeploy
     # -----------------------------------------------------------------
 
+    def preflight(self, ctx: DeployContext) -> None:
+        """AWS pre-flight for adopted-VPC configs (rc-a57). No-op unless
+        provider_config.ecs.vpc_id is set; otherwise verifies the VPC + subnets
+        against live AWS so a bad id fails as a clear rc error, not a terraform
+        stack trace."""
+        ecs_cfg = _ecs_cfg(ctx)
+        if not ecs_cfg.get("vpc_id"):
+            return
+        session = self.session_factory(ctx)
+        ec2 = session.client("ec2", region_name=ecs_cfg.get("region"))
+        preflight_existing_vpc(ecs_cfg, ec2)
+
     def plan(self, ctx: DeployContext) -> PlanResult:
+        self.preflight(ctx)
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
         runner = self.runner_factory(out_dir)
@@ -784,6 +978,8 @@ class ECSProvider(Provider):
                     f"--services lists service(s) not in this stack: {sorted(unknown)}. "
                     f"Known: {sorted(ctx.services.keys())}"
                 )
+
+        self.preflight(ctx)
 
         # No-state deploy mode (rc-5h8.11): when ctx.skip_terraform is True,
         # we bypass emit_terraform / init / apply / outputs entirely and just
@@ -1012,10 +1208,7 @@ class ECSProvider(Provider):
         Used by ``rc deploy --services X --tag v1.2`` for instant rollback /
         deploy of known-good images. See rc-e5u.45.3.
         """
-        to_build = [s for s in ctx.services.values() if s.build_context]
-        if services_filter is not None:
-            allowed = set(services_filter)
-            to_build = [s for s in to_build if s.name in allowed]
+        to_build = _services_to_build(ctx.services, services_filter)
         # rc-2v8 (extended): check build-context sizes BEFORE running
         # docker build. Without this, a 6GB+ context goes straight to
         # buildkit and the user only learns they should have written a
@@ -1066,10 +1259,27 @@ class ECSProvider(Provider):
             self._emit(f"  WARN: {msg}")
             return []
 
-        # Shared BuildKit cache repo (rc-e5u.45.2). Optional — older stacks
-        # whose terraform predates the buildcache resource won't have this
-        # output and we just degrade to no-cache builds.
+        # Shared BuildKit cache repo (rc-e5u.45.2). Managed stacks get it as a
+        # terraform output. Adopted / `--no-state` stacks never run terraform,
+        # so there's no output and every deploy rebuilds the (heavy pip/apt)
+        # layers cold. For those, rc derives a sibling cache repo from the
+        # project's own ECR registry and ensures it exists (see below) — same
+        # layer caching with zero extra config. Resolution order:
+        #   1. terraform `buildcache_repository` output (managed stacks)
+        #   2. RC_BUILDCACHE_REPO env (explicit operator override)
+        #   3. derived <registry>/<project>/buildcache (adopted/--no-state)
+        # `buildcache_managed` tracks whether the repo already exists (cases 1
+        # and 2 are caller-owned; case 3 rc must create). RC_DISABLE_BUILDCACHE
+        # (handled in ImageBuilder) still opts out of caching entirely.
         buildcache_repo = (outputs.get("buildcache_repository") or {}).get("value")
+        buildcache_managed = bool(buildcache_repo)
+        if not buildcache_repo:
+            buildcache_repo = os.environ.get("RC_BUILDCACHE_REPO") or None
+            buildcache_managed = bool(buildcache_repo)
+        if not buildcache_repo:
+            registry_host = next(iter(repos.values())).split("/", 1)[0]
+            buildcache_repo = f"{registry_host}/{ctx.project}/buildcache"
+            buildcache_managed = False
 
         from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
         from ...no_cache_state import consume_no_cache
@@ -1104,6 +1314,13 @@ class ECSProvider(Provider):
                     f"buildcache auth failed ({cache_host}): {exc!s} — "
                     f"falling back to no-cache builds"
                 )
+                buildcache_repo = None
+        # When rc derived the cache repo (adopted/--no-state stack), create it
+        # if it doesn't exist yet — the terraform path provisions this repo for
+        # managed stacks, so rc owns it here. Best-effort: a perms/quota failure
+        # degrades to no-cache rather than blocking the deploy.
+        if buildcache_repo and not buildcache_managed:
+            if not self._ensure_buildcache_repo(session, buildcache_repo):
                 buildcache_repo = None
 
         # When user passed --tag X (and X != latest), see if X already
@@ -1173,6 +1390,52 @@ class ECSProvider(Provider):
             pusher.push(tags)
             pushed.append(spec.name)
         return pushed
+
+    def _ensure_buildcache_repo(self, session: Any, repo_url: str) -> bool:
+        """Ensure the derived buildcache ECR repo exists (create if missing).
+
+        Mirrors the terraform-managed buildcache repo for adopted/--no-state
+        stacks: an untagged-expiry lifecycle keeps the cache from growing
+        without bound. Returns True if the repo is usable, False on any
+        permission/quota error so the caller degrades to no-cache builds
+        rather than failing the deploy.
+        """
+        repo_name = repo_url.split("/", 1)[1] if "/" in repo_url else repo_url
+        ecr = session.client("ecr")
+        try:
+            ecr.describe_repositories(repositoryNames=[repo_name])
+            return True  # already exists
+        except Exception:  # noqa: BLE001 - most likely RepositoryNotFound
+            pass
+        try:
+            ecr.create_repository(repositoryName=repo_name)
+        except Exception as exc:  # noqa: BLE001
+            # A concurrent deploy may have created it between describe+create;
+            # that's fine. Anything else (perms/quota) → degrade to no-cache.
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code != "RepositoryAlreadyExistsException":
+                self._emit(
+                    f"  could not create buildcache repo {repo_name}: {exc!s} "
+                    f"— falling back to no-cache builds"
+                )
+                return False
+        # Best-effort: expire untagged cache blobs after 14 days so the repo
+        # doesn't grow without bound (each service keeps one mutable
+        # <svc>-cache tag, so only superseded layers age out). Never fatal.
+        try:
+            ecr.put_lifecycle_policy(
+                repositoryName=repo_name,
+                lifecyclePolicyText=(
+                    '{"rules":[{"rulePriority":1,"selection":'
+                    '{"tagStatus":"untagged","countType":"sinceImagePushed",'
+                    '"countUnit":"days","countNumber":14},'
+                    '"action":{"type":"expire"}}]}'
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        self._emit(f"  buildcache repo {repo_name} ready (rc-managed)")
+        return True
 
     @staticmethod
     def _ecr_image_manifest(
