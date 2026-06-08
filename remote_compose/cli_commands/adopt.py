@@ -59,19 +59,24 @@ def adopt_cmd(ctx, from_local_tfstate):
             "drop the flag to use default from-scratch adoption."
         )
 
-    working_dir = rc_path.parent / "terraform" / "ecs"
-    working_dir.mkdir(parents=True, exist_ok=True)
-
     click.echo(f"\nrc adopt — {rc_path}")
-    click.echo(f"  working_dir: {working_dir}")
-    click.echo("  walking AWS + generating imports...")
+    click.echo("  emitting terraform module + init, walking AWS for imports...")
 
-    result = adopt_v1_to_v2(rc_yml_path=rc_path, working_dir=working_dir)
+    # working_dir=None → adopt derives the terraform dir from the rc.yml so
+    # it operates on the same module + state as `rc plan` / `rc deploy`.
+    result = adopt_v1_to_v2(rc_yml_path=rc_path)
 
+    not_live = list(getattr(result, "not_live", []) or [])
     click.echo(f"\n  imported: {result.imported}")
     click.echo(f"  skipped (already in state): {result.skipped}")
+    click.echo(f"  not live (will be created on apply): {len(not_live)}")
     click.echo(f"  failed: {len(result.failed)}")
     click.echo(f"  duration: {result.duration_s:.1f}s")
+
+    if not_live:
+        click.echo("\n  not live (terraform will create these on apply):")
+        for address, reason in not_live:
+            click.echo(f"    {address} — {reason}")
 
     if result.failed:
         click.echo("\n  failures:")
