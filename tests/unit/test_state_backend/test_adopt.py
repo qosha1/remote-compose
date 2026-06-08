@@ -87,6 +87,7 @@ class TestAdoptCommandDispatches:
                 imported=26,
                 skipped=0,
                 failed=[],
+                not_live=[],
                 duration_s=12.3,
             )
             runner = CliRunner()
@@ -108,25 +109,32 @@ class TestAdoptIdempotent:
         """When every resource is already imported, a second `rc adopt`
         run reports 0 imported / N skipped, no failures."""
         from remote_compose.state_backend.adopt import adopt_v1_to_v2
+        from remote_compose.state_backend.adopt_imports import ImportPlan
 
         rc_path = _write_v2_rc_yml(tmp_path)
-        # First call: pretend everything was already imported.
-        # adopt_v1_to_v2 internally walks AWS, generates 26 import
-        # addresses, runs terraform import per resource. Each import
-        # call returns "already in state" (no work done).
+        # adopt_v1_to_v2 emits the module + inits (patched here), builds the
+        # import set, and runs terraform import per resource. Each import
+        # call returns "already in state" (no work done) → idempotent.
         with (
+            mock.patch(
+                "remote_compose.state_backend.adopt._prepare_module",
+                return_value=tmp_path,
+            ),
             mock.patch(
                 "remote_compose.state_backend.adopt._run_terraform_import"
             ) as imp,
             mock.patch("remote_compose.state_backend.adopt._discover_imports") as disc,
         ):
-            disc.return_value = [
-                ("module.ecs.aws_ecs_cluster.this", "arn:aws:ecs:...:cluster/x"),
-                (
-                    "module.alb.aws_lb.this",
-                    "arn:aws:elasticloadbalancing:...:loadbalancer/y",
-                ),
-            ]
+            disc.return_value = ImportPlan(
+                imports=[
+                    ("aws_ecs_cluster.main", "ss-debuggai-prod"),
+                    (
+                        "aws_lb.main",
+                        "arn:aws:elasticloadbalancing:...:loadbalancer/y",
+                    ),
+                ],
+                skipped=[],
+            )
             imp.return_value = ("already_in_state", "")  # (status, message)
             result = adopt_v1_to_v2(
                 rc_yml_path=rc_path,
@@ -143,25 +151,33 @@ class TestAdoptPartialRecovery:
         imported N stay in state, the failed one is reported, the user
         re-runs and only the failed set retries."""
         from remote_compose.state_backend.adopt import adopt_v1_to_v2
+        from remote_compose.state_backend.adopt_imports import ImportPlan
 
         rc_path = _write_v2_rc_yml(tmp_path)
         # Three imports: first two succeed, third fails with a real-shape
         # terraform error.
         with (
             mock.patch(
+                "remote_compose.state_backend.adopt._prepare_module",
+                return_value=tmp_path,
+            ),
+            mock.patch(
                 "remote_compose.state_backend.adopt._run_terraform_import"
             ) as imp,
             mock.patch("remote_compose.state_backend.adopt._discover_imports") as disc,
         ):
-            disc.return_value = [
-                ("module.ecs.aws_ecs_cluster.this", "arn:cluster"),
-                ("module.alb.aws_lb.this", "arn:alb"),
-                ("module.efs.aws_efs_file_system.this", "fs-bad"),
-            ]
+            disc.return_value = ImportPlan(
+                imports=[
+                    ("aws_ecs_cluster.main", "arn:cluster"),
+                    ("aws_lb.main", "arn:alb"),
+                    ("aws_ecs_task_definition.django", "ss-debuggai-django:bad"),
+                ],
+                skipped=[],
+            )
             imp.side_effect = [
                 ("imported", ""),
                 ("imported", ""),
-                ("failed", "Error: aws_efs_file_system not found"),
+                ("failed", "Error: aws_ecs_task_definition not found"),
             ]
             result = adopt_v1_to_v2(
                 rc_yml_path=rc_path,
@@ -171,8 +187,8 @@ class TestAdoptPartialRecovery:
         # `failed` is a list of (address, id, error) tuples.
         assert len(result.failed) == 1
         addr, rid, err = result.failed[0]
-        assert "aws_efs_file_system" in addr
-        assert "fs-bad" == rid
+        assert "aws_ecs_task_definition" in addr
+        assert "ss-debuggai-django:bad" == rid
         assert "not found" in err
 
 
