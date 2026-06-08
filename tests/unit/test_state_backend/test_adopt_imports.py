@@ -51,7 +51,7 @@ class _FakeClient:
         }
         if name not in mapping:
             return {"SecurityGroups": []}
-        return {"SecurityGroups": [{"GroupId": mapping[name]}]}
+        return {"SecurityGroups": [{"GroupId": mapping[name], "VpcId": "vpc-test"}]}
 
     # --- ecr -----------------------------------------------------------
     def describe_repositories(self, repositoryNames):  # noqa: N803
@@ -68,7 +68,16 @@ class _FakeClient:
     # --- ecs -----------------------------------------------------------
     def describe_task_definition(self, taskDefinition):  # noqa: N803
         if taskDefinition == "ss-debuggai-django":
-            return {"taskDefinition": {"family": taskDefinition, "revision": 7}}
+            return {
+                "taskDefinition": {
+                    "family": taskDefinition,
+                    "revision": 7,
+                    "taskDefinitionArn": (
+                        "arn:aws:ecs:us-west-2:111111111111:"
+                        "task-definition/ss-debuggai-django:7"
+                    ),
+                }
+            }
         raise _ClientError("ClientException")
 
     # --- elbv2 ---------------------------------------------------------
@@ -274,13 +283,19 @@ class TestBuildImportPlan:
         assert ids["aws_ecr_repository.django"] == "ss-debuggai/django"
         assert ids["aws_ecr_repository.buildcache"] == "ss-debuggai/buildcache"
         assert ids["aws_ecr_lifecycle_policy.buildcache"] == "ss-debuggai/buildcache"
-        assert ids["aws_ecs_task_definition.django"] == "ss-debuggai-django:7"
+        assert ids["aws_ecs_task_definition.django"] == (
+            "arn:aws:ecs:us-west-2:111111111111:task-definition/ss-debuggai-django:7"
+        )
         assert ids["aws_lb.main"] == "alb-arn"
         assert ids["aws_lb_listener.http"] == "l-http"
         assert ids["aws_lb_listener.https"] == "l-https"
         assert ids["aws_lb_listener_rule.nginx"] == "rule-nginx"
         assert ids["aws_lb_target_group.nginx"] == "tg-nginx"
-        assert ids["aws_service_discovery_private_dns_namespace.main"] == "ns-1"
+        # namespace imports as NAMESPACE_ID:VPC_ID (vpc derived from tasks SG
+        # since this test stack sets no vpc_id in config).
+        assert (
+            ids["aws_service_discovery_private_dns_namespace.main"] == "ns-1:vpc-test"
+        )
         assert ids["aws_service_discovery_service.django"] == "srv-django"
         assert ids["aws_route53_record.app_1"] == "ZONE1_api.example.com_A"
 

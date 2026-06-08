@@ -137,6 +137,17 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
     }
   }
 {%- endfor %}
+{%- if ignore_task_definition_changes %}
+
+  # container_definitions (image / env / secrets) are owned out-of-band for
+  # this stack — e.g. `rc deploy --no-state` force-rolls images and a secret
+  # reconcile script wires SM secrets onto the live task def. Without this,
+  # a stateful `terraform apply` would re-register a revision that reverts
+  # those out-of-band changes (notably STRIPPING the reconciled secrets).
+  lifecycle {
+    ignore_changes = [container_definitions]
+  }
+{%- endif %}
 }
 
 resource "aws_ecs_service" "{{ svc.tf_name }}" {

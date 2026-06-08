@@ -891,6 +891,17 @@ class ECSProvider(Provider):
             "dev_volume_mounts": dev_volume_mounts,
             "dev_mode": dev_mode_active,
             "has_secrets": has_secrets,
+            # Opt-in (provider_config.ecs.ignore_task_definition_changes):
+            # emit `lifecycle { ignore_changes = [container_definitions] }` on
+            # every task def so terraform stops fighting container defs that
+            # are owned out-of-band — e.g. adopted / `rc deploy --no-state`
+            # stacks whose secrets are wired on by a reconcile script, or
+            # whose images are force-rolled outside terraform. Default false:
+            # normal stateful stacks keep terraform managing container defs
+            # (that's how a stateful deploy ships a new image).
+            "ignore_task_definition_changes": bool(
+                ecs_cfg.get("ignore_task_definition_changes", False)
+            ),
             "has_file_secrets": has_file_secrets,
             "file_secrets": file_secrets,
             "all_secret_arns": all_secret_arns,
