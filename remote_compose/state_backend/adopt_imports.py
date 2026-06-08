@@ -131,6 +131,7 @@ def build_import_plan(
         cluster=ecs_cfg.get("cluster") or f"{v2.project}-cluster",
         region=ecs_cfg.get("region"),
         zone=ecs_cfg.get("route53_zone") or v2.domain,
+        vpc_id=ecs_cfg.get("vpc_id"),
         services=v2.services or {},
         session=session,
         aws_profile=ecs_cfg.get("aws_profile"),
@@ -180,11 +181,13 @@ class _Resolver:
         services: dict,
         session: Optional[Any],
         aws_profile: Optional[str],
+        vpc_id: Optional[str] = None,
     ) -> None:
         self.project = project
         self.cluster = cluster
         self.region = region
         self.zone = zone
+        self._vpc_id_cfg = vpc_id
         self.services = services
         self._session = session
         self._aws_profile = aws_profile
@@ -349,10 +352,11 @@ class _Resolver:
                 raise _NotLive(f"task def {family} not live") from exc
             raise
         td = resp.get("taskDefinition") or {}
-        rev = td.get("revision")
-        if rev is None:
+        # aws_ecs_task_definition imports by full ARN (not family:revision).
+        arn = td.get("taskDefinitionArn")
+        if not arn:
             raise _NotLive(f"task def {family} has no active revision")
-        return f"{family}:{rev}"
+        return arn
 
     def _lb(self, _local: str) -> Optional[str]:
         return self._alb_arn()
@@ -455,7 +459,25 @@ class _Resolver:
         raise _NotLive(f"target group arn for {domain} not found")
 
     def _sd_namespace(self, _local: str) -> Optional[str]:
-        return self._namespace_id()
+        # aws_service_discovery_private_dns_namespace imports as
+        # "NAMESPACE_ID:VPC_ID".
+        return f"{self._namespace_id()}:{self._vpc_id()}"
+
+    def _vpc_id(self) -> str:
+        # Prefer the adopted-VPC id from rc.yml; otherwise derive it from the
+        # tasks security group (which always lives in the stack's VPC).
+        if self._vpc_id_cfg:
+            return self._vpc_id_cfg
+        if "_vpc_id" not in self._clients:
+            client = self._client("ec2")
+            resp = client.describe_security_groups(
+                Filters=[{"Name": "group-name", "Values": [f"{self.project}-tasks"]}]
+            )
+            groups = resp.get("SecurityGroups") or []
+            if not groups:
+                raise _NotLive("cannot resolve VPC id for namespace import")
+            self._clients["_vpc_id"] = groups[0]["VpcId"]
+        return self._clients["_vpc_id"]
 
     def _namespace_id(self) -> Optional[str]:
         if "_ns_id" not in self._clients:
