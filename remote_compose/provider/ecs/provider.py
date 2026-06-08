@@ -1140,17 +1140,35 @@ class ECSProvider(Provider):
             if cluster_prefix.endswith(suffix):
                 cluster_prefix = cluster_prefix[: -len(suffix)]
                 break
+        # Image-group siblings share ONE image in ONE repo (the owner's).
+        # When the owner's own repo name doesn't exist — e.g. the repo was
+        # created under a DIFFERENT group owner at cutover (rc.yml service
+        # order changed since), so the live repo is named after a sibling —
+        # fall back to a sibling's existing repo so the shared image still
+        # rebuilds + pushes to the repo the task defs actually reference.
+        owners_map = image_group_owners(ctx.services)
+        group_members: dict[str, list[str]] = {}
+        for member, owner in owners_map.items():
+            group_members.setdefault(owner, []).append(member)
+
+        def _repo_candidates(name: str) -> list[str]:
+            cands = [f"{ctx.project}/{name}", f"{ctx.project}-{name}"]
+            if cluster_prefix and cluster_prefix != ctx.project:
+                cands.append(f"{cluster_prefix}/{name}")
+                cands.append(f"{cluster_prefix}-{name}")
+            return cands
+
         wanted_repos: dict[str, list[str]] = {}
         for svc_name, spec in ctx.services.items():
             if not spec.build_context:
                 continue
-            candidates = [
-                f"{ctx.project}/{svc_name}",
-                f"{ctx.project}-{svc_name}",
-            ]
-            if cluster_prefix and cluster_prefix != ctx.project:
-                candidates.append(f"{cluster_prefix}/{svc_name}")
-                candidates.append(f"{cluster_prefix}-{svc_name}")
+            # Try this service's own repo names first, then its image-group
+            # siblings' (so an owner can adopt a sibling-named repo).
+            owner = owners_map.get(svc_name, svc_name)
+            siblings = [m for m in group_members.get(owner, []) if m != svc_name]
+            candidates = _repo_candidates(svc_name)
+            for sib in siblings:
+                candidates.extend(_repo_candidates(sib))
             wanted_repos[svc_name] = candidates
 
         # Single describe call, paginate.
@@ -1183,7 +1201,18 @@ class ECSProvider(Provider):
             requested_tag=tag,
         )
         if pushed:
-            self._force_new_deployments(ctx, pushed)
+            # Only the image-group OWNER is built+pushed, but EVERY sibling
+            # that references that shared image must be force-rolled too —
+            # otherwise siblings keep running the old image while the new
+            # :latest sits unused (the django/celery-* staleness bug). Expand
+            # the pushed owners to all members of their groups.
+            pushed_owners = set(pushed)
+            roll_targets = sorted(
+                name
+                for name in ctx.services
+                if owners_map.get(name, name) in pushed_owners
+            )
+            self._force_new_deployments(ctx, roll_targets)
 
         return DeployResult(
             revision_id=f"{ctx.project}-no-state-{int(start)}",
