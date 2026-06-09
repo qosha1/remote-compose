@@ -16,6 +16,7 @@ from ._schema_types import (
     BackupConfig,
     ComposeConfig,
     ConfigError,
+    HealthCheckV2,
     LifecycleHookV2,
     RcConfigV2,
     SecretRefV2,
@@ -85,6 +86,22 @@ def _parse_lifecycle(svc_name: str, raw: dict[str, Any]) -> dict[str, LifecycleH
     return out
 
 
+def _parse_health_check(raw: Any) -> "HealthCheckV2 | None":
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("service.health_check must be a mapping")
+    hc = HealthCheckV2(
+        command=raw.get("command"),
+        interval=int(raw.get("interval", 30)),
+        timeout=int(raw.get("timeout", 10)),
+        retries=int(raw.get("retries", 3)),
+        start_period=int(raw.get("start_period", 0)),
+    )
+    hc.validate()
+    return hc
+
+
 def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
     try:
         return ServiceV2(
@@ -99,6 +116,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             type=raw.get("type", "application"),
             launch_type=raw.get("launch_type"),
             health_check_path=raw.get("health_check_path"),
+            health_check=_parse_health_check(raw.get("health_check")),
             health_check_grace_period=raw.get("health_check_grace_period"),
             public=bool(raw.get("public", False)),
             port=raw.get("port"),

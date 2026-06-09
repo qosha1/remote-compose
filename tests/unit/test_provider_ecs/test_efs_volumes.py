@@ -436,7 +436,12 @@ class TestStatefulDeploymentStrategy:
             if "resource " in stateless_block
             else stateless_block
         )
-        assert "deployment_minimum_healthy_percent" not in stateless_block
+        # Non-stateful services get the zero-downtime rollout config: keep
+        # 100% of old tasks until new are healthy, up to 200%, + circuit
+        # breaker. (Stateful stays 0/100 for the single-task EFS case above.)
+        assert "deployment_minimum_healthy_percent = 100" in stateless_block
+        assert "deployment_maximum_percent         = 200" in stateless_block
+        assert "deployment_circuit_breaker {" in stateless_block
 
     def test_stateful_service_disables_availability_zone_rebalancing(self, tmp_path):
         """rc-e5u.45.11: ECS API rejects deploy_max_pct<=100 combined with
