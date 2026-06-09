@@ -190,6 +190,127 @@ class TestLifecycleDeclarerResolution:
 
 
 # ---------------------------------------------------------------------
+# 1b. lifecycle mode: task -> run_one_off (not exec)
+# ---------------------------------------------------------------------
+
+
+class TestLifecycleModeTask:
+    def test_task_mode_uses_run_one_off_not_exec(self, tmp_path):
+        """A hook with mode: task runs via provider.run_one_off (one-off task
+        that gets SM secrets), NOT execute-command."""
+        rc_path = _write_v2_project(
+            tmp_path,
+            {
+                "django": {
+                    "image": "busybox",
+                    "lifecycle": {
+                        "sync": {
+                            "command": [
+                                "python",
+                                "manage.py",
+                                "sync_workflow_templates",
+                            ],
+                            "mode": "task",
+                        },
+                    },
+                },
+            },
+        )
+
+        ran: list[tuple[str, list]] = []
+
+        def fake_run(ctx, service, command, **kw):
+            ran.append((service, command))
+            return ExecResult(exit_code=0, stdout="synced\n", stderr="")
+
+        def boom_exec(*a, **k):  # exec must NOT be used for mode: task
+            raise AssertionError("exec called for a mode: task hook")
+
+        with (
+            mock.patch(
+                "remote_compose.provider.fake.FakeProvider.run_one_off",
+                side_effect=fake_run,
+                autospec=False,
+                create=True,
+            ),
+            mock.patch(
+                "remote_compose.provider.fake.FakeProvider.exec",
+                side_effect=boom_exec,
+                autospec=False,
+            ),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                rc_cli, ["--config", str(rc_path), "lifecycle", "sync"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert ran == [("django", ["python", "manage.py", "sync_workflow_templates"])]
+
+
+# ---------------------------------------------------------------------
+# 1c. rc run -> provider.run_one_off + exit-code propagation
+# ---------------------------------------------------------------------
+
+
+class TestRcRun:
+    def test_rc_run_calls_run_one_off_and_propagates_exit(self, tmp_path):
+        rc_path = _write_v2_project(
+            tmp_path,
+            {"django": {"image": "busybox"}},
+        )
+
+        captured: dict = {}
+
+        def fake_run(ctx, service, command, **kw):
+            captured["service"] = service
+            captured["command"] = command
+            captured["wait"] = kw.get("wait")
+            return ExecResult(exit_code=7, stdout="out\n", stderr="err\n")
+
+        with mock.patch(
+            "remote_compose.provider.fake.FakeProvider.run_one_off",
+            side_effect=fake_run,
+            autospec=False,
+            create=True,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                rc_cli,
+                [
+                    "--config",
+                    str(rc_path),
+                    "run",
+                    "django",
+                    "--",
+                    "python",
+                    "manage.py",
+                    "x",
+                ],
+            )
+
+        assert result.exit_code == 7  # inner command's exit code propagates
+        assert captured["service"] == "django"
+        assert captured["command"] == ["python", "manage.py", "x"]
+        assert captured["wait"] is True
+
+    def test_rc_run_requires_a_command(self, tmp_path):
+        rc_path = _write_v2_project(tmp_path, {"django": {"image": "busybox"}})
+        runner = CliRunner()
+        result = runner.invoke(rc_cli, ["--config", str(rc_path), "run", "django"])
+        assert result.exit_code != 0
+
+    def test_rc_run_unknown_service_errors(self, tmp_path):
+        rc_path = _write_v2_project(tmp_path, {"django": {"image": "busybox"}})
+        runner = CliRunner()
+        result = runner.invoke(
+            rc_cli,
+            ["--config", str(rc_path), "run", "nope", "--", "echo", "hi"],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------
 # 2. run_once + probe short-circuit
 # ---------------------------------------------------------------------
 

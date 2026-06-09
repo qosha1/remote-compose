@@ -78,6 +78,7 @@ def _parse_lifecycle(svc_name: str, raw: dict[str, Any]) -> dict[str, LifecycleH
             run_once=bool(hook_raw.get("run_once", False)),
             interactive=bool(hook_raw.get("interactive", False)),
             probe=list(probe_raw) if probe_raw else None,
+            mode=str(hook_raw.get("mode", "exec")),
         )
         hook.validate()
         out[hook_name] = hook

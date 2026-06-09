@@ -65,6 +65,12 @@ class LifecycleHookV2:
     run_once: bool = False
     interactive: bool = False
     probe: Optional[list[str]] = None  # used by run_once: nonzero = "not yet run"
+    # How the hook runs:
+    #   'exec' (default) — execute-command into a running task. Fast, but the
+    #     child process does NOT inherit Secrets-Manager secrets.
+    #   'task' — a one-off task on the service's task def (gets the task role +
+    #     SM secrets). Required for secret-dependent commands (migrate, sync).
+    mode: str = "exec"
 
     def validate(self) -> None:
         if not isinstance(self.command, list) or not self.command:
@@ -92,6 +98,16 @@ class LifecycleHookV2:
             raise ConfigError(
                 f"lifecycle hook {self.name!r}: auto_on_deploy hooks cannot be "
                 f"interactive (no human at deploy time)"
+            )
+        if self.mode not in ("exec", "task"):
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: mode must be 'exec' or 'task', "
+                f"got {self.mode!r}"
+            )
+        if self.mode == "task" and self.interactive:
+            raise ConfigError(
+                f"lifecycle hook {self.name!r}: mode 'task' cannot be interactive "
+                f"(a one-off task has no TTY)"
             )
 
 

@@ -1,0 +1,7 @@
+# Managed by remote-compose. Terraform volatile artifacts — never commit.
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+crash.*.log

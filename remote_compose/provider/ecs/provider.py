@@ -132,6 +132,28 @@ def _default_session_factory(ctx: DeployContext) -> Any:
     return boto3.Session(region_name=region)
 
 
+def _profile_is_resolvable(profile: Optional[str]) -> bool:
+    """True only if a named AWS profile actually exists in the shared config.
+
+    The boto3 session path (``_default_session_factory``) already falls back
+    to the default credential chain when a profile is absent. CLI subprocesses
+    don't get that for free: setting ``AWS_PROFILE=default`` (or passing
+    ``--profile``) makes the aws CLI hard-fail with "config profile could not
+    be found" under OIDC / env-only credentials. Mirror the session fallback
+    so exec/run subprocesses only pin a profile that's really there; otherwise
+    they inherit the ambient credential chain (env vars, assumed role, ...).
+    """
+    if not profile:
+        return False
+    try:
+        import botocore.session  # noqa: WPS433
+
+        config = botocore.session.Session().full_config or {}
+        return profile in (config.get("profiles") or {})
+    except Exception:  # noqa: BLE001 — never let a probe break exec/run
+        return False
+
+
 def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, Any]:
     """rc-tuc: centralized accessor for ctx.provider_config.ecs.
 
@@ -935,6 +957,14 @@ class ECSProvider(Provider):
 
         self.emitter.render(context, out_dir)
         (out_dir / "README.md").write_text(_README_TEMPLATE.format(project=ctx.project))
+        # Drop a .gitignore so terraform's volatile artifacts (provider cache,
+        # state, plan files) are never accidentally committed — rc regenerates
+        # the .tf each run, but .terraform/ + *.tfstate must stay out of git.
+        # Not added to the revision-id hash set (constant content). Only write
+        # if absent so a project that hand-tunes it keeps its version.
+        gitignore = out_dir / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(_TF_GITIGNORE)
         return out_dir
 
     # -----------------------------------------------------------------
@@ -2281,6 +2311,154 @@ class ECSProvider(Provider):
         ).get("events", [])
         return iter(e["message"] for e in events)
 
+    def run_one_off(
+        self,
+        ctx: DeployContext,
+        service: str,
+        command: list[str],
+        *,
+        wait: bool = True,
+        timeout: int = 900,
+        container: Optional[str] = None,
+    ) -> ExecResult:
+        """Run a command as a FRESH one-off task on a service's task def.
+
+        Unlike :meth:`exec` (``aws ecs execute-command`` into a running task,
+        whose child process does NOT inherit the task's Secrets-Manager
+        secrets), this launches a new task from the service's current task
+        definition — so the command gets the task role AND the SM secrets
+        injected by ECS, exactly like the real container. This is the right
+        primitive for secret-dependent management commands (Django/Rails
+        migrate, template sync, ...).
+
+        Reuses the live service's task definition + network config + launch
+        type so the task lands in the same VPC/subnets/SGs. With ``wait``
+        (default), blocks until the task stops, fetches its CloudWatch logs,
+        and returns the container's real exit code; without it, returns the
+        task ARN immediately (exit 0).
+        """
+        ecs_cfg = _ecs_cfg(ctx)
+        cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
+        session = self.session_factory(ctx)
+        ecs = session.client("ecs")
+
+        svcs = (
+            ecs.describe_services(cluster=cluster, services=[service]).get("services")
+            or []
+        )
+        if not svcs:
+            raise ProviderError(
+                f"rc run: service {service!r} not found in cluster {cluster!r}"
+            )
+        svc = svcs[0]
+        task_def = svc.get("taskDefinition")
+        if not task_def:
+            raise ProviderError(f"rc run: service {service!r} has no task definition")
+        net = svc.get("networkConfiguration")
+        launch_type = svc.get("launchType") or "FARGATE"
+
+        # Resolve the container to override. Default to the container whose
+        # name matches the service, else the first one in the task def.
+        cname = container
+        if not cname:
+            td_desc = ecs.describe_task_definition(taskDefinition=task_def).get(
+                "taskDefinition", {}
+            )
+            cdefs = td_desc.get("containerDefinitions") or []
+            cname = next(
+                (c["name"] for c in cdefs if c.get("name") == service),
+                (cdefs[0]["name"] if cdefs else service),
+            )
+
+        run_kwargs: dict[str, Any] = {
+            "cluster": cluster,
+            "taskDefinition": task_def,
+            "count": 1,
+            "startedBy": "rc-run",
+            "launchType": launch_type,
+            "overrides": {
+                "containerOverrides": [{"name": cname, "command": list(command)}]
+            },
+        }
+        if net:
+            run_kwargs["networkConfiguration"] = net
+
+        self._emit(
+            f"  rc run: one-off task on {service!r} ({cname}): " f"{' '.join(command)}"
+        )
+        resp = ecs.run_task(**run_kwargs)
+        failures = resp.get("failures") or []
+        tasks = resp.get("tasks") or []
+        if failures or not tasks:
+            raise ProviderError(f"rc run: run_task failed for {service!r}: {failures}")
+        task_arn = tasks[0]["taskArn"]
+
+        if not wait:
+            return ExecResult(exit_code=0, stdout=f"{task_arn}\n", stderr="")
+
+        from ...heartbeat import heartbeat as _hb
+
+        with _hb(self.progress, f"running one-off task on {service!r}"):
+            waiter = ecs.get_waiter("tasks_stopped")
+            waiter.wait(
+                cluster=cluster,
+                tasks=[task_arn],
+                WaiterConfig={"Delay": 6, "MaxAttempts": max(1, int(timeout / 6))},
+            )
+
+        desc = (
+            ecs.describe_tasks(cluster=cluster, tasks=[task_arn]).get("tasks") or [{}]
+        )[0]
+        containers = desc.get("containers") or [{}]
+        cont = next((c for c in containers if c.get("name") == cname), containers[0])
+        exit_code = cont.get("exitCode")
+        stopped_reason = desc.get("stoppedReason") or ""
+
+        task_id = task_arn.rsplit("/", 1)[-1]
+        out = self._fetch_run_logs(ctx, service, cname, task_id)
+
+        if exit_code is None:
+            # No exit code = container never ran to completion (image pull
+            # failure, OOM kill, stopped before start). Surface as failure.
+            return ExecResult(
+                exit_code=1,
+                stdout=out,
+                stderr=stopped_reason or "task stopped without an exit code",
+            )
+        return ExecResult(
+            exit_code=int(exit_code),
+            stdout=out,
+            stderr=stopped_reason if exit_code != 0 else "",
+        )
+
+    def _fetch_run_logs(
+        self,
+        ctx: DeployContext,
+        service: str,
+        container: str,
+        task_id: str,
+        tail: int = 500,
+    ) -> str:
+        """Best-effort fetch of a one-off task's awslogs stream.
+
+        rc task defs log to ``/ecs/<project>`` with stream
+        ``<service>/<container>/<task-id>`` (awslogs-stream-prefix = service
+        name). Returns "" on any failure — logs are a convenience, never a
+        reason to fail the run.
+        """
+        try:
+            session = self.session_factory(ctx)
+            client = session.client("logs")
+            events = client.get_log_events(
+                logGroupName=f"/ecs/{ctx.project}",
+                logStreamName=f"{service}/{container}/{task_id}",
+                limit=tail,
+                startFromHead=True,
+            ).get("events", [])
+            return "".join(e["message"] + "\n" for e in events)
+        except Exception:  # noqa: BLE001
+            return ""
+
     def exec(
         self,
         ctx: DeployContext,
@@ -2484,7 +2662,10 @@ class ECSProvider(Provider):
             _hb_ctx.__exit__(None, None, None)
 
         env = _os.environ.copy()
-        if profile:
+        # Only pin AWS_PROFILE when the profile actually resolves — otherwise
+        # the aws CLI subprocess hard-fails under OIDC/env creds (rc-run/exec
+        # in CI). Mirrors _default_session_factory's ProfileNotFound fallback.
+        if _profile_is_resolvable(profile):
             env["AWS_PROFILE"] = profile
 
         # rc-uct: heartbeat the actual aws ecs execute-command call too.
@@ -2801,6 +2982,16 @@ def _revision_id_from_dir(out_dir: Path) -> str:
         h.update(p.read_bytes())
         h.update(b"\0")
     return h.hexdigest()[:12]
+
+
+_TF_GITIGNORE = """# Managed by remote-compose. Terraform volatile artifacts — never commit.
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+crash.*.log
+"""
 
 
 _README_TEMPLATE = """# Terraform module for {project}

@@ -54,6 +54,7 @@ from .cli_commands.list_stacks import list_cmd as _list_cmd
 from .cli_commands.migrate import migrate_cmd as _migrate_cmd
 from .cli_commands.plan import plan_cmd as _plan_cmd
 from .cli_commands.provision import provision_cmd as _provision_cmd
+from .cli_commands.run import run_cmd as _run_cmd
 from .cli_commands.secrets import secrets_group as _secrets_group
 from .cli_commands.service_ops import logs_cmd as _logs_cmd
 from .cli_commands.service_ops import restart_cmd as _restart_cmd
@@ -122,6 +123,7 @@ cli.add_command(_logs_cmd)
 cli.add_command(_migrate_cmd)
 cli.add_command(_plan_cmd)
 cli.add_command(_provision_cmd)
+cli.add_command(_run_cmd)
 cli.add_command(_reap_cmd)
 cli.add_command(_restart_cmd)
 cli.add_command(_secrets_group)
