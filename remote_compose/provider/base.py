@@ -487,6 +487,30 @@ class Provider(ABC):
         directly. See ECSProvider._SENTINEL_BEGIN/END/EXIT.
         """
 
+    def run_one_off(
+        self,
+        ctx: DeployContext,
+        service: str,
+        command: list[str],
+        *,
+        wait: bool = True,
+        timeout: int = 900,
+        container: Optional[str] = None,
+    ) -> ExecResult:
+        """Run a command as a fresh one-off task on the service's task def.
+
+        Unlike :meth:`exec` (into a running task), this launches a NEW task
+        from the service's task definition, so the command gets the task role
+        AND any secrets the platform injects at task start (Secrets Manager
+        for ECS). Use for secret-dependent management commands that an exec
+        session can't run. Optional capability — not every provider supports
+        it; the default raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support run_one_off "
+            f"(one-off task execution)"
+        )
+
     @abstractmethod
     def rollback(
         self,

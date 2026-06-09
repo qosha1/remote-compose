@@ -79,22 +79,28 @@ def lifecycle_cmd(ctx, hook, service):
     deploy_ctx = build_deploy_context(v2, raw, path)
     provider = resolve_provider(v2)
 
+    # mode 'task' runs a one-off task on the service's task def (gets the task
+    # role + SM secrets); 'exec' (default) execs into a running task. Probe +
+    # command both honor the hook's mode so secret-dependent hooks (migrate,
+    # template sync) work — exec child processes don't get SM secrets.
+    def _run(command: list) -> object:
+        if spec.mode == "task":
+            return provider.run_one_off(deploy_ctx, target, list(command))
+        return provider.exec(
+            deploy_ctx, target, list(command), interactive=spec.interactive
+        )
+
     # run_once: probe first; skip if probe exits 0.
     if spec.run_once and spec.probe:
-        probe_result = provider.exec(deploy_ctx, target, list(spec.probe))
+        probe_result = _run(list(spec.probe))
         if probe_result.exit_code == 0:
             click.echo(
                 f"rc lifecycle: {hook} on {target} already done (probe exit 0); skipping.",
             )
             return
 
-    click.echo(f"rc lifecycle: running {hook} on {target}...")
-    result = provider.exec(
-        deploy_ctx,
-        target,
-        list(spec.command),
-        interactive=spec.interactive,
-    )
+    click.echo(f"rc lifecycle: running {hook} on {target} (mode={spec.mode})...")
+    result = _run(list(spec.command))
     if result.stdout:
         click.echo(result.stdout, nl=False)
     if result.stderr:
