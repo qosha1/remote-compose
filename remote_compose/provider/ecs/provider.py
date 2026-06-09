@@ -562,6 +562,7 @@ class ECSProvider(Provider):
                 "port": spec.port,
                 "public": bool(spec.public),
                 "health_check_path": spec.health_check_path,
+                "health_check": spec.health_check,
                 "health_check_grace_period": effective_grace,
                 "launch_type": launch_type,
                 "mounts": svc_mounts,
@@ -1937,17 +1938,38 @@ class ECSProvider(Provider):
                 break
         rolled_names: list[str] = []
         for svc in ordered:
+            spec = ctx.services.get(svc)
+            # Stateful (EFS-mounting) services roll one-at-a-time (min=0/
+            # max=100); everything else gets zero-downtime config: keep 100%
+            # of old tasks until new ones are healthy, up to 200% during the
+            # roll, + circuit breaker to auto-roll-back a bad deploy. This
+            # mirrors the terraform template for stacks that deploy --no-state
+            # (terraform bypassed), so the live service still gets the right
+            # rollout behavior.
+            stateful = bool(getattr(spec, "volumes", None)) if spec else False
+            dep_cfg = (
+                None
+                if stateful
+                else {
+                    "minimumHealthyPercent": 100,
+                    "maximumPercent": 200,
+                    "deploymentCircuitBreaker": {"enable": True, "rollback": True},
+                }
+            )
             candidates = [svc]
             if cluster_prefix and cluster_prefix != ctx.project:
                 candidates.append(f"{cluster_prefix}-{svc}")
             last_err: Exception | None = None
             for name in candidates:
                 try:
-                    client.update_service(
+                    kwargs: dict[str, Any] = dict(
                         cluster=cluster,
                         service=name,
                         forceNewDeployment=True,
                     )
+                    if dep_cfg is not None:
+                        kwargs["deploymentConfiguration"] = dep_cfg
+                    client.update_service(**kwargs)
                     last_err = None
                     rolled_names.append(name)
                     break
@@ -1963,6 +1985,66 @@ class ECSProvider(Provider):
         # about ResourceInitializationError when they manually inspect
         # service events — sometimes hours later.
         self._watch_post_rollout_errors(client, cluster, rolled_names)
+
+        # Wait for every rolled service to reach steady state (new tasks
+        # healthy, deployment COMPLETED) so `rc deploy` GATES on the roll
+        # finishing — otherwise a worker stuck mid-roll (no ALB 200 check
+        # covers it) reports a green deploy. RC_DEPLOY_WAIT_S=0 skips (tests).
+        self._wait_for_services_stable(client, cluster, rolled_names)
+
+    def _wait_for_services_stable(
+        self,
+        client: Any,
+        cluster: str,
+        services: list[str],
+    ) -> None:
+        """Block until each rolled service is stable (runningCount==desired,
+        single COMPLETED deployment) or the budget elapses.
+
+        Gives `rc deploy` a real completion gate for workers (which no HTTP
+        check covers). RC_DEPLOY_WAIT_S (default 900) sets the budget; 0
+        skips entirely (unit tests). On timeout, raises ProviderError with
+        the lagging services so a stuck roll fails the deploy loudly.
+        """
+        import os as _os
+
+        budget = int(_os.environ.get("RC_DEPLOY_WAIT_S", "900"))
+        if budget <= 0 or not services:
+            return
+        interval = float(_os.environ.get("RC_DEPLOY_WAIT_INTERVAL_S", "15"))
+        deadline = time.monotonic() + budget
+
+        from ...heartbeat import heartbeat as _hb
+
+        def _stable(name: str) -> bool:
+            resp = client.describe_services(cluster=cluster, services=[name])
+            svcs = resp.get("services") or []
+            if not svcs:
+                return False
+            s = svcs[0]
+            deps = s.get("deployments") or []
+            primary = [d for d in deps if d.get("status") == "PRIMARY"]
+            return (
+                len(deps) == 1
+                and s.get("runningCount") == s.get("desiredCount")
+                and bool(primary)
+                and primary[0].get("rolloutState", "COMPLETED") == "COMPLETED"
+            )
+
+        with _hb(self.progress, "waiting for services to reach steady state"):
+            pending = list(services)
+            while pending:
+                pending = [n for n in pending if not _stable(n)]
+                if not pending:
+                    return
+                if time.monotonic() >= deadline:
+                    raise ProviderError(
+                        "deploy did not stabilize within "
+                        f"{budget}s — still rolling: {', '.join(pending)}. "
+                        "A task is likely failing its health check or crash-"
+                        "looping; check service events / task logs."
+                    )
+                time.sleep(interval)
 
     def _watch_post_rollout_errors(
         self,

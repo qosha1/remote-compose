@@ -18,6 +18,10 @@ def pytest_configure():
     # exercise the watcher (test_post_rollout_watcher.py) override this
     # via monkeypatch.setenv.
     os.environ.setdefault("RC_POST_ROLLOUT_WATCH_S", "0")
+    # Same for the post-roll steady-state wait (rc zero-downtime gate): the
+    # waiter polls describe_services until services stabilize — opt unit
+    # tests out by default; the wait's own tests override via setenv.
+    os.environ.setdefault("RC_DEPLOY_WAIT_S", "0")
 
 
 # ---------------------------------------------------------------------------

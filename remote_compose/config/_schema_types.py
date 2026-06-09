@@ -112,6 +112,44 @@ class LifecycleHookV2:
 
 
 @dataclass
+class HealthCheckV2:
+    """Container-level ECS healthCheck for a service (distinct from
+    ``health_check_path``, which is the ALB target-group HTTP check for
+    public services).
+
+    This is what gives non-ALB services — celery workers especially — a
+    real READINESS signal: with deployment_minimum_healthy_percent=100,
+    ECS keeps the old tasks running until the NEW ones pass this check,
+    so a rolling deploy never drains a ready worker before its
+    replacement can actually accept work (zero-downtime worker rolls).
+
+    ``command`` is the raw ECS healthCheck command list, e.g.
+    ``["CMD", "celery", "-A", "config", "inspect", "ping"]`` or
+    ``["CMD-SHELL", "test -f /tmp/ready"]``.
+    """
+
+    command: list[str]
+    interval: int = 30
+    timeout: int = 10
+    retries: int = 3
+    start_period: int = 0
+
+    def validate(self) -> None:
+        if not isinstance(self.command, list) or not self.command:
+            raise ConfigError("health_check.command must be a non-empty list[str]")
+        if not all(isinstance(c, str) for c in self.command):
+            raise ConfigError("health_check.command must be list[str]")
+        if self.command[0] not in ("CMD", "CMD-SHELL"):
+            raise ConfigError(
+                "health_check.command must start with 'CMD' or 'CMD-SHELL' "
+                f"(got {self.command[0]!r})"
+            )
+        for fld in ("interval", "timeout", "retries", "start_period"):
+            if not isinstance(getattr(self, fld), int) or getattr(self, fld) < 0:
+                raise ConfigError(f"health_check.{fld} must be a non-negative int")
+
+
+@dataclass
 class ServiceV2:
     name: str
     cpu: int
@@ -120,6 +158,10 @@ class ServiceV2:
     type: str = "application"
     launch_type: Optional[str] = None
     health_check_path: Optional[str] = None
+    # Container-level readiness check (ECS healthCheck). For workers this is
+    # what makes a rolling deploy zero-downtime: ECS keeps old tasks until
+    # new ones PASS this check (not just reach RUNNING). See HealthCheckV2.
+    health_check: Optional["HealthCheckV2"] = None
     # rc-05q: ECS service.health_check_grace_period_seconds (Fargate-only,
     # only meaningful for ALB-fronted services). When None, provider
     # computes 60s default (or 180s with an auto_on_deploy lifecycle

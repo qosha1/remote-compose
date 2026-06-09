@@ -55,6 +55,19 @@ resource "aws_ecs_service" "api" {
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).
   # Task role carries ssmmessages:* perms (see iam.tf).
   enable_execute_command = true
+  # Zero-downtime rolling deploy: keep 100% of old tasks running until the
+  # NEW tasks pass their health check (or reach RUNNING if no healthCheck),
+  # allowing up to 200% during the roll. Pair with a container healthCheck
+  # (health_check:) so "healthy" means actually-ready -- otherwise ECS drains
+  # old tasks the instant new ones reach RUNNING, before a worker can accept
+  # work. Circuit breaker auto-rolls-back a deploy whose new tasks never go
+  # healthy, instead of leaving a degraded/empty pool.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -235,6 +248,19 @@ resource "aws_ecs_service" "web" {
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).
   # Task role carries ssmmessages:* perms (see iam.tf).
   enable_execute_command = true
+  # Zero-downtime rolling deploy: keep 100% of old tasks running until the
+  # NEW tasks pass their health check (or reach RUNNING if no healthCheck),
+  # allowing up to 200% during the roll. Pair with a container healthCheck
+  # (health_check:) so "healthy" means actually-ready -- otherwise ECS drains
+  # old tasks the instant new ones reach RUNNING, before a worker can accept
+  # work. Circuit breaker auto-rolls-back a deploy whose new tasks never go
+  # healthy, instead of leaving a degraded/empty pool.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -319,6 +345,19 @@ resource "aws_ecs_service" "worker" {
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).
   # Task role carries ssmmessages:* perms (see iam.tf).
   enable_execute_command = true
+  # Zero-downtime rolling deploy: keep 100% of old tasks running until the
+  # NEW tasks pass their health check (or reach RUNNING if no healthCheck),
+  # allowing up to 200% during the roll. Pair with a container healthCheck
+  # (health_check:) so "healthy" means actually-ready -- otherwise ECS drains
+  # old tasks the instant new ones reach RUNNING, before a worker can accept
+  # work. Circuit breaker auto-rolls-back a deploy whose new tasks never go
+  # healthy, instead of leaving a degraded/empty pool.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ec2.name

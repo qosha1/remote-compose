@@ -49,6 +49,11 @@ class ServiceSpec:
     type: str = "application"
     launch_type: Optional[str] = None
     health_check_path: Optional[str] = None
+    # Container-level ECS healthCheck (readiness), as a dict:
+    # {command: list[str], interval, timeout, retries, start_period}. Drives
+    # zero-downtime worker rolls — ECS keeps old tasks until new ones pass
+    # this check. Distinct from health_check_path (ALB target-group check).
+    health_check: Optional[dict[str, Any]] = None
     # rc-05q: ECS service.health_check_grace_period_seconds. Only emitted
     # for services with public=true (load_balancer block). When None the
     # provider computes a default (60s base, 180s when any auto_on_deploy

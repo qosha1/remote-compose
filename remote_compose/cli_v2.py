@@ -712,6 +712,17 @@ def build_deploy_context(
                 type=svc.type,
                 launch_type=svc.launch_type,
                 health_check_path=svc.health_check_path,
+                health_check=(
+                    {
+                        "command": svc.health_check.command,
+                        "interval": svc.health_check.interval,
+                        "timeout": svc.health_check.timeout,
+                        "retries": svc.health_check.retries,
+                        "start_period": svc.health_check.start_period,
+                    }
+                    if svc.health_check
+                    else None
+                ),
                 health_check_grace_period=svc.health_check_grace_period,
                 public=svc.public,
                 port=primary_port,

@@ -107,6 +107,18 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 {%- endfor %}
     ]
 {%- endif %}
+{%- if svc.health_check %}
+    # Container readiness check. With deployment_minimum_healthy_percent=100,
+    # ECS keeps OLD tasks running until NEW ones pass this (not just reach
+    # RUNNING) — zero-downtime rolls for workers (no ALB) too.
+    healthCheck = {
+      command     = {{ svc.health_check.command | tojson }}
+      interval    = {{ svc.health_check.interval }}
+      timeout     = {{ svc.health_check.timeout }}
+      retries     = {{ svc.health_check.retries }}
+      startPeriod = {{ svc.health_check.start_period }}
+    }
+{%- endif %}
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -171,6 +183,20 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # deploy time: "availability_zone_rebalancing does not support
   # maximumPercent <= 100". Pin it OFF for stateful services.
   availability_zone_rebalancing = "DISABLED"
+{%- else %}
+  # Zero-downtime rolling deploy: keep 100% of old tasks running until the
+  # NEW tasks pass their health check (or reach RUNNING if no healthCheck),
+  # allowing up to 200% during the roll. Pair with a container healthCheck
+  # (health_check:) so "healthy" means actually-ready -- otherwise ECS drains
+  # old tasks the instant new ones reach RUNNING, before a worker can accept
+  # work. Circuit breaker auto-rolls-back a deploy whose new tasks never go
+  # healthy, instead of leaving a degraded/empty pool.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 {%- endif %}
 {%- if svc.launch_type == "EC2" %}
 
