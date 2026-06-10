@@ -494,6 +494,13 @@ class ECSProvider(Provider):
                         f"service {name!r} volume {vol_name!r}: access_point_id "
                         f"requires efs_id (the existing file system it belongs to)"
                     )
+                # EFS IAM authorization on the mount. Default DISABLED (rc-
+                # created EFS has no restrictive file-system policy). An ADOPTED
+                # EFS often does (e.g. Copilot's CopilotEFSPolicy requires
+                # iam:ResourceTag + ClientMount via IAM) — set efs_iam_auth:
+                # true so the mount authenticates as the task role (which then
+                # needs ClientMount perms + the policy's tag conditions).
+                iam_auth = "ENABLED" if vol_entry.get("efs_iam_auth") else "DISABLED"
                 vol_tf = _tf_name(vol_name)
                 efs_volumes.setdefault(
                     vol_name,
@@ -515,6 +522,7 @@ class ECSProvider(Provider):
                     "access_point_tf_name": ap_tf,
                     "existing_fs_id": existing_fs_id,
                     "existing_ap_id": existing_ap_id,
+                    "iam_auth": iam_auth,
                 }
                 svc_mounts.append(mount_view)
                 service_volume_mounts.append(mount_view)
@@ -582,6 +590,7 @@ class ECSProvider(Provider):
                         # volume block, which reads these keys.
                         "existing_fs_id": None,
                         "existing_ap_id": None,
+                        "iam_auth": "DISABLED",
                     }
                     svc_mounts.append(dv_mount_view)
                     dev_volume_mounts.append(dv_mount_view)

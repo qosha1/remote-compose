@@ -144,7 +144,7 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 
       authorization_config {
         access_point_id = {% if m.existing_ap_id %}"{{ m.existing_ap_id }}"{% else %}aws_efs_access_point.{{ m.access_point_tf_name }}.id{% endif %}
-        iam             = "DISABLED"
+        iam             = "{{ m.iam_auth }}"
       }
     }
   }
