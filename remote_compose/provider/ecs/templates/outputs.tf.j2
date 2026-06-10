@@ -8,7 +8,7 @@ output "cluster_arn" {
 
 {%- if has_public_service %}
 output "alb_dns_name" {
-  value = aws_lb.main.dns_name
+  value = {{ alb_dns_ref }}
 }
 {%- endif %}
 

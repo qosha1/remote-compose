@@ -244,7 +244,7 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
     container_port   = {{ svc.port }}
   }
 
-  depends_on = [aws_lb_listener.http]
+  depends_on = [{% if existing_alb %}aws_lb_listener_rule.{{ svc.tf_name }}{% else %}aws_lb_listener.http{% endif %}]
 {%- endif %}
 }
 {% endfor %}

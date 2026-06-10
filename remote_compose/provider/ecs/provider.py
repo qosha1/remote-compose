@@ -341,6 +341,25 @@ class ECSProvider(Provider):
         existing_vpc = bool(existing_vpc_id)
         if not private_subnet_ids:
             private_subnet_ids = public_subnet_ids
+
+        # Existing-ALB adopt (rc-adopt, D4): reference a live ALB + its HTTPS
+        # listener instead of creating one — for adopt-in-place of a stack
+        # already fronted by an ALB (e.g. browser-mgr's Copilot ALB + the
+        # Namecheap CNAME). rc emits no aws_lb / listeners / alb SG; it adds
+        # host-based listener RULES + per-service target groups onto the
+        # existing listener and reads dns_name/zone_id/security_groups off a
+        # data source. The existing listener keeps its own default action, so
+        # adopting an ALB requires the public service(s) to declare a domain
+        # (host-based routing) — there's no rc-managed catch-all to point.
+        existing_alb_cfg = ecs_cfg.get("existing_alb") or {}
+        existing_alb = bool(existing_alb_cfg)
+        existing_alb_arn = existing_alb_cfg.get("arn")
+        existing_alb_https_listener_arn = existing_alb_cfg.get("https_listener_arn")
+        if existing_alb and not (existing_alb_arn and existing_alb_https_listener_arn):
+            raise ProviderConfigError(
+                "provider_config.ecs.existing_alb requires both 'arn' and "
+                "'https_listener_arn' (the live ALB + its HTTPS listener)"
+            )
         # Rendering aliases keep the create path byte-identical: in create mode
         # these are exactly the original resource references; in adopt mode they
         # point at the data source + network locals. Templates read these so they
@@ -355,6 +374,22 @@ class ECSProvider(Provider):
             public_subnet_ids_ref = "aws_subnet.public[*].id"
             public_subnet_idx_ref = "aws_subnet.public[count.index].id"
             private_subnet_ids_ref = "aws_subnet.private[*].id"
+
+        # ALB rendering aliases — like the vpc refs, templates read these so
+        # they don't branch on existing_alb. In create mode they're the
+        # original resource references (byte-identical output); in adopt mode
+        # they point at the data sources emitted by alb.tf.j2.
+        if existing_alb:
+            alb_dns_ref = "data.aws_lb.main.dns_name"
+            alb_zone_ref = "data.aws_lb.main.zone_id"
+            https_listener_ref = "data.aws_lb_listener.https.arn"
+            # tasks SG ingress: from the existing ALB's own security groups.
+            tasks_alb_ingress_ref = "data.aws_lb.main.security_groups"
+        else:
+            alb_dns_ref = "aws_lb.main.dns_name"
+            alb_zone_ref = "aws_lb.main.zone_id"
+            https_listener_ref = "aws_lb_listener.https.arn"
+            tasks_alb_ingress_ref = "[aws_security_group.alb.id]"
 
         default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
         if default_launch_type not in {"FARGATE", "EC2"}:
@@ -670,6 +705,28 @@ class ECSProvider(Provider):
             dsvc["listener_rule_priority"] = 100 + i * 10
         has_domained_services = len(domained_services) > 0
         has_ec2_service = len(ec2_demands) > 0
+        # An adopted ALB keeps its own (rc-unmanaged) default listener action,
+        # so rc can only add host-based rules — every public service must
+        # declare a domain. And the alb SG isn't rc-created, so EC2 capacity
+        # (which references it) can't be combined with an adopted ALB.
+        if existing_alb:
+            public_without_domain = [
+                s["name"]
+                for s in services_view
+                if s.get("public") and not s.get("domain")
+            ]
+            if public_without_domain:
+                raise ProviderConfigError(
+                    "provider_config.ecs.existing_alb requires every public "
+                    "service to set 'domain' (host-based routing onto the "
+                    f"existing listener); missing on: {public_without_domain}"
+                )
+            if has_ec2_service:
+                raise ProviderConfigError(
+                    "provider_config.ecs.existing_alb is not supported with EC2 "
+                    "launch-type services (they reference the rc-created ALB "
+                    "security group, which an adopted ALB does not emit)"
+                )
         # has_efs drives the EFS template (security group, file system,
         # mount targets, access points). True for either persistent OR
         # dev-mode source mounts since both need the same EFS plumbing.
@@ -917,6 +974,13 @@ class ECSProvider(Provider):
             "public_subnet_ids_ref": public_subnet_ids_ref,
             "public_subnet_idx_ref": public_subnet_idx_ref,
             "private_subnet_ids_ref": private_subnet_ids_ref,
+            "existing_alb": existing_alb,
+            "existing_alb_arn": existing_alb_arn,
+            "existing_alb_https_listener_arn": existing_alb_https_listener_arn,
+            "alb_dns_ref": alb_dns_ref,
+            "alb_zone_ref": alb_zone_ref,
+            "https_listener_ref": https_listener_ref,
+            "tasks_alb_ingress_ref": tasks_alb_ingress_ref,
             "cluster_name": cluster_name,
             "aws_profile": aws_profile,
             "environment": environment,
