@@ -200,6 +200,39 @@ class TestTaskDefIntegration:
         assert 'transit_encryption = "ENABLED"' in services
 
 
+class TestEfsIamAuth:
+    """efs_iam_auth toggles IAM authorization on the mount. Default DISABLED
+    (rc-created EFS); set true for an adopted EFS whose file-system policy
+    requires IAM (e.g. Copilot's CopilotEFSPolicy)."""
+
+    def _ctx_iam(self, tmp_path, iam_auth):
+        vol = {"name": "pgdata", "mount": "/data", "uid": 999, "gid": 999}
+        if iam_auth is not None:
+            vol["efs_iam_auth"] = iam_auth
+        return _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[vol],
+                ),
+            },
+        )
+
+    def test_default_is_disabled(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_iam(tmp_path, None), out)
+        assert 'iam             = "DISABLED"' in (out / "services.tf").read_text()
+
+    def test_enabled_when_set(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._ctx_iam(tmp_path, True), out)
+        assert 'iam             = "ENABLED"' in (out / "services.tf").read_text()
+
+
 class TestExistingEfsReuse:
     """Adopt-in-place: a volume that names an existing efs_id + access_point_id
     must NOT create a new EFS / access point — the task-def mount references the
