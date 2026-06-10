@@ -1,4 +1,16 @@
 {%- if has_public_service %}
+{%- if existing_alb %}
+# Adopt-in-place: reference the existing ALB + its HTTPS listener. rc creates
+# no aws_lb / listeners / alb security group; it only adds host-based listener
+# rules + per-service target groups onto the existing listener below.
+data "aws_lb" "main" {
+  arn = "{{ existing_alb_arn }}"
+}
+
+data "aws_lb_listener" "https" {
+  arn = "{{ existing_alb_https_listener_arn }}"
+}
+{%- else %}
 resource "aws_lb" "main" {
   name               = "${var.project}-alb"
   internal           = false
@@ -46,8 +58,10 @@ locals {
   default_target_group_arn = aws_lb_target_group.default.arn
 }
 {%- endif %}
+{%- endif %}
 
 {%- if has_domain %}
+{%- if not existing_alb %}
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
@@ -79,6 +93,7 @@ resource "aws_lb_listener" "https" {
     target_group_arn = local.default_target_group_arn
   }
 }
+{%- endif %}
 
 {%- for dsvc in domained_services %}
 
@@ -108,7 +123,7 @@ resource "aws_lb_target_group" "{{ dsvc.tf_name }}" {
 }
 
 resource "aws_lb_listener_rule" "{{ dsvc.tf_name }}" {
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = {{ https_listener_ref }}
   priority     = {{ dsvc.listener_rule_priority }}
 
   action {
@@ -124,6 +139,7 @@ resource "aws_lb_listener_rule" "{{ dsvc.tf_name }}" {
 }
 {%- endfor %}
 {%- else %}
+{%- if not existing_alb %}
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
@@ -134,5 +150,6 @@ resource "aws_lb_listener" "http" {
     target_group_arn = local.default_target_group_arn
   }
 }
+{%- endif %}
 {%- endif %}
 {%- endif %}

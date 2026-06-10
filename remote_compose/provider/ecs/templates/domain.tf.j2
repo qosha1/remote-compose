@@ -61,8 +61,8 @@ resource "aws_route53_record" "app_{{ loop.index }}" {
   type    = "A"
 
   alias {
-    name                   = aws_lb.main.dns_name
-    zone_id                = aws_lb.main.zone_id
+    name                   = {{ alb_dns_ref }}
+    zone_id                = {{ alb_zone_ref }}
     evaluate_target_health = true
   }
 }

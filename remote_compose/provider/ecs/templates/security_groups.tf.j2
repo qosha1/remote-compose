@@ -1,3 +1,4 @@
+{%- if not existing_alb -%}
 resource "aws_security_group" "alb" {
   name        = "${var.project}-alb"
   description = "Allow public HTTP(S) into the load balancer."
@@ -22,6 +23,7 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+{%- endif %}
 
 resource "aws_security_group" "tasks" {
   name        = "${var.project}-tasks"
@@ -32,7 +34,7 @@ resource "aws_security_group" "tasks" {
     from_port       = 0
     to_port         = 0
     protocol        = "-1"
-    security_groups = [aws_security_group.alb.id]
+    security_groups = {{ tasks_alb_ingress_ref }}
   }
   ingress {
     from_port = 0
