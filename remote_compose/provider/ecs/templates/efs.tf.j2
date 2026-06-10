@@ -2,6 +2,7 @@
 # ------------------------------------------------------------------
 # EFS file systems for persistent compose volumes
 # ------------------------------------------------------------------
+{%- if has_created_efs %}
 
 resource "aws_security_group" "efs" {
   name        = "${var.project}-efs"
@@ -21,8 +22,14 @@ resource "aws_security_group" "efs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+{%- endif %}
 
 {%- for vol in efs_volumes %}
+{%- if vol.existing_fs_id %}
+# Volume {{ vol.name }} references an EXISTING EFS ({{ vol.existing_fs_id }}) —
+# adopt-in-place. rc creates no file system / mount targets for it; the
+# task-def mount points at the existing ids (and pre-existing mount targets).
+{%- else %}
 # Encryption defaults to false: AWS rejects encrypted=true on accounts that
 # haven't initialized the aws/elasticfilesystem KMS key (rc-e5u.26). Production
 # users: set encrypted=true + provide kms_key_id once the key exists.
@@ -45,9 +52,14 @@ resource "aws_efs_mount_target" "{{ vol.tf_name }}" {
   subnet_id       = {{ public_subnet_idx_ref }}
   security_groups = [aws_security_group.efs.id]
 }
+{%- endif %}
 {%- endfor %}
 
 {%- for mount in service_volume_mounts %}
+{%- if mount.existing_ap_id %}
+# {{ mount.service }} mounts existing access point {{ mount.existing_ap_id }}
+# on existing EFS {{ mount.existing_fs_id }} — rc creates no access point.
+{%- else %}
 resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
   file_system_id = aws_efs_file_system.{{ mount.volume_tf_name }}.id
 
@@ -73,6 +85,7 @@ resource "aws_efs_access_point" "{{ mount.access_point_tf_name }}" {
     Volume  = "{{ mount.volume }}"
   }
 }
+{%- endif %}
 {%- endfor %}
 
 {%- if has_dev_efs %}

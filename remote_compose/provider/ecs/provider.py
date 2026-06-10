@@ -431,12 +431,26 @@ class ECSProvider(Provider):
                         f"service {name!r} volume {vol_name!r}: mode must be "
                         f"a POSIX octal string like '0755', got {vol_mode!r}"
                     )
+                # rc-adopt: reference an EXISTING EFS + access point instead of
+                # creating one — for adopt-in-place of a stateful stack whose
+                # data already lives on EFS (don't orphan it). When efs_id is
+                # set, rc emits no aws_efs_file_system / mount_target; when
+                # access_point_id is set, no aws_efs_access_point — the task-def
+                # mount references the existing ids verbatim.
+                existing_fs_id = vol_entry.get("efs_id")
+                existing_ap_id = vol_entry.get("access_point_id")
+                if existing_ap_id and not existing_fs_id:
+                    raise ProviderConfigError(
+                        f"service {name!r} volume {vol_name!r}: access_point_id "
+                        f"requires efs_id (the existing file system it belongs to)"
+                    )
                 vol_tf = _tf_name(vol_name)
                 efs_volumes.setdefault(
                     vol_name,
                     {
                         "name": vol_name,
                         "tf_name": vol_tf,
+                        "existing_fs_id": existing_fs_id,
                     },
                 )
                 ap_tf = f"{_tf_name(name)}__{vol_tf}"
@@ -449,6 +463,8 @@ class ECSProvider(Provider):
                     "mode": vol_mode,
                     "service": name,
                     "access_point_tf_name": ap_tf,
+                    "existing_fs_id": existing_fs_id,
+                    "existing_ap_id": existing_ap_id,
                 }
                 svc_mounts.append(mount_view)
                 service_volume_mounts.append(mount_view)
@@ -511,6 +527,11 @@ class ECSProvider(Provider):
                         "ap_root_path": f"/{_tf_name(name)}__{dv_tf}",
                         "dev": True,
                         "dev_volume_name": dv_name,
+                        # Dev source mounts are always rc-created (never an
+                        # existing-EFS adopt) — but they share services.tf.j2's
+                        # volume block, which reads these keys.
+                        "existing_fs_id": None,
+                        "existing_ap_id": None,
                     }
                     svc_mounts.append(dv_mount_view)
                     dev_volume_mounts.append(dv_mount_view)
@@ -654,6 +675,15 @@ class ECSProvider(Provider):
         # dev-mode source mounts since both need the same EFS plumbing.
         has_efs = len(efs_volumes) > 0 or dev_efs_volume is not None
         has_dev_efs = dev_efs_volume is not None
+        # has_created_efs gates the rc-managed EFS resources (security group,
+        # file systems, mount targets). False when EVERY persistent volume
+        # references an EXISTING EFS (adopt-in-place: efs_id set on all) — then
+        # rc creates no EFS at all and only emits task-def mounts of the
+        # existing ids. A dev-mode source mount always needs rc-created EFS.
+        has_created_efs = (
+            any(not v.get("existing_fs_id") for v in efs_volumes.values())
+            or dev_efs_volume is not None
+        )
         # Service discovery is cheap (one Cloud Map namespace + one entry per
         # service) and turns multi-service compose into ECS that actually
         # talks to itself. Enable whenever there is more than one service.
@@ -901,6 +931,7 @@ class ECSProvider(Provider):
             "has_service_discovery": has_service_discovery,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
+            "has_created_efs": has_created_efs,
             "efs_volumes": sorted(efs_volumes.values(), key=lambda v: v["name"]),
             "service_volume_mounts": service_volume_mounts,
             # Dev-mode source mounts (rc-e5u.45.8). When dev_mode is on
