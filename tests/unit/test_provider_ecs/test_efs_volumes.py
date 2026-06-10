@@ -200,6 +200,121 @@ class TestTaskDefIntegration:
         assert 'transit_encryption = "ENABLED"' in services
 
 
+class TestExistingEfsReuse:
+    """Adopt-in-place: a volume that names an existing efs_id + access_point_id
+    must NOT create a new EFS / access point — the task-def mount references the
+    existing ids verbatim (so 1.6 TB of live data isn't orphaned)."""
+
+    def _existing_ctx(self, tmp_path):
+        return _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/var/lib/postgresql/data",
+                            "uid": 999,
+                            "gid": 999,
+                            "efs_id": "fs-06640134a4cdcb8ba",
+                            "access_point_id": "fsap-0a06a6e435f0e31ad",
+                        }
+                    ],
+                ),
+            },
+        )
+
+    def test_no_efs_resources_created_for_existing(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._existing_ctx(tmp_path), out)
+        efs = (out / "efs.tf").read_text()
+        # No created file system / mount target / access point / efs SG.
+        assert "aws_efs_file_system" not in efs
+        assert "aws_efs_mount_target" not in efs
+        assert "aws_efs_access_point" not in efs
+        assert 'resource "aws_security_group" "efs"' not in efs
+        # The existing ids are referenced in the explanatory comment.
+        assert "fs-06640134a4cdcb8ba" in efs
+
+    def test_task_def_mount_references_existing_ids(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._existing_ctx(tmp_path), out)
+        services = (out / "services.tf").read_text()
+        assert 'file_system_id     = "fs-06640134a4cdcb8ba"' in services
+        assert 'access_point_id = "fsap-0a06a6e435f0e31ad"' in services
+        assert 'transit_encryption = "ENABLED"' in services
+        # No terraform resource refs for this volume.
+        assert "aws_efs_file_system.pgdata.id" not in services
+        assert "aws_efs_access_point.postgres__pgdata.id" not in services
+
+    def test_mixed_existing_and_created_volumes(self, tmp_path):
+        """One existing volume + one rc-created volume coexist: rc creates the
+        SG + the created volume's resources, skips the existing one."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/data",
+                            "uid": 999,
+                            "gid": 999,
+                            "efs_id": "fs-existing",
+                            "access_point_id": "fsap-existing",
+                        }
+                    ],
+                ),
+                "cache": ServiceSpec(
+                    name="cache",
+                    cpu=256,
+                    memory=512,
+                    type="infrastructure",
+                    volumes=[{"name": "scratch", "mount": "/scratch"}],
+                ),
+            },
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs = (out / "efs.tf").read_text()
+        # created volume gets a file system + the shared efs SG; existing one doesn't.
+        assert 'resource "aws_efs_file_system" "scratch"' in efs
+        assert 'resource "aws_efs_file_system" "pgdata"' not in efs
+        assert 'resource "aws_security_group" "efs"' in efs
+
+    def test_access_point_id_without_efs_id_rejected(self, tmp_path):
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[
+                        {
+                            "name": "pgdata",
+                            "mount": "/data",
+                            "access_point_id": "fsap-orphan",  # no efs_id
+                        }
+                    ],
+                ),
+            },
+        )
+        with pytest.raises(
+            ProviderConfigError, match="access_point_id requires efs_id"
+        ):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+
 class TestSharedVolume:
     def test_two_services_mount_same_volume_share_file_system(self, tmp_path):
         ctx = _ctx(

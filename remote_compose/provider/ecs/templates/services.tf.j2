@@ -139,11 +139,11 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   volume {
     name = "{{ m.volume }}"
     efs_volume_configuration {
-      file_system_id     = aws_efs_file_system.{{ m.volume_tf_name }}.id
+      file_system_id     = {% if m.existing_fs_id %}"{{ m.existing_fs_id }}"{% else %}aws_efs_file_system.{{ m.volume_tf_name }}.id{% endif %}
       transit_encryption = "ENABLED"
 
       authorization_config {
-        access_point_id = aws_efs_access_point.{{ m.access_point_tf_name }}.id
+        access_point_id = {% if m.existing_ap_id %}"{{ m.existing_ap_id }}"{% else %}aws_efs_access_point.{{ m.access_point_tf_name }}.id{% endif %}
         iam             = "DISABLED"
       }
     }
