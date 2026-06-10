@@ -360,6 +360,21 @@ class ECSProvider(Provider):
                 "provider_config.ecs.existing_alb requires both 'arn' and "
                 "'https_listener_arn' (the live ALB + its HTTPS listener)"
             )
+
+        # Existing Cloud Map namespace (rc-adopt, D5): register services into a
+        # live private DNS namespace instead of creating `<project>.local`. For
+        # adopt-in-place where peers already resolve the existing names — e.g.
+        # debuggai-api calls django.production.browser-mgr.local:5000, so that
+        # namespace must be kept, not replaced.
+        existing_cloud_map_namespace_id = ecs_cfg.get("existing_cloud_map_namespace_id")
+        existing_cloud_map_namespace = bool(existing_cloud_map_namespace_id)
+        if existing_cloud_map_namespace:
+            service_discovery_namespace_ref = f'"{existing_cloud_map_namespace_id}"'
+        else:
+            service_discovery_namespace_ref = (
+                "aws_service_discovery_private_dns_namespace.main.id"
+            )
+
         # Rendering aliases keep the create path byte-identical: in create mode
         # these are exactly the original resource references; in adopt mode they
         # point at the data source + network locals. Templates read these so they
@@ -977,6 +992,8 @@ class ECSProvider(Provider):
             "existing_alb": existing_alb,
             "existing_alb_arn": existing_alb_arn,
             "existing_alb_https_listener_arn": existing_alb_https_listener_arn,
+            "existing_cloud_map_namespace": existing_cloud_map_namespace,
+            "service_discovery_namespace_ref": service_discovery_namespace_ref,
             "alb_dns_ref": alb_dns_ref,
             "alb_zone_ref": alb_zone_ref,
             "https_listener_ref": https_listener_ref,

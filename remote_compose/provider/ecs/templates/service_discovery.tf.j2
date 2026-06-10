@@ -5,11 +5,13 @@
 # options add the namespace to the resolver's search path so compose
 # hostnames ("db", "cache") resolve without the FQDN.
 # ------------------------------------------------------------------
+{%- if not existing_cloud_map_namespace %}
 
 resource "aws_service_discovery_private_dns_namespace" "main" {
   name = "${var.project}.local"
   vpc  = {{ vpc_id_ref }}
 }
+{%- endif %}
 {%- if not existing_vpc %}
 
 resource "aws_vpc_dhcp_options" "main" {
@@ -28,7 +30,7 @@ resource "aws_service_discovery_service" "{{ svc.tf_name }}" {
   name = "{{ svc.name }}"
 
   dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.main.id
+    namespace_id = {{ service_discovery_namespace_ref }}
     dns_records {
       type = "A"
       ttl  = 10
