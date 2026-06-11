@@ -57,3 +57,17 @@ def test_default_off_no_lifecycle_ignore(tmp_path):
 def test_explicit_false_no_lifecycle_ignore(tmp_path):
     tf = _services_tf(tmp_path, ignore_td=False)
     assert "ignore_changes = [container_definitions]" not in tf
+
+
+def test_flag_on_service_ignores_task_definition(tmp_path):
+    # The whole point of the flag: reconcile/force-roll own the task def
+    # revision out-of-band. terraform must NOT revert the service's
+    # task_definition pointer (which rolls the service back to a stale,
+    # stripped-env revision) — so the service ALSO needs ignore_changes.
+    tf = _services_tf(tmp_path, ignore_td=True)
+    assert "ignore_changes = [task_definition]" in tf
+
+
+def test_default_off_service_no_task_definition_ignore(tmp_path):
+    tf = _services_tf(tmp_path, ignore_td=None)
+    assert "ignore_changes = [task_definition]" not in tf

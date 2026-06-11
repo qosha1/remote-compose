@@ -246,5 +246,18 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 
   depends_on = [{% if existing_alb %}aws_lb_listener_rule.{{ svc.tf_name }}{% else %}aws_lb_listener.http{% endif %}]
 {%- endif %}
+{%- if ignore_task_definition_changes %}
+
+  # task_definition is owned out-of-band for this stack (reconcile script /
+  # `rc deploy` force-roll register new revisions + repoint the service). Pair
+  # with the task def's ignore_changes=[container_definitions] above: without
+  # ignoring the SERVICE pointer too, every terraform apply REVERTS the service
+  # back to terraform's own (stale, stripped-env) revision — rolling the task
+  # for nothing and, for single-task EFS services like postgres, opening a
+  # Cloud Map DNS gap on every deploy.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+{%- endif %}
 }
 {% endfor %}
