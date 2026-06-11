@@ -366,6 +366,55 @@ class ECSProvider(Provider):
         # adopt-in-place where peers already resolve the existing names — e.g.
         # debuggai-api calls django.production.browser-mgr.local:5000, so that
         # namespace must be kept, not replaced.
+        # Task-role app-IAM grants (rc-8y7): attach managed policies and/or an
+        # inline policy to the shared task role (aws_iam_role.task) so apps can
+        # reach AWS services (S3 media, SQS, SES, ...) without an out-of-band
+        # reconcile script. Mirrors the live browser-mgr GrantAccessS3Media that
+        # the migration had to apply by hand (the recording-403 root cause).
+        iam_cfg = ecs_cfg.get("iam") or {}
+        task_iam_managed = list(iam_cfg.get("managed_policies") or [])
+        task_iam_statements: list[dict[str, Any]] = []
+        for i, stmt in enumerate(iam_cfg.get("statements") or []):
+            actions = stmt.get("actions") or []
+            resources = stmt.get("resources") or []
+            if not actions or not resources:
+                raise ProviderConfigError(
+                    "provider_config.ecs.iam.statements[%d] requires non-empty "
+                    "'actions' and 'resources'" % i
+                )
+            task_iam_statements.append(
+                {
+                    "sid": stmt.get("sid") or ("AppGrant%d" % i),
+                    "actions": list(actions),
+                    "resources": list(resources),
+                    "condition": stmt.get("condition") or None,
+                }
+            )
+        has_task_iam = bool(task_iam_managed or task_iam_statements)
+        # Render the inline policy doc in Python (JSON heredoc in the template)
+        # so optional IAM Conditions serialize correctly — an HCL jsonencode
+        # block can't take a JSON-shaped condition map.
+        task_iam_policy_json = None
+        if task_iam_statements:
+            import json as _json
+
+            task_iam_policy_json = _json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": s["sid"],
+                            "Effect": "Allow",
+                            "Action": s["actions"],
+                            "Resource": s["resources"],
+                            **({"Condition": s["condition"]} if s["condition"] else {}),
+                        }
+                        for s in task_iam_statements
+                    ],
+                },
+                indent=2,
+            )
+
         existing_cloud_map_namespace_id = ecs_cfg.get("existing_cloud_map_namespace_id")
         existing_cloud_map_namespace = bool(existing_cloud_map_namespace_id)
         if existing_cloud_map_namespace:
@@ -1003,6 +1052,10 @@ class ECSProvider(Provider):
             "existing_alb_https_listener_arn": existing_alb_https_listener_arn,
             "existing_cloud_map_namespace": existing_cloud_map_namespace,
             "service_discovery_namespace_ref": service_discovery_namespace_ref,
+            "has_task_iam": has_task_iam,
+            "task_iam_managed": task_iam_managed,
+            "task_iam_statements": task_iam_statements,
+            "task_iam_policy_json": task_iam_policy_json,
             "alb_dns_ref": alb_dns_ref,
             "alb_zone_ref": alb_zone_ref,
             "https_listener_ref": https_listener_ref,

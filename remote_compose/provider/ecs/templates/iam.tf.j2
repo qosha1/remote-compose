@@ -48,6 +48,28 @@ resource "aws_iam_role_policy" "task_execute_command" {
   })
 }
 
+{%- if has_task_iam %}
+# App-IAM grants (provider_config.ecs.iam): attach managed policies and an
+# inline policy to the shared task role so services can reach AWS APIs
+# (S3/SQS/SES/...) without an out-of-band reconcile script.
+{%- for arn in task_iam_managed %}
+resource "aws_iam_role_policy_attachment" "task_app_managed_{{ loop.index0 }}" {
+  role       = aws_iam_role.task.name
+  policy_arn = "{{ arn }}"
+}
+{%- endfor %}
+{%- if task_iam_policy_json %}
+resource "aws_iam_role_policy" "task_app" {
+  name = "${var.project}-task-app"
+  role = aws_iam_role.task.id
+
+  policy = <<EOT
+{{ task_iam_policy_json }}
+EOT
+}
+{%- endif %}
+{%- endif %}
+
 {%- if has_secrets %}
 # Task execution role needs GetSecretValue for every secret referenced.
 resource "aws_iam_role_policy" "task_execution_secrets" {

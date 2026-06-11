@@ -163,6 +163,26 @@ provider_config:
     # VPC's DHCP options, so cross-service discovery must use FQDNs
     # (<svc>.<project>.local) rather than short names.
 
+    # --- App-IAM grants on the task role (optional) ---------------------------
+    # rc emits ONE shared task role (aws_iam_role.task) for all services. By
+    # default it can only open SSM exec channels. Use `iam` to grant it the
+    # AWS access your app needs (S3 media, SQS, SES, ...) so you don't need an
+    # out-of-band reconcile script. Omit `iam` and the emitted terraform is
+    # byte-identical to before.
+    #   iam:
+    #     managed_policies:                 # attached as aws_iam_role_policy_attachment
+    #       - arn:aws:iam::aws:policy/AmazonSESFullAccess
+    #     statements:                       # one inline aws_iam_role_policy (task-app)
+    #       - sid: S3Media                  # optional; auto-named AppGrant<N> if omitted
+    #         actions: [s3:GetObject, s3:PutObject, s3:DeleteObject,
+    #                   s3:ListBucket, s3:GetBucketLocation]
+    #         resources: [arn:aws:s3:::my-bucket, arn:aws:s3:::my-bucket/*]
+    #       - actions: [elasticfilesystem:ClientMount, elasticfilesystem:ClientWrite]
+    #         resources: [arn:aws:elasticfilesystem:us-east-2:1234:file-system/fs-abc]
+    #         condition:                    # optional IAM Condition block
+    #           StringEquals:
+    #             elasticfilesystem:AccessPointArn: arn:aws:...:access-point/fsap-abc
+
 terraform:
   output_dir: ./terraform/${provider}
   backend:
