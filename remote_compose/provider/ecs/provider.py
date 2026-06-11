@@ -668,6 +668,19 @@ class ECSProvider(Provider):
             # rolling deploy (slower) instead of overlap. Acceptable.
             singleton = _looks_like_singleton_scheduler(name, spec.command)
             stateful = len(svc_mounts) > 0 or singleton
+            # rc-kr7: an EFS volume is a single access point; replicas>1 runs
+            # concurrent tasks against the same data dir, which corrupts single-
+            # writer engines (postgres initdb, sqlite, ...). min_healthy=0 only
+            # protects the ROLL window — it can't make N steady-state tasks safe.
+            # Reject at emit time rather than ship a silent data-loss config.
+            if len(svc_mounts) > 0 and (spec.replicas or 1) > 1:
+                raise ProviderConfigError(
+                    f"service {name!r}: replicas={spec.replicas} with an EFS "
+                    f"volume — two or more tasks mounting the same access point "
+                    f"corrupt stateful data. Use replicas=1 for EFS-backed "
+                    f"services (the supported single-writer shape), or give "
+                    f"each replica its own volume."
+                )
             # rc-05q: ALB grace period. Only meaningful for public services
             # (load_balancer block exists). When unset, default 60s for
             # fast-boot services, 180s when any auto_on_deploy lifecycle
