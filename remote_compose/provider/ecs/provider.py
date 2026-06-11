@@ -575,6 +575,10 @@ class ECSProvider(Provider):
                     "existing_fs_id": existing_fs_id,
                     "existing_ap_id": existing_ap_id,
                     "iam_auth": iam_auth,
+                    # rc-kr7: shared-scratch EFS where each task writes its own
+                    # subdir (e.g. per-session recording dirs) — safe with
+                    # replicas>1. Default False = single-writer (postgres data).
+                    "shared": bool(vol_entry.get("shared", False)),
                 }
                 svc_mounts.append(mount_view)
                 service_volume_mounts.append(mount_view)
@@ -668,18 +672,21 @@ class ECSProvider(Provider):
             # rolling deploy (slower) instead of overlap. Acceptable.
             singleton = _looks_like_singleton_scheduler(name, spec.command)
             stateful = len(svc_mounts) > 0 or singleton
-            # rc-kr7: an EFS volume is a single access point; replicas>1 runs
-            # concurrent tasks against the same data dir, which corrupts single-
-            # writer engines (postgres initdb, sqlite, ...). min_healthy=0 only
-            # protects the ROLL window — it can't make N steady-state tasks safe.
-            # Reject at emit time rather than ship a silent data-loss config.
-            if len(svc_mounts) > 0 and (spec.replicas or 1) > 1:
+            # rc-kr7: a single-writer EFS volume (postgres data, sqlite) is one
+            # access point; replicas>1 runs concurrent tasks against the same
+            # dir and corrupts it. min_healthy=0 only protects the ROLL window —
+            # it can't make N steady-state tasks safe. Reject unless EVERY volume
+            # is marked shared:true (a multi-writer scratch space where each task
+            # writes its own subdir, e.g. per-session recording dirs).
+            unshared_mounts = [m for m in svc_mounts if not m.get("shared")]
+            if unshared_mounts and (spec.replicas or 1) > 1:
+                names = ", ".join(m["volume"] for m in unshared_mounts)
                 raise ProviderConfigError(
-                    f"service {name!r}: replicas={spec.replicas} with an EFS "
-                    f"volume — two or more tasks mounting the same access point "
-                    f"corrupt stateful data. Use replicas=1 for EFS-backed "
-                    f"services (the supported single-writer shape), or give "
-                    f"each replica its own volume."
+                    f"service {name!r}: replicas={spec.replicas} with EFS "
+                    f"volume(s) [{names}] — two or more tasks mounting the same "
+                    f"access point corrupt single-writer data. Use replicas=1, "
+                    f"give each replica its own volume, or set shared:true on the "
+                    f"volume if it's a multi-writer scratch space (per-task subdirs)."
                 )
             # rc-05q: ALB grace period. Only meaningful for public services
             # (load_balancer block exists). When unset, default 60s for

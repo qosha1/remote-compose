@@ -69,3 +69,26 @@ class TestEfsReplicasGuard:
 
     def test_stateless_service_scales_freely(self, tmp_path):
         _emit(tmp_path, replicas=3, volumes=[])
+
+    def test_shared_volume_allows_replicas_gt1(self, tmp_path):
+        # A shared-scratch EFS where each task writes its own subdir (e.g.
+        # browser-mgr's recordings) is a valid multi-writer pattern — opt in
+        # with shared:true so replicas>1 is allowed.
+        _emit(
+            tmp_path,
+            replicas=2,
+            volumes=[
+                {"name": "recordings", "mount": "/app/recordings", "shared": True}
+            ],
+        )
+
+    def test_mixed_shared_and_unshared_still_rejected(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="replicas|EFS|corrupt"):
+            _emit(
+                tmp_path,
+                replicas=2,
+                volumes=[
+                    {"name": "recordings", "mount": "/app/recordings", "shared": True},
+                    {"name": "pgdata", "mount": "/var/lib/postgresql/data"},
+                ],
+            )
