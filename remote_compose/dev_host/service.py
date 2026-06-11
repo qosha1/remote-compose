@@ -107,6 +107,11 @@ class DevHostRecord:
     ssh_key_credential_id: Optional[int] = None
     created_at: Optional[str] = None
     status: str = "pending"
+    # rc-n14: reconciliation marker for `rc dev list` live view.
+    #   True  = present in the local .rc/dev-hosts.yml state
+    #   False = found in AWS by tag but NOT in local state (untracked leak)
+    #   None  = not reconciled against AWS (plain state listing)
+    tracked: Optional[bool] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -361,6 +366,78 @@ class DevHostService(BaseService):
     def list_hosts(self) -> list[DevHostRecord]:
         hosts = self._load_state()
         return [self._record_from_state_dict(n, d) for n, d in hosts.items()]
+
+    def reconcile_live(self, regions: list[str]) -> list[DevHostRecord]:
+        """List dev hosts from LIVE AWS (tag ManagedBy=rc-dev) across regions,
+        merged with the local state file (rc-n14).
+
+        AWS is the source of truth for existence + status, so this surfaces
+        boxes that are billing regardless of the cwd-relative state file:
+          - tracked=True  : present in both AWS and local state
+          - tracked=False : in AWS but NOT local state (untracked leak)
+          - status="gone" : in local state but absent from AWS (stale entry)
+
+        A region whose describe_instances call fails is skipped (best-effort);
+        the stale-state pass still runs so nothing silently disappears.
+        """
+        state = self._load_state()
+        seen: set[str] = set()
+        records: list[DevHostRecord] = []
+        live_states = [
+            "pending",
+            "running",
+            "stopping",
+            "stopped",
+            "shutting-down",
+        ]
+        for region in regions:
+            ec2 = self.aws_client_factory.get_client("ec2", region_name=region)
+            try:
+                resp = ec2.describe_instances(
+                    Filters=[
+                        {"Name": "tag:ManagedBy", "Values": ["rc-dev"]},
+                        {"Name": "instance-state-name", "Values": live_states},
+                    ]
+                )
+            except Exception:
+                continue
+            for resv in resp.get("Reservations", []):
+                for inst in resv.get("Instances", []):
+                    tags = {t["Key"]: t["Value"] for t in inst.get("Tags", []) or []}
+                    name = tags.get("DevHost") or inst.get("InstanceId", "")
+                    seen.add(name)
+                    sd = state.get(name, {})
+                    records.append(
+                        DevHostRecord(
+                            name=name,
+                            source=sd.get("source", {}),
+                            instance_type=inst.get(
+                                "InstanceType", sd.get("instance_type", "")
+                            ),
+                            region=region,
+                            ami=inst.get("ImageId", sd.get("ami")),
+                            instance_id=inst.get("InstanceId"),
+                            public_ip=(
+                                inst.get("PublicIpAddress") or sd.get("public_ip")
+                            ),
+                            public_dns=(
+                                inst.get("PublicDnsName") or sd.get("public_dns")
+                            ),
+                            ssh_key_credential_id=sd.get("ssh_key_credential_id"),
+                            created_at=sd.get("created_at"),
+                            status=inst.get("State", {}).get("Name", "unknown"),
+                            tracked=name in state,
+                        )
+                    )
+        # State entries AWS never returned: stale / destroyed out-of-band.
+        for name, sd in state.items():
+            if name in seen:
+                continue
+            rec = self._record_from_state_dict(name, sd)
+            rec.status = "gone"
+            rec.tracked = True
+            records.append(rec)
+        return records
 
     def get_host(self, name: str) -> DevHostRecord:
         hosts = self._load_state()

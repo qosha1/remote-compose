@@ -395,19 +395,88 @@ def dev_up_cmd(
             )
 
 
+def _all_enabled_regions(service) -> list[str]:
+    """Every enabled region for the account (for the leak sweep)."""
+    try:
+        ec2 = service.aws_client_factory.get_client("ec2", region_name="us-east-1")
+        resp = ec2.describe_regions(AllRegions=False)
+        return sorted(r["RegionName"] for r in resp.get("Regions", []))
+    except Exception:
+        return []
+
+
 @dev_group.command(name="list")
-def dev_list_cmd():
-    """List all dev hosts in this project."""
+@click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    help="Region(s) to scan for rc-dev boxes (repeatable). "
+    "Default: regions in local state + us-west-1.",
+)
+@click.option(
+    "--all-regions",
+    is_flag=True,
+    help="Sweep EVERY enabled region — catches leaked boxes anywhere.",
+)
+def dev_list_cmd(regions, all_regions):
+    """List dev hosts from LIVE AWS (tag ManagedBy=rc-dev), merged with local
+    state. Surfaces boxes that are billing regardless of the directory you run
+    from, and flags drift (untracked AWS-only boxes / stale state entries)."""
     service = _build_service()
-    hosts = service.list_hosts()
-    if not hosts:
-        click.echo("No dev hosts. Try: rc dev up <name>")
-        return
-    click.echo(f"{'NAME':<20} {'STATUS':<10} {'TYPE':<14} {'PUBLIC_IP':<16} CREATED")
-    for h in hosts:
+
+    if all_regions:
+        scan = _all_enabled_regions(service)
+    elif regions:
+        scan = list(regions)
+    else:
+        # state regions + the rc-dev default so a plain `list` covers the
+        # common case without a full sweep.
+        state_regions = {h.region for h in service.list_hosts() if h.region}
+        scan = sorted(state_regions | {"us-west-1"})
+
+    try:
+        hosts = service.reconcile_live(scan)
+    except Exception as exc:  # AWS unreachable — fall back, don't hide
         click.echo(
-            f"{h.name:<20} {h.status:<10} {h.instance_type:<14} "
-            f"{h.public_ip or '-':<16} {h.created_at or '-'}"
+            f"warning: live AWS query failed ({exc}); showing local state only.",
+            err=True,
+        )
+        hosts = service.list_hosts()
+
+    # rc-n14: if a plain (non-swept) list finds nothing, auto-widen to all
+    # regions so an empty/cwd-wrong state file can't hide billing boxes.
+    if not hosts and not all_regions and not regions:
+        all_scan = _all_enabled_regions(service)
+        if all_scan:
+            click.echo("  (nothing in default regions — sweeping all regions…)")
+            hosts = service.reconcile_live(all_scan)
+
+    if not hosts:
+        click.echo("No dev hosts (checked live AWS). Try: rc dev up <name>")
+        return
+
+    click.echo(
+        f"{'NAME':<22} {'STATUS':<10} {'TYPE':<14} {'REGION':<12} "
+        f"{'PUBLIC_IP':<16} {'TRACKED':<10}"
+    )
+    for h in sorted(hosts, key=lambda r: (r.region or "", r.name)):
+        if h.tracked is False:
+            tracked = "untracked"  # in AWS, not in this local state file
+        elif h.status == "gone":
+            tracked = "stale"  # in state, not in AWS
+        else:
+            tracked = "yes"
+        click.echo(
+            f"{h.name:<22} {h.status:<10} {h.instance_type or '-':<14} "
+            f"{h.region or '-':<12} {h.public_ip or '-':<16} {tracked:<10}"
+        )
+    untracked = [h for h in hosts if h.tracked is False]
+    if untracked:
+        click.echo(
+            f"\n  ⚠ {len(untracked)} untracked box(es) billing but not in this "
+            f"local state file (.rc/dev-hosts.yml is cwd-relative). If abandoned, "
+            f"terminate: aws ec2 terminate-instances --instance-ids <id> "
+            f"--region <region>"
         )
 
 

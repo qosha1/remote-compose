@@ -274,6 +274,49 @@ class TestListHosts:
         assert names == ["alice", "bob"]
 
 
+class TestReconcileLive:
+    """rc-n14: rc dev list must reflect live AWS (tag ManagedBy=rc-dev),
+    independent of the cwd-relative state file, and flag drift."""
+
+    def test_untracked_aws_box_surfaced(self, service):
+        # State file is empty, but AWS has a tagged box (the mock_aws_factory
+        # returns 'alice' running). It MUST show up — this is the billing leak
+        # case `rc dev list` silently hid.
+        records = service.reconcile_live(["us-west-1"])
+        by_name = {r.name: r for r in records}
+        assert "alice" in by_name
+        assert by_name["alice"].status == "running"
+        assert by_name["alice"].public_ip == "203.0.113.42"
+        assert by_name["alice"].tracked is False  # in AWS, not in local state
+
+    def test_tracked_box_marked_and_live_status(self, service, git_source):
+        service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+        records = service.reconcile_live(["us-west-1"])
+        alice = {r.name: r for r in records}["alice"]
+        assert alice.tracked is True  # present in local state
+        assert alice.status == "running"  # live AWS status, not frozen
+
+    def test_stale_state_box_flagged_gone(self, service, git_source):
+        # A host in the state file that AWS no longer has (destroyed out-of-band)
+        # must be flagged, not silently shown as running.
+        service.create_host(
+            name="ghost",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+        # mock AWS returns only 'alice', never 'ghost'
+        records = service.reconcile_live(["us-west-1"])
+        ghost = {r.name: r for r in records}.get("ghost")
+        assert ghost is not None
+        assert ghost.status in ("gone", "missing", "terminated")
+
+
 class TestGetHost:
     def test_get_existing(self, service, git_source):
         created = service.create_host(
