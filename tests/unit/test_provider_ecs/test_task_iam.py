@@ -125,3 +125,29 @@ class TestTaskIamDefaultPath:
         assert 'resource "aws_iam_role_policy" "task_app"' not in iam
         assert _MANAGED_ARN not in iam
         assert '"s3:PutObject"' not in iam
+
+
+class TestTaskRoleTags:
+    """rc-h72: provider_config.ecs.iam.role_tags -> tags on aws_iam_role.task
+    (adopted resource policies, e.g. Copilot EFS, gate on principal tags)."""
+
+    def test_role_tags_rendered_on_task_role(self, tmp_path):
+        iam = _emit(
+            tmp_path,
+            {
+                "role_tags": {
+                    "copilot-application": "browser-mgr",
+                    "copilot-environment": "production",
+                }
+            },
+        )
+        # tags land on the TASK role resource block
+        role = iam[iam.index('resource "aws_iam_role" "task" {') :]
+        assert "tags = {" in role
+        assert '"copilot-application" = "browser-mgr"' in role
+        assert '"copilot-environment" = "production"' in role
+
+    def test_no_role_tags_emits_no_tags_block(self, tmp_path):
+        iam = _emit(tmp_path, None)
+        role = iam[iam.index('resource "aws_iam_role" "task" {') :]
+        assert "tags = {" not in role

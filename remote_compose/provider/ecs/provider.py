@@ -394,6 +394,11 @@ class ECSProvider(Provider):
                 }
             )
         has_task_iam = bool(task_iam_managed or task_iam_statements)
+        # rc-h72: tags on the shared task role. Adopted resource policies gate on
+        # the principal's tags (e.g. Copilot's EFS file-system policy requires
+        # copilot-application/environment). IAM role tags surface as
+        # aws:PrincipalTag, which is what those conditions check.
+        task_role_tags = dict(iam_cfg.get("role_tags") or {})
         # Render the inline policy doc in Python (JSON heredoc in the template)
         # so optional IAM Conditions serialize correctly — an HCL jsonencode
         # block can't take a JSON-shaped condition map.
@@ -1116,6 +1121,7 @@ class ECSProvider(Provider):
             "task_iam_managed": task_iam_managed,
             "task_iam_statements": task_iam_statements,
             "task_iam_policy_json": task_iam_policy_json,
+            "task_role_tags": task_role_tags,
             "alb_dns_ref": alb_dns_ref,
             "alb_zone_ref": alb_zone_ref,
             "https_listener_ref": https_listener_ref,

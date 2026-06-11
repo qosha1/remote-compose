@@ -25,6 +25,13 @@ resource "aws_iam_role" "task" {
       Action = "sts:AssumeRole"
     }]
   })
+{%- if task_role_tags %}
+  tags = {
+{%- for k, v in task_role_tags.items() %}
+    "{{ k }}" = "{{ v }}"
+{%- endfor %}
+  }
+{%- endif %}
 }
 
 # Needed for `aws ecs execute-command` / rc exec / rc db backup.
