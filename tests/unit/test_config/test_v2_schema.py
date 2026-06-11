@@ -527,3 +527,45 @@ class TestServiceEnv:
         raw["services"]["web"]["env"] = {"FOO": ["a", "b"]}
         with pytest.raises(ConfigError, match=r"env\[.*FOO.*\] must be scalar"):
             parse(raw)
+
+
+class TestEnvFromSecret:
+    """rc-7yo: services.<svc>.env_from_secret round-trips + validates."""
+
+    def _cfg(self, env_from_secret):
+        raw = {
+            "version": 2,
+            "project": "myapp",
+            "compose_file": "docker-compose.yml",
+            "provider": "ecs",
+            "services": {
+                "api": {
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "worker",
+                    "env_from_secret": env_from_secret,
+                },
+            },
+        }
+        return raw
+
+    def test_env_from_secret_parses(self):
+        cfg = parse(
+            self._cfg(
+                [{"arn": "arn:aws:secretsmanager:::secret:s", "keys": ["A", "B"]}]
+            )
+        )
+        svc = cfg.services["api"]
+        assert svc.env_from_secret == [
+            {"arn": "arn:aws:secretsmanager:::secret:s", "keys": ["A", "B"]}
+        ]
+
+    def test_env_from_secret_requires_arn_and_keys(self):
+        with pytest.raises(ConfigError, match="env_from_secret"):
+            parse(self._cfg([{"keys": ["A"]}]))
+        with pytest.raises(ConfigError, match="env_from_secret"):
+            parse(self._cfg([{"arn": "arn:x"}]))
+
+    def test_no_env_from_secret_defaults_empty(self):
+        cfg = parse(_minimal())
+        assert cfg.services["web"].env_from_secret == []

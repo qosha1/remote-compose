@@ -208,6 +208,14 @@ class ServiceV2:
     # nginx Host: rewrites. Hand-editable for any non-secret toggle a user
     # wants applied at the rc.yml layer rather than touching compose.
     env: dict[str, str] = field(default_factory=dict)
+    # rc-7yo: per-service env sourced from an EXISTING Secrets Manager secret.
+    # Each entry: {arn: <sm-arn>, keys: [KEY, ...]}. Every key is wired as its
+    # own task-def secrets[] entry (valueFrom "<arn>:KEY::") on THIS service
+    # only — the per-service env model browser-mgr's reconcile script did by
+    # hand. Keys are explicit (rc does not call AWS at emit time). Use this for
+    # an existing SM secret holding many keys; use the top-level ``secrets:``
+    # block when rc should CREATE the secret from a file.
+    env_from_secret: list[dict[str, Any]] = field(default_factory=list)
     # rc-e5u.35.7: explicit framework hint. When set, cli_v2 merges the
     # named preset's lifecycle_hooks into this service's lifecycle dict
     # for hooks the user hasn't declared. ``django`` / ``rails`` /
@@ -228,6 +236,16 @@ class ServiceV2:
             )
         if self.public and self.port is None:
             raise ConfigError(f"service {self.name!r}: public=true requires a port")
+        for entry in self.env_from_secret:
+            if (
+                not isinstance(entry, dict)
+                or not entry.get("arn")
+                or not entry.get("keys")
+            ):
+                raise ConfigError(
+                    f"service {self.name!r}: each env_from_secret entry requires "
+                    "'arn' and a non-empty 'keys' list"
+                )
         if self.domain is not None:
             if not self.public:
                 raise ConfigError(

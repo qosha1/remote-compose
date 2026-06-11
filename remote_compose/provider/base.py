@@ -114,6 +114,13 @@ class ServiceSpec:
     # Empty list = service has no compose env_file directives. Names
     # match entries in DeployContext.secrets (file-sourced).
     env_file_secret_names: list[str] = field(default_factory=list)
+    # rc-7yo: per-service env sourced from an EXISTING Secrets Manager secret.
+    # Each entry: {"arn": <sm-arn>, "keys": [KEY, ...]}. Every key is wired as
+    # its own task-def secrets[] entry (valueFrom "<arn>:KEY::") on THIS service
+    # only — the per-service env model browser-mgr's reconcile script did by
+    # hand. Keys are explicit (emit is offline/deterministic; rc does not call
+    # AWS to introspect the secret's shape).
+    env_from_secret: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

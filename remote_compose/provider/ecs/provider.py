@@ -907,7 +907,34 @@ class ECSProvider(Provider):
                     f"secret {sec.name!r}: unknown source {sec.source!r}"
                 )
 
-        has_secrets = len(secrets_view) > 0
+        # rc-7yo: per-service env from an EXISTING SM secret. Build the per-key
+        # secrets[] entries keyed by service name; collect ARNs for the
+        # task-exec GetSecretValue grant. Keys are explicit (offline emit).
+        env_from_secret_by_svc: dict[str, list[dict[str, Any]]] = {}
+        env_from_secret_arns: list[str] = []
+        for svc_name, spec in ctx.services.items():
+            entries: list[dict[str, Any]] = []
+            for ref in getattr(spec, "env_from_secret", []) or []:
+                arn = ref.get("arn")
+                keys = ref.get("keys") or []
+                if not arn or not keys:
+                    raise ProviderConfigError(
+                        f"service {svc_name!r}: env_from_secret entry requires "
+                        "'arn' and a non-empty 'keys' list"
+                    )
+                if arn not in env_from_secret_arns:
+                    env_from_secret_arns.append(arn)
+                for key in keys:
+                    entries.append(
+                        {
+                            "env_name": key,
+                            "value_from_ref": f'"{arn}:{key}::"',
+                        }
+                    )
+            if entries:
+                env_from_secret_by_svc[svc_name] = entries
+
+        has_secrets = len(secrets_view) > 0 or bool(env_from_secret_arns)
         has_file_secrets = len(file_secrets) > 0
         # ARNs needed by the task-exec role policy. For file-sourced, we
         # substitute the terraform reference string; for aws_sm, the literal.
@@ -918,6 +945,7 @@ class ECSProvider(Provider):
             )
         for sec in aws_sm_secrets:
             all_secret_arns.append(sec["arn"])
+        all_secret_arns.extend(env_from_secret_arns)
 
         # Attach secrets to every service view so each task def gets them.
         # Three filters apply per service:
@@ -995,6 +1023,15 @@ class ECSProvider(Provider):
                 filtered.append(s)
             if override_keys:
                 filtered = [s for s in filtered if s["env_name"] not in override_keys]
+            # rc-7yo: append this service's env_from_secret keys (per-service,
+            # not broadcast). Plaintext env wins on collision; skip keys already
+            # wired (ECS rejects duplicate secret names).
+            existing_names = {s["env_name"] for s in filtered}
+            for e in env_from_secret_by_svc.get(svc_name, []):
+                if e["env_name"] in override_keys or e["env_name"] in existing_names:
+                    continue
+                existing_names.add(e["env_name"])
+                filtered.append(e)
             svc_view["secrets"] = filtered
         default_target_port = default_public["port"] if default_public else 80
         default_health_check_path = (default_public or {}).get(

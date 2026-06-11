@@ -257,6 +257,15 @@ services:
       shell:
         command: ["python", "manage.py", "shell"]
         interactive: true              # forwards a TTY
+    # Per-service env from an EXISTING Secrets Manager secret (rc-7yo). Each key
+    # is wired as its own task-def secret (valueFrom <arn>:KEY::) on THIS
+    # service only, and the arn is added to the task-exec GetSecretValue grant.
+    # Keys are explicit (rc does not call AWS at emit time). Use this for a
+    # pre-existing multi-key secret; use top-level `secrets:` when rc should
+    # CREATE the secret from a file.
+    env_from_secret:
+      - arn: arn:aws:secretsmanager:us-east-2:123:secret:myapp/prod-env-django-AbC
+        keys: [DATABASE_URL, REDIS_URL, DJANGO_SECRET_KEY]
 
   nginx:
     type: proxy

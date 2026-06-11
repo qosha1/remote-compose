@@ -146,6 +146,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
                 else (raw["env"] if "env" in raw else {})
             ),
             framework=raw.get("framework"),
+            env_from_secret=(
+                list(raw["env_from_secret"]) if "env_from_secret" in raw else []
+            ),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
