@@ -221,6 +221,12 @@ services:
     type: infrastructure
     cpu: 512
     memory: 1024
+    # rc-7ga: exclude from the default `rc deploy` build+force-roll. A single-
+    # task EFS service rolls with min_healthy=0, so rolling it on every app
+    # deploy briefly drops its Cloud Map DNS record (dependents get [Errno -2]).
+    # terraform still manages it; deploy deliberately with
+    # `rc deploy --services postgres` when its image/config actually changes.
+    auto_roll: false
     volumes:
       - name: pgdata
         mount: /var/lib/postgresql/data

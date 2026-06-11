@@ -121,6 +121,13 @@ class ServiceSpec:
     # hand. Keys are explicit (emit is offline/deterministic; rc does not call
     # AWS to introspect the secret's shape).
     env_from_secret: list[dict[str, Any]] = field(default_factory=list)
+    # rc-7ga: when False, exclude this service from the DEFAULT `rc deploy`
+    # build+force-roll set (terraform still manages it). Use for stateful
+    # single-task services (postgres) that shouldn't churn on every app deploy
+    # — rolling them opens a Cloud Map DNS gap for dependents. Deploy them
+    # deliberately with `rc deploy --services <svc>` (an explicit filter
+    # overrides this). Default True = current behavior.
+    auto_roll: bool = True
 
 
 @dataclass

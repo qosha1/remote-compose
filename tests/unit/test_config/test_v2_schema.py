@@ -569,3 +569,27 @@ class TestEnvFromSecret:
     def test_no_env_from_secret_defaults_empty(self):
         cfg = parse(_minimal())
         assert cfg.services["web"].env_from_secret == []
+
+
+class TestAutoRoll:
+    """rc-7ga: services.<svc>.auto_roll round-trips (default True)."""
+
+    def _cfg(self, auto_roll):
+        svc = {"cpu": 256, "memory": 512, "type": "infrastructure"}
+        if auto_roll is not None:
+            svc["auto_roll"] = auto_roll
+        return {
+            "version": 2,
+            "project": "myapp",
+            "compose_file": "docker-compose.yml",
+            "provider": "ecs",
+            "services": {"postgres": svc},
+        }
+
+    def test_auto_roll_false_parses(self):
+        cfg = parse(self._cfg(False))
+        assert cfg.services["postgres"].auto_roll is False
+
+    def test_auto_roll_defaults_true(self):
+        cfg = parse(self._cfg(None))
+        assert cfg.services["postgres"].auto_roll is True

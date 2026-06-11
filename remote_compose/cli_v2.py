@@ -747,6 +747,7 @@ def build_deploy_context(
                 aliases=list(svc.aliases or []),
                 env_file_secret_names=list(per_service_secret_names.get(name, [])),
                 env_from_secret=list(svc.env_from_secret or []),
+                auto_roll=getattr(svc, "auto_roll", True),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker

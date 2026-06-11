@@ -216,6 +216,12 @@ class ServiceV2:
     # an existing SM secret holding many keys; use the top-level ``secrets:``
     # block when rc should CREATE the secret from a file.
     env_from_secret: list[dict[str, Any]] = field(default_factory=list)
+    # rc-7ga: when False, exclude this service from the DEFAULT `rc deploy`
+    # build+force-roll set (terraform still manages it). For stateful single-
+    # task services (postgres) that shouldn't churn on every app deploy —
+    # rolling them opens a Cloud Map DNS gap. Deploy deliberately with
+    # `rc deploy --services <svc>` (explicit filter overrides). Default True.
+    auto_roll: bool = True
     # rc-e5u.35.7: explicit framework hint. When set, cli_v2 merges the
     # named preset's lifecycle_hooks into this service's lifecycle dict
     # for hooks the user hasn't declared. ``django`` / ``rails`` /

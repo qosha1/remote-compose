@@ -232,7 +232,10 @@ def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
         if spec.build_context and owners.get(name, name) == name
     ]
     if services_filter is None:
-        return build_owners
+        # rc-7ga: exclude opt-out services (auto_roll=False) from the DEFAULT
+        # set so stateful single-task services (postgres) don't churn on every
+        # app deploy. An explicit --services filter (below) overrides this.
+        return [spec for spec in build_owners if getattr(spec, "auto_roll", True)]
     allowed = set(services_filter)
     return [
         spec for spec in build_owners if members.get(spec.name, {spec.name}) & allowed
