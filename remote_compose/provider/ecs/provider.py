@@ -242,6 +242,22 @@ def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
     ]
 
 
+def roll_targets_for_pushed(services: dict[str, Any], pushed: list[str]) -> list[str]:
+    """Expand the pushed image-group OWNERS to every member of their groups
+    (rc-wji.1).
+
+    _build_and_push_images returns one OWNER per image group, but EVERY sibling
+    that references that shared image must be force-rolled too — otherwise
+    siblings keep running the old image while the new :latest sits unused (the
+    django/celery-* staleness bug). Shared by both deploy() and
+    _deploy_no_state() so the two roll paths can't drift. Sorted for
+    determinism.
+    """
+    owners = image_group_owners(services)
+    pushed_owners = set(pushed)
+    return sorted(name for name in services if owners.get(name, name) in pushed_owners)
+
+
 def preflight_existing_vpc(ecs_cfg: dict[str, Any], ec2_client: Any) -> None:
     """Validate an adopted VPC + subnets against live AWS before emitting (rc-a57).
 
@@ -1322,7 +1338,13 @@ class ECSProvider(Provider):
             # rc-1bk: rc up sets skip_force_roll=True so the rollout happens
             # AFTER `rc secrets push` populates SM, avoiding the cold-start
             # CannotPullSecrets cascade.
-            self._force_new_deployments(ctx, pushed)
+            # rc-wji.1: roll every member of each pushed image group, not just
+            # the owner _build_and_push_images returned — siblings share the
+            # image and must pick up the new :latest too (parity with the
+            # --no-state path).
+            self._force_new_deployments(
+                ctx, roll_targets_for_pushed(ctx.services, pushed)
+            )
 
         return DeployResult(
             revision_id=_revision_id_from_dir(out_dir),
@@ -1476,14 +1498,11 @@ class ECSProvider(Provider):
             # that references that shared image must be force-rolled too —
             # otherwise siblings keep running the old image while the new
             # :latest sits unused (the django/celery-* staleness bug). Expand
-            # the pushed owners to all members of their groups.
-            pushed_owners = set(pushed)
-            roll_targets = sorted(
-                name
-                for name in ctx.services
-                if owners_map.get(name, name) in pushed_owners
+            # the pushed owners to all members of their groups (rc-wji.1:
+            # shared with deploy() so the two roll paths can't drift).
+            self._force_new_deployments(
+                ctx, roll_targets_for_pushed(ctx.services, pushed)
             )
-            self._force_new_deployments(ctx, roll_targets)
 
         return DeployResult(
             revision_id=f"{ctx.project}-no-state-{int(start)}",
