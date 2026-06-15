@@ -1500,8 +1500,12 @@ class ECSProvider(Provider):
             # :latest sits unused (the django/celery-* staleness bug). Expand
             # the pushed owners to all members of their groups (rc-wji.1:
             # shared with deploy() so the two roll paths can't drift).
+            # reconcile_scale (rc-wji.2): terraform is bypassed here, so apply
+            # rc.yml replicas to desiredCount as part of the roll.
             self._force_new_deployments(
-                ctx, roll_targets_for_pushed(ctx.services, pushed)
+                ctx,
+                roll_targets_for_pushed(ctx.services, pushed),
+                reconcile_scale=True,
             )
 
         return DeployResult(
@@ -2164,8 +2168,19 @@ class ECSProvider(Provider):
         "proxy": 3,
     }
 
-    def _force_new_deployments(self, ctx: DeployContext, services: list[str]) -> None:
+    def _force_new_deployments(
+        self,
+        ctx: DeployContext,
+        services: list[str],
+        reconcile_scale: bool = False,
+    ) -> None:
         """Force-roll the named ECS services in dependency order (.46.5).
+
+        reconcile_scale (rc-wji.2): when True, also set desiredCount =
+        spec.replicas on each rolled service. Used by the --no-state path,
+        which skips terraform (the terraform path already sets desired_count =
+        svc.replicas via services.tf.j2). Makes rc.yml replicas the source of
+        truth on a no-state roll instead of leaving the count to drift.
 
         Cold-start failure mode: when ALL services force-roll simultaneously,
         celery workers race against postgres/redis being healthy + django
@@ -2228,6 +2243,11 @@ class ECSProvider(Provider):
                     )
                     if dep_cfg is not None:
                         kwargs["deploymentConfiguration"] = dep_cfg
+                    if reconcile_scale and spec is not None:
+                        # rc-wji.2: mirror services.tf.j2 desired_count so a
+                        # --no-state roll applies rc.yml replicas (terraform is
+                        # bypassed and won't set it otherwise).
+                        kwargs["desiredCount"] = spec.replicas
                     client.update_service(**kwargs)
                     last_err = None
                     rolled_names.append(name)
