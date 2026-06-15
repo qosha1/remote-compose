@@ -88,7 +88,7 @@ def test_owner_repo_fallback_and_sibling_roll():
 
     rolled: dict = {}
 
-    def fake_force_roll(ctx, services):
+    def fake_force_roll(ctx, services, **kwargs):
         rolled["services"] = list(services)
 
     with (
