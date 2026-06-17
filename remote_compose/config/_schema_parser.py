@@ -14,8 +14,10 @@ import yaml
 
 from ._schema_types import (
     BackupConfig,
+    BootstrapConfig,
     ComposeConfig,
     ConfigError,
+    GithubOidcDeployRole,
     HealthCheckV2,
     LifecycleHookV2,
     RcConfigV2,
@@ -167,6 +169,48 @@ def _parse_secret(raw: dict[str, Any]) -> SecretRefV2:
     )
 
 
+def _parse_bootstrap(raw: dict[str, Any]) -> BootstrapConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"bootstrap must be a mapping, got {type(raw).__name__}")
+    unknown = set(raw.keys()) - {"github_oidc_deploy_role", "output_dir"}
+    if unknown:
+        raise ConfigError(
+            f"unknown bootstrap keys: {sorted(unknown)} "
+            f"(supported: github_oidc_deploy_role, output_dir)"
+        )
+    role = None
+    role_raw = raw.get("github_oidc_deploy_role")
+    if role_raw is not None:
+        if not isinstance(role_raw, dict):
+            raise ConfigError(
+                "bootstrap.github_oidc_deploy_role must be a mapping, got "
+                f"{type(role_raw).__name__}"
+            )
+        unknown_role = set(role_raw.keys()) - {
+            "github_repo",
+            "github_branch",
+            "role_name",
+            "create_oidc_provider",
+            "permissions",
+        }
+        if unknown_role:
+            raise ConfigError(
+                f"unknown bootstrap.github_oidc_deploy_role keys: "
+                f"{sorted(unknown_role)}"
+            )
+        role = GithubOidcDeployRole(
+            github_repo=role_raw.get("github_repo", ""),
+            github_branch=role_raw.get("github_branch", "main"),
+            role_name=role_raw.get("role_name"),
+            create_oidc_provider=bool(role_raw.get("create_oidc_provider", False)),
+            permissions=role_raw.get("permissions", {}) or {},
+        )
+    return BootstrapConfig(
+        github_oidc_deploy_role=role,
+        output_dir=raw.get("output_dir", "bootstrap/terraform"),
+    )
+
+
 def parse(raw: dict[str, Any]) -> RcConfigV2:
     """Parse a rc.yml v2 dict into a validated RcConfigV2."""
     if not isinstance(raw, dict):
@@ -235,6 +279,10 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
             exclude=cb.get("exclude"),
         )
 
+    bootstrap = None
+    if raw.get("bootstrap"):
+        bootstrap = _parse_bootstrap(raw["bootstrap"])
+
     cfg = RcConfigV2(
         version=int(raw.get("version", 0)),
         project=raw.get("project", ""),
@@ -248,6 +296,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
         domain=raw.get("domain"),
         tls=tls,
         compose=compose_cfg,
+        bootstrap=bootstrap,
     )
     cfg.validate()
     return cfg

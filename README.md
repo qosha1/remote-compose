@@ -216,6 +216,23 @@ secrets:
 compose:
   exclude: [ngrok]                     # mutually exclusive with include
 
+# CI/bootstrap IAM — the GitHub OIDC role CI assumes to trigger deploys. This is
+# NOT a per-service runtime resource, so `rc bootstrap` emits it into a COMMITTED
+# stack with its own terraform state (see "CI bootstrap" below). Strictly opt-in:
+# omit the whole key and nothing changes. ${project}/${cluster} interpolate.
+bootstrap:
+  github_oidc_deploy_role:
+    github_repo: my-org/my-app         # owner/repo (required)
+    github_branch: main                # exact branch (StringEquals); "*" = any ref
+    # role_name: my-ci-deploy          # default ${project}-github-deploy; set to
+                                        #   match a live role for import -> no-op
+    # create_oidc_provider: false       # default: adopt the account-global provider
+    permissions:                       # each key -> a least-privilege IAM statement
+      codebuild_project: ${project}-build
+      ecr_namespace:     ${project}/*
+      ecs_clusters:      [${cluster}, 'foundry-tenant-*']   # wildcard = StringLike
+      pass_roles:        [${project}-task, ${project}-task-exec]
+
 services:
   postgres:
     type: infrastructure
@@ -321,6 +338,7 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc init` | scaffold a v2 rc.yml |
 | `rc migrate --in rc.yml --out rc.v2.yml` | convert legacy v1 |
 | `rc plan` | terraform plan summary |
+| `rc bootstrap [--apply]` | emit + plan the committed GitHub-OIDC CI deploy-role stack from `bootstrap:` ([details](#ci-bootstrap--committed-deploy-role-stack)); `--apply` opt-in, never destroys |
 | `rc deploy [--no-build]` | build, push, terraform apply, force-roll, run auto_on_deploy hooks |
 | `rc destroy --yes` | terraform destroy |
 | `rc status` | ECS service health table |
@@ -332,6 +350,47 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc copilot import` | migrate an AWS Copilot app to rc.yml v2 + docker-compose; supports `--env <name>` for per-environment overrides ([guide](#aws-copilot-migration)) |
 | `rc doctor` | preflight: terraform/docker/python/boto/AWS creds checked |
 | `rc install` | platform package-manager fix for missing deps |
+
+### CI bootstrap — committed deploy-role stack
+
+The workload stack (`deploy/<project>/terraform/`) is regenerated every run and
+usually gitignored. But the **CI deploy role** — the GitHub Actions OIDC role CI
+assumes (via `sts:AssumeRoleWithWebIdentity`) to *trigger* deploys — is not a
+per-service runtime resource. It must be tracked, and if it lives out-of-band via
+the AWS CLI it drifts. `rc bootstrap` generates it from the rc.yml `bootstrap:`
+section into a **separate, committed stack with its own terraform state** so it's
+versioned alongside your code.
+
+```bash
+rc bootstrap            # emit bootstrap/terraform/ + terraform init + plan
+rc bootstrap --apply    # also apply (opt-in; refuses to apply a plan that destroys)
+```
+
+- **Committed, separate state.** Emitted to `bootstrap/terraform/` (override with
+  `bootstrap.output_dir`) — *outside* the regenerated workload tree, so you commit
+  it. Its backend reuses the workload bucket/lock table but with a distinct key
+  (`<project>/bootstrap.tfstate`). The stack's own `.gitignore` still excludes
+  `*.tfstate` — state is never committed, only the `.tf`.
+- **Permissions → least-privilege IAM.** Each `permissions` key derives one or more
+  IAM statements with stable SIDs; region/account land as terraform data-source
+  refs (`${data.aws_region.current.name}` / `…caller_identity…account_id`), so emit
+  makes no AWS calls and stays deterministic:
+
+  | key | grants |
+  |---|---|
+  | `codebuild_project: <name>` | `codebuild:StartBuild`/`BatchGetBuilds`/… on that project ARN |
+  | `ecr_namespace: <ns>/*` | `ecr:GetAuthorizationToken` (Resource `*`) + push/pull on repos under the namespace |
+  | `ecs_clusters: [a, 'b-*']` | `ecs:UpdateService`/`DescribeServices`/… scoped to each cluster's service+cluster ARNs (a wildcard entry like `foundry-tenant-*` carries straight into the ARN → StringLike-by-ARN) + `RegisterTaskDefinition`/… on `*` |
+  | `pass_roles: [r1, r2]` | `iam:PassRole` on those role ARNs, conditioned to `ecs-tasks.amazonaws.com` |
+
+- **OIDC provider: adopt by default.** The `token.actions.githubusercontent.com`
+  provider is account-global (one per account) and CI already assumes it, so the
+  stack references it via a data source. Set `create_oidc_provider: true` to have
+  rc create it instead.
+- **Adopting a live role (import → no-op).** Set `role_name` to the live role's name
+  and import it before the first apply — the generated stack README spells out the
+  exact `terraform import aws_iam_role.deploy …` / `aws_iam_role_policy.deploy …`
+  commands. `rc bootstrap` should then plan a no-op (or a small, reviewable diff).
 
 ### Compose feature support
 

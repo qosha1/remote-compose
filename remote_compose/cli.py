@@ -37,6 +37,7 @@ from .cli_commands.list_stacks import _format_relative_time  # noqa: F401, E402
 # module owns its command body.
 from .cli_commands.adopt import adopt_cmd as _adopt_cmd
 from .cli_commands.audit import audit_cmd as _audit_cmd
+from .cli_commands.bootstrap import bootstrap_cmd as _bootstrap_cmd
 from .cli_commands.compose import compose_group as _compose_group
 from .cli_commands.copilot import copilot_group as _copilot_group
 from .cli_commands.db import db_group as _db_group
@@ -106,6 +107,7 @@ def cli(ctx, config_path):
 
 cli.add_command(_adopt_cmd)
 cli.add_command(_audit_cmd)
+cli.add_command(_bootstrap_cmd)
 cli.add_command(_compose_group)
 cli.add_command(_copilot_group)
 cli.add_command(_db_group)

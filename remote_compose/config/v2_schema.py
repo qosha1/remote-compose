@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-compat)
     _parse_backend,
+    _parse_bootstrap,
     _parse_lifecycle,
     _parse_secret,
     _parse_service,
@@ -29,14 +30,17 @@ from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-co
     parse,
 )
 from ._schema_types import (
+    VALID_BOOTSTRAP_PERMISSIONS,
     VALID_CAPACITY_TYPES,
     VALID_LAUNCH_TYPES,
     VALID_SECRET_SOURCES,
     VALID_SERVICE_TYPES,
     VALID_TLS_MODES,
     BackupConfig,
+    BootstrapConfig,
     ComposeConfig,
     ConfigError,
+    GithubOidcDeployRole,
     LifecycleHookV2,
     RcConfigV2,
     SecretRefV2,
@@ -49,8 +53,10 @@ from ._schema_types import (
 __all__ = [
     # Public types
     "BackupConfig",
+    "BootstrapConfig",
     "ComposeConfig",
     "ConfigError",
+    "GithubOidcDeployRole",
     "LifecycleHookV2",
     "RcConfigV2",
     "SecretRefV2",
@@ -62,6 +68,7 @@ __all__ = [
     "load",
     "parse",
     # Public constants
+    "VALID_BOOTSTRAP_PERMISSIONS",
     "VALID_CAPACITY_TYPES",
     "VALID_LAUNCH_TYPES",
     "VALID_SECRET_SOURCES",
