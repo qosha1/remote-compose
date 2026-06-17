@@ -1,0 +1,10 @@
+# Managed by remote-compose (bootstrap stack). The .tf files in this dir ARE
+# committed — this is tracked IaC, not a regenerated workload stack. Only
+# terraform's volatile artifacts (provider cache, state, plan files) are
+# ignored; state is NEVER committed.
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+crash.*.log

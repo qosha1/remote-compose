@@ -1,0 +1,21 @@
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# The role CI assumes via GitHub OIDC. Trust is scoped to the configured repo +
+# branch; permissions are derived from rc.yml bootstrap.permissions.
+resource "aws_iam_role" "deploy" {
+  name               = "{{ role_name }}"
+  assume_role_policy = <<EOT
+{{ trust_policy_json }}
+EOT
+}
+{% if has_statements %}
+resource "aws_iam_role_policy" "deploy" {
+  name = "{{ role_name }}-permissions"
+  role = aws_iam_role.deploy.id
+
+  policy = <<EOT
+{{ policy_json }}
+EOT
+}
+{% endif %}

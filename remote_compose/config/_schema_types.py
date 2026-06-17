@@ -474,6 +474,97 @@ class TlsConfig:
             raise ConfigError("tls.mode=manual requires certificate_arn")
 
 
+# Permission keys recognized under bootstrap.github_oidc_deploy_role.permissions.
+# Each maps to a least-privilege IAM statement derived downstream (rc-kiz.2).
+VALID_BOOTSTRAP_PERMISSIONS = {
+    "codebuild_project",  # str  -> codebuild:StartBuild/... on the build project
+    "ecr_namespace",  # str  -> ecr push/pull under a repo namespace + auth token
+    "ecs_clusters",  # list -> ecs service-deploy on cluster/service ARNs (wildcards ok)
+    "pass_roles",  # list -> iam:PassRole on the task + task-exec roles
+}
+_BOOTSTRAP_LIST_PERMISSIONS = {"ecs_clusters", "pass_roles"}
+_BOOTSTRAP_STR_PERMISSIONS = {"codebuild_project", "ecr_namespace"}
+
+
+@dataclass
+class GithubOidcDeployRole:
+    """A GitHub Actions OIDC deploy role rc owns in a committed bootstrap stack.
+
+    This is the role CI assumes (via sts:AssumeRoleWithWebIdentity) to trigger
+    deploys. It is NOT a per-service runtime resource, so it lives in its own
+    committed stack with its own state rather than the regenerated workload stack.
+
+    ``${project}`` / ``${cluster}`` placeholders in ``permissions`` (and in
+    ``role_name``) are stored verbatim here; interpolation + IAM derivation
+    happen downstream (rc-kiz.2/.3).
+    """
+
+    github_repo: str
+    github_branch: str = "main"
+    # Default derived at emit time as "${project}-github-deploy"; override to
+    # match a live role so `terraform import` of it yields a no-op.
+    role_name: Optional[str] = None
+    # The token.actions.githubusercontent.com OIDC provider is account-global
+    # (one per account). CI already assumes it, so default to ADOPTING it via a
+    # data source; opt in to create it.
+    create_oidc_provider: bool = False
+    permissions: dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        if not self.github_repo:
+            raise ConfigError(
+                "bootstrap.github_oidc_deploy_role.github_repo is required"
+            )
+        if (
+            self.github_repo.count("/") != 1
+            or self.github_repo.startswith("/")
+            or (self.github_repo.endswith("/"))
+        ):
+            raise ConfigError(
+                "bootstrap.github_oidc_deploy_role.github_repo must be "
+                f"'owner/repo', got {self.github_repo!r}"
+            )
+        if not isinstance(self.permissions, dict):
+            raise ConfigError(
+                "bootstrap.github_oidc_deploy_role.permissions must be a mapping, "
+                f"got {type(self.permissions).__name__}"
+            )
+        unknown = set(self.permissions) - VALID_BOOTSTRAP_PERMISSIONS
+        if unknown:
+            raise ConfigError(
+                f"unknown bootstrap permission key(s) {sorted(unknown)} "
+                f"(supported: {sorted(VALID_BOOTSTRAP_PERMISSIONS)})"
+            )
+        for key in _BOOTSTRAP_LIST_PERMISSIONS:
+            if key in self.permissions and not isinstance(self.permissions[key], list):
+                raise ConfigError(
+                    f"bootstrap permission {key!r} must be a list, got "
+                    f"{type(self.permissions[key]).__name__}"
+                )
+        for key in _BOOTSTRAP_STR_PERMISSIONS:
+            if key in self.permissions and not isinstance(self.permissions[key], str):
+                raise ConfigError(
+                    f"bootstrap permission {key!r} must be a string, got "
+                    f"{type(self.permissions[key]).__name__}"
+                )
+
+
+@dataclass
+class BootstrapConfig:
+    """Top-level ``bootstrap:`` section — committed, non-gitignored IaC that is
+    tracked separately from the regenerated workload stack (own dir + own state).
+    """
+
+    github_oidc_deploy_role: Optional[GithubOidcDeployRole] = None
+    output_dir: str = "bootstrap/terraform"
+
+    def validate(self) -> None:
+        if not self.output_dir:
+            raise ConfigError("bootstrap.output_dir must be non-empty")
+        if self.github_oidc_deploy_role is not None:
+            self.github_oidc_deploy_role.validate()
+
+
 @dataclass
 class RcConfigV2:
     version: int
@@ -488,6 +579,7 @@ class RcConfigV2:
     domain: Optional[str] = None
     tls: Optional[TlsConfig] = None
     compose: Optional[ComposeConfig] = None
+    bootstrap: Optional[BootstrapConfig] = None
 
     def validate(self) -> None:
         if self.version != 2:
@@ -506,3 +598,5 @@ class RcConfigV2:
             sec.validate()
         if self.tls is not None:
             self.tls.validate()
+        if self.bootstrap is not None:
+            self.bootstrap.validate()

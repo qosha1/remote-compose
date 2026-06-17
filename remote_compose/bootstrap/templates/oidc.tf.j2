@@ -1,0 +1,16 @@
+{% if create_oidc_provider -%}
+# GitHub Actions OIDC provider (account-global; one per AWS account). Created
+# because create_oidc_provider: true. If the account already has it, import it
+# first: terraform import aws_iam_openid_connect_provider.github <arn>
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "{{ github_oidc_url }}"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+}
+{%- else -%}
+# Adopt the existing account-global GitHub Actions OIDC provider (CI already
+# assumes it). Set create_oidc_provider: true to have rc create it instead.
+data "aws_iam_openid_connect_provider" "github" {
+  url = "{{ github_oidc_url }}"
+}
+{%- endif %}
