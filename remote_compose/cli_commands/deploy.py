@@ -105,6 +105,16 @@ def _print_service_table(context):
     "needing terraform state to exist locally. v2 rc.yml only. "
     "(rc-5h8.11)",
 )
+@click.option(
+    "--no-roll",
+    "no_roll",
+    is_flag=True,
+    help="Build + push images to ECR but do NOT force-roll the services "
+    "(no update_service). Exposes the existing skip_force_roll path (used "
+    "internally by `rc up`) as a CLI flag so callers can run migrations on "
+    "the freshly-pushed :latest BEFORE rolling, then roll with "
+    "`rc deploy --no-build`. v2 rc.yml only.",
+)
 @click.pass_context
 def deploy_cmd(
     ctx,
@@ -117,6 +127,7 @@ def deploy_cmd(
     dev_mode,
     reconcile,
     no_state,
+    no_roll,
 ):
     """Build images, push to ECR, and deploy all services."""
     services_list = None
@@ -206,6 +217,10 @@ def deploy_cmd(
             # changes (bumping a task-def field, etc.) don't trigger a
             # multi-minute image rebuild.
             skip_build=no_build,
+            # --no-roll: build + push but skip the force-roll (same ctx flag
+            # `rc up` uses internally) so migrations can run on the pushed
+            # :latest before services are rolled.
+            skip_force_roll=no_roll,
         )
     except TerraformError as exc:
         # Friendly rendering for the most common confusing failure: another
