@@ -1,6 +1,10 @@
 
 resource "aws_lb" "main" {
-  name               = "${var.project}-alb"
+  # AWS caps ALB names at 32 chars. "${project}-alb" overflows for long projects
+  # (e.g. foundry-tenant-marketing-agents-alb = 35). Keep the readable name when it
+  # fits (so existing ALBs never churn) and fall back to a deterministic
+  # truncate+md5 name only when it would exceed the limit.
+  name               = length("${var.project}-alb") <= 32 ? "${var.project}-alb" : "${substr(var.project, 0, 19)}-${substr(md5(var.project), 0, 8)}"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]

@@ -3,7 +3,7 @@ resource "aws_ecs_cluster" "main" {
 
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = "{{ 'enabled' if container_insights else 'disabled' }}"
   }
 }
 
@@ -29,11 +29,17 @@ resource "aws_cloudwatch_log_group" "tasks" {
   retention_in_days = 30
 }
 
+{%- if container_insights %}
 # ECS Container Insights auto-creates this log group on first task launch
 # if it doesn't exist; declaring it here lets terraform manage its
 # lifecycle so `rc destroy` actually removes it (otherwise the orphan
 # log group keeps reappearing every redeploy).
+#
+# Only emitted when Container Insights is enabled. It's off by default
+# (expensive CloudWatch metric ingestion, rarely worth it) — with it off
+# AWS never creates this log group, so there is nothing to manage.
 resource "aws_cloudwatch_log_group" "container_insights" {
   name              = "/aws/ecs/containerinsights/${var.cluster_name}/performance"
   retention_in_days = 14
 }
+{%- endif %}

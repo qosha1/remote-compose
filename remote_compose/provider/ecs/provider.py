@@ -1181,6 +1181,14 @@ class ECSProvider(Provider):
             "ignore_task_definition_changes": bool(
                 ecs_cfg.get("ignore_task_definition_changes", False)
             ),
+            # Opt-in (provider_config.ecs.container_insights). ECS Container
+            # Insights ships per-task/-service metrics to CloudWatch — real
+            # per-cluster ingestion cost that is rarely worth it. Default
+            # OFF: the cluster setting is emitted as "disabled" and the
+            # /aws/ecs/containerinsights/<cluster>/performance log group is
+            # not managed (AWS never creates it when insights is off). Set
+            # true only for a cluster you actually want the metrics on.
+            "container_insights": bool(ecs_cfg.get("container_insights", False)),
             "has_file_secrets": has_file_secrets,
             "file_secrets": file_secrets,
             "all_secret_arns": all_secret_arns,
@@ -1975,6 +1983,15 @@ class ECSProvider(Provider):
         cause.
         """
         ecs_cfg = _ecs_cfg(ctx)
+        # Container Insights is off by default (see cluster.tf.j2). When it's
+        # off AWS never auto-creates the performance log group, and the
+        # template emits no aws_cloudwatch_log_group.container_insights
+        # resource to import into — so there's nothing to reconcile. Skip
+        # the boto3 describe entirely. (Clusters that HAD insights on and
+        # are now flipping off drop the resource from config, so terraform
+        # apply destroys the now-managed log group on its own.)
+        if not ecs_cfg.get("container_insights", False):
+            return
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         log_group_name = f"/aws/ecs/containerinsights/{cluster_name}/performance"
 
