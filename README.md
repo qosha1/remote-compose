@@ -107,8 +107,8 @@ What it does, step by step:
 2. **`rc up --from-compose docker-compose.local.yml --aws-profile X
    --region Y --ttl 4h`** — single-command full deploy. Scaffolds an
    rc.yml from your compose, auto-fixes nginx for ECS Cloud Map
-   (variable-based proxy_pass + VPC resolver), imports any orphan
-   Container Insights log group, runs terraform apply, builds + pushes
+   (variable-based proxy_pass + VPC resolver), runs terraform apply,
+   builds + pushes
    images, force-rolls services, pushes file-sourced secrets into
    Secrets Manager, runs auto_on_deploy lifecycle hooks (e.g.
    `python manage.py migrate --noinput`).
@@ -320,7 +320,7 @@ What's built and live-verified on the `portable-deploy` branch:
 ### ECS provider — what terraform we generate
 
 - VPC + 2 public + 2 private subnets, IGW, security groups, default routing
-- ECS cluster with Container Insights (log group terraform-managed)
+- ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
 - EFS file system + access point per stateful volume; per-service posix uid/gid/mode
@@ -533,7 +533,7 @@ remote_compose/
 │           ├── backend.tf.j2        # terraform backend
 │           ├── backup.tf.j2         # S3 backup bucket + lifecycle
 │           ├── capacity.tf.j2       # EC2 capacity provider
-│           ├── cluster.tf.j2        # ECS cluster + container-insights log group
+│           ├── cluster.tf.j2        # ECS cluster (Container Insights opt-in)
 │           ├── domain.tf.j2         # ACM cert (with SANs) + R53 records
 │           ├── efs.tf.j2            # EFS + access points (uid/gid/mode)
 │           ├── iam.tf.j2            # task-execution + task roles + ssmmessages policy

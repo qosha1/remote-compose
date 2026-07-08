@@ -19,7 +19,13 @@ from remote_compose.provider.ecs import ECSProvider
 from remote_compose.terraform.runner import RecordingTerraformRunner, TerraformError
 
 
-def _ctx(tmp_path: Path, cluster: str = "myapp-prod") -> DeployContext:
+def _ctx(
+    tmp_path: Path, cluster: str = "myapp-prod", container_insights: bool = True
+) -> DeployContext:
+    # container_insights defaults True here because the orphan-reconcile
+    # only runs when insights is enabled — that's the scenario these tests
+    # exercise. See test_orphan_reconcile_skipped_when_insights_disabled
+    # for the off case.
     return DeployContext(
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
@@ -29,6 +35,7 @@ def _ctx(tmp_path: Path, cluster: str = "myapp-prod") -> DeployContext:
                 "region": "us-west-2",
                 "cluster": cluster,
                 "vpc_cidr": "10.0.0.0/16",
+                "container_insights": container_insights,
             }
         },
         tf_backend_config={"type": "local"},
@@ -95,6 +102,25 @@ class TestOrphanLogGroupImport:
 
         subcmds = [c.args[0] for c in holder["runner"].calls]
         assert subcmds == ["init", "apply", "output"]
+
+    def test_orphan_reconcile_skipped_when_insights_disabled(self, tmp_path):
+        """Insights off (the default) → no boto3 describe, no import. AWS
+        never creates the log group when insights is off, and the template
+        emits no resource to import into."""
+        sess = _logs_session(
+            [
+                {"logGroupName": "/aws/ecs/containerinsights/myapp-prod/performance"},
+            ]
+        )
+        holder: dict = {"runner": None}
+        provider = _provider(holder, sess)
+
+        provider.deploy(_ctx(tmp_path, container_insights=False))
+
+        subcmds = [c.args[0] for c in holder["runner"].calls]
+        assert subcmds == ["init", "apply", "output"]
+        # AWS was never queried for the container-insights log group.
+        sess.client.return_value.describe_log_groups.assert_not_called()
 
     def test_skips_import_when_describe_returns_unrelated_log_groups(self, tmp_path):
         """Prefix matches MUST be filtered to exact-name matches."""

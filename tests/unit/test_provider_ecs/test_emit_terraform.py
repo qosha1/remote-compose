@@ -423,18 +423,35 @@ class TestManagedBackupBucket:
         assert "aws_s3_bucket_lifecycle_configuration" not in backup_tf
 
 
-class TestContainerInsightsLogGroup:
-    """ECS auto-creates /aws/ecs/containerinsights/<cluster>/performance
-    when Container Insights is enabled; if terraform doesn't manage it,
-    rc destroy leaks the log group every cycle. We declare it explicitly
-    so destroy is truly clean."""
+class TestContainerInsights:
+    """Container Insights is OFF by default (expensive CloudWatch metric
+    ingestion, rarely worth it). The cluster setting emits as "disabled"
+    and the /aws/ecs/containerinsights/<cluster>/performance log group is
+    not managed. Opt in with provider_config.ecs.container_insights=True,
+    in which case terraform manages the log group so destroy stays clean."""
 
-    def test_container_insights_log_group_emitted(self, tmp_path):
+    def test_disabled_by_default(self, tmp_path):
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(_ctx(tmp_path, cluster="my-cluster"), out)
         cluster = (out / "cluster.tf").read_text()
+        assert 'value = "disabled"' in cluster
+        assert 'value = "enabled"' not in cluster
+
+    def test_log_group_not_managed_by_default(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path, cluster="my-cluster"), out)
+        cluster = (out / "cluster.tf").read_text()
+        assert 'aws_cloudwatch_log_group" "container_insights"' not in cluster
+        assert "/aws/ecs/containerinsights/" not in cluster
+
+    def test_enabled_when_opted_in(self, tmp_path):
+        out = tmp_path / "tf"
+        ctx = _ctx(tmp_path, cluster="my-cluster")
+        ctx.provider_config["ecs"]["container_insights"] = True
+        ECSProvider().emit_terraform(ctx, out)
+        cluster = (out / "cluster.tf").read_text()
+        assert 'value = "enabled"' in cluster
         assert 'aws_cloudwatch_log_group" "container_insights"' in cluster
-        assert "/aws/ecs/containerinsights/" in cluster
         assert "${var.cluster_name}/performance" in cluster
 
 

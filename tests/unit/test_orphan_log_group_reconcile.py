@@ -28,7 +28,15 @@ def ctx(tmp_path: Path) -> DeployContext:
         project="testp",
         compose_path=Path("/tmp/dc.yml"),
         rc_yml_v2={},
-        provider_config={"ecs": {"region": "us-west-1", "cluster": "testp-cluster"}},
+        provider_config={
+            "ecs": {
+                "region": "us-west-1",
+                "cluster": "testp-cluster",
+                # The reconcile only runs when Container Insights is on; these
+                # scenarios all assume an orphan insights log group exists.
+                "container_insights": True,
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
@@ -248,6 +256,22 @@ class TestAWSDescribeFailureSurfaces:
 # ---------------------------------------------------------------------------
 # No orphan exists: silent return is correct (don't bother the user).
 # ---------------------------------------------------------------------------
+
+
+class TestInsightsDisabled:
+    def test_reconcile_noops_when_insights_off(self, ctx):
+        """Insights off (the default) → reconcile returns before touching
+        AWS. No describe, no import, no progress noise."""
+        ctx.provider_config["ecs"]["container_insights"] = False
+
+        session = MagicMock()
+        provider = ECSProvider(session_factory=lambda c: session)
+        runner = MagicMock()
+
+        provider._reconcile_orphan_log_groups(ctx, runner)
+
+        session.client.assert_not_called()
+        runner.import_resource.assert_not_called()
 
 
 class TestNoOrphanFound:
