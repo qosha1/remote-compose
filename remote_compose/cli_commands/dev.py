@@ -120,7 +120,9 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     "repos",
     multiple=True,
     help="Git repo URL (repeatable). With 2+ → MultiGitSource (multi-repo deploy). "
-    "With 1 → GitSource. With 0 → auto-detect from cwd.",
+    "With 1 → GitSource. With 0 → auto-detect from cwd. Append '=<dir>' to override "
+    "the on-box clone directory (default: repo basename), e.g. "
+    "'https://github.com/owner/new-name=old-dir'.",
 )
 @click.option(
     "--branch",
@@ -243,6 +245,20 @@ def dev_up_cmd(
         detect_source_from_cwd,
     )
 
+    # A --repo value may carry an optional '=<dir>' suffix that overrides the
+    # on-box clone directory (default: the repo basename). This lets a renamed
+    # repo keep a legacy checkout dir so compose includes that reference it by the
+    # old name still resolve — e.g. '…/debuggai-api=sentinal' clones the (renamed)
+    # repo into 'sentinal/'. A git URL never ends in '=<bare-word>', so splitting
+    # on a trailing '=<segment-without-/-or-:>' is unambiguous.
+    def _parse_repo_spec(spec: str) -> dict:
+        repo = {"url": spec, "ref": branch or "main"}
+        head, sep, tail = spec.rpartition("=")
+        if sep and head and tail and "/" not in tail and ":" not in tail:
+            repo["url"] = head
+            repo["target"] = tail
+        return repo
+
     # Resolve source: 2+ repos → multi; 1 repo → single git; 0 + image → image;
     # 0 + nothing → autodetect from cwd.
     if len(repos) >= 2:
@@ -253,13 +269,14 @@ def dev_up_cmd(
             )
             sys.exit(1)
         source = MultiGitSource(
-            repos=[{"url": u, "ref": branch or "main"} for u in repos],
+            repos=[_parse_repo_spec(u) for u in repos],
             compose_filenames=[Path(c).name for c in compose_files],
         )
     elif image:
         source = ImageSource(image=image)
     elif len(repos) == 1:
-        source = GitSource(url=repos[0], ref=branch or "main")
+        _spec = _parse_repo_spec(repos[0])
+        source = GitSource(url=_spec["url"], ref=_spec["ref"])
     else:
         try:
             source = detect_source_from_cwd()
