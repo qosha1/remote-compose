@@ -181,3 +181,67 @@ class TestSharedImageEmission:
         services_tf = (out / "services.tf").read_text()
         assert 'resource "aws_ecr_repository" "django"' in services_tf
         assert 'resource "aws_ecr_repository" "browser"' in services_tf
+
+
+# ── opt-out: share_image_repos=false keeps per-service repos ─────────────────
+# For stacks whose live ECR layout predates rc-44i (per-service repos still
+# referenced by the running task defs), grouping would emit fewer repos and a
+# regen would DESTROY in-use repos. share_image_repos: false disables grouping.
+def _shared3():
+    return {
+        "django": _build_svc("django", ctx="/app", dockerfile="D"),
+        "celery-worker": _build_svc("celery-worker", ctx="/app", dockerfile="D"),
+        "celery-beat": _build_svc("celery-beat", ctx="/app", dockerfile="D"),
+        "redis": _image_svc("redis"),
+    }
+
+
+def _ctx_no_share(tmp_path: Path, services) -> DeployContext:
+    return DeployContext(
+        project="mesh",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={},
+        provider_config={
+            "ecs": {
+                "region": "us-east-2",
+                "cluster": "mesh",
+                "vpc_cidr": "10.0.0.0/16",
+                "share_image_repos": False,
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services=services,
+        secrets=[],
+    )
+
+
+class TestShareImageReposOptOut:
+    def test_grouping_disabled_each_owns_itself(self):
+        owners = image_group_owners(_shared3(), share_repos=False)
+        assert owners == {
+            "django": "django",
+            "celery-worker": "celery-worker",
+            "celery-beat": "celery-beat",
+        }  # redis has no build_context -> absent
+
+    def test_all_owners_built_when_not_sharing(self):
+        names = sorted(
+            s.name for s in _services_to_build(_shared3(), share_repos=False)
+        )
+        assert names == ["celery-beat", "celery-worker", "django"]
+
+    def test_default_still_shares(self):
+        # Backward-compat: absent/true -> unchanged rc-44i behavior.
+        assert image_group_owners(_shared3())["celery-worker"] == "django"
+
+    def test_emission_keeps_per_service_repos(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            _ctx_no_share(tmp_path, _shared3()), out
+        )
+        services_tf = (out / "services.tf").read_text()
+        for svc in ("django", "celery_worker", "celery_beat"):
+            assert f'resource "aws_ecr_repository" "{svc}"' in services_tf
+        # each references its OWN repo, not a shared owner
+        assert services_tf.count("aws_ecr_repository.celery_worker.repository_url") >= 1

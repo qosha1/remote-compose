@@ -181,7 +181,9 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
-def image_group_owners(services: dict[str, Any]) -> dict[str, str]:
+def image_group_owners(
+    services: dict[str, Any], share_repos: bool = True
+) -> dict[str, str]:
     """Map each build-having service to the OWNER of its image group (rc-44i).
 
     Services sharing a build identity — resolved context + dockerfile + target +
@@ -198,6 +200,19 @@ def image_group_owners(services: dict[str, Any]) -> dict[str, str]:
     for a given config; general — no per-stack logic. Services without a
     build_context use a pre-built image and are not grouped.
     """
+    # Opt-out (provider_config.ecs.share_image_repos: false). Every build-having
+    # service owns its OWN repo — no build-identity grouping. For stacks whose
+    # live ECR layout predates rc-44i (per-service repos, still referenced by the
+    # running task defs), grouping would emit fewer repos and a regen would try
+    # to DESTROY the per-service repos that are in active use. Keeping them
+    # per-service makes the config match reality (no destroys).
+    if not share_repos:
+        return {
+            name: name
+            for name, spec in services.items()
+            if getattr(spec, "build_context", None)
+        }
+
     groups: dict[tuple, list[str]] = {}
     for name, spec in services.items():
         if not getattr(spec, "build_context", None):
@@ -217,12 +232,16 @@ def image_group_owners(services: dict[str, Any]) -> dict[str, str]:
     return owners
 
 
-def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
+def _services_to_build(
+    services: dict[str, Any], services_filter=None, share_repos: bool = True
+) -> list:
     """The service specs to actually build+push (rc-44i): one OWNER per image
     group, never the siblings (their task def references the owner image). A
     services_filter naming a sibling maps to its owner so the shared image is
-    still rebuilt. Order follows sorted service name for determinism."""
-    owners = image_group_owners(services)
+    still rebuilt. Order follows sorted service name for determinism. When
+    share_repos is false, every build-having service is its own owner (built +
+    pushed separately)."""
+    owners = image_group_owners(services, share_repos=share_repos)
     members: dict[str, set] = {}
     for name, owner in owners.items():
         members.setdefault(owner, set()).add(name)
@@ -242,7 +261,9 @@ def _services_to_build(services: dict[str, Any], services_filter=None) -> list:
     ]
 
 
-def roll_targets_for_pushed(services: dict[str, Any], pushed: list[str]) -> list[str]:
+def roll_targets_for_pushed(
+    services: dict[str, Any], pushed: list[str], share_repos: bool = True
+) -> list[str]:
     """Expand the pushed image-group OWNERS to every member of their groups
     (rc-wji.1).
 
@@ -253,7 +274,7 @@ def roll_targets_for_pushed(services: dict[str, Any], pushed: list[str]) -> list
     _deploy_no_state() so the two roll paths can't drift. Sorted for
     determinism.
     """
-    owners = image_group_owners(services)
+    owners = image_group_owners(services, share_repos=share_repos)
     pushed_owners = set(pushed)
     return sorted(name for name in services if owners.get(name, name) in pushed_owners)
 
@@ -488,7 +509,9 @@ class ECSProvider(Provider):
 
         # Shared-image dedup (rc-44i): which service owns each build group's
         # ECR repo. Computed once; consulted per-service below.
-        image_owners = image_group_owners(ctx.services)
+        image_owners = image_group_owners(
+            ctx.services, share_repos=_ecs_cfg(ctx).get("share_image_repos", True)
+        )
 
         services_view = []
         default_public = None
@@ -1351,7 +1374,12 @@ class ECSProvider(Provider):
             # image and must pick up the new :latest too (parity with the
             # --no-state path).
             self._force_new_deployments(
-                ctx, roll_targets_for_pushed(ctx.services, pushed)
+                ctx,
+                roll_targets_for_pushed(
+                    ctx.services,
+                    pushed,
+                    share_repos=_ecs_cfg(ctx).get("share_image_repos", True),
+                ),
             )
 
         return DeployResult(
@@ -1447,7 +1475,9 @@ class ECSProvider(Provider):
         # order changed since), so the live repo is named after a sibling —
         # fall back to a sibling's existing repo so the shared image still
         # rebuilds + pushes to the repo the task defs actually reference.
-        owners_map = image_group_owners(ctx.services)
+        owners_map = image_group_owners(
+            ctx.services, share_repos=_ecs_cfg(ctx).get("share_image_repos", True)
+        )
         group_members: dict[str, list[str]] = {}
         for member, owner in owners_map.items():
             group_members.setdefault(owner, []).append(member)
@@ -1512,7 +1542,11 @@ class ECSProvider(Provider):
             # rc.yml replicas to desiredCount as part of the roll.
             self._force_new_deployments(
                 ctx,
-                roll_targets_for_pushed(ctx.services, pushed),
+                roll_targets_for_pushed(
+                    ctx.services,
+                    pushed,
+                    share_repos=_ecs_cfg(ctx).get("share_image_repos", True),
+                ),
                 reconcile_scale=True,
             )
 
@@ -1550,7 +1584,11 @@ class ECSProvider(Provider):
         Used by ``rc deploy --services X --tag v1.2`` for instant rollback /
         deploy of known-good images. See rc-e5u.45.3.
         """
-        to_build = _services_to_build(ctx.services, services_filter)
+        to_build = _services_to_build(
+            ctx.services,
+            services_filter,
+            share_repos=_ecs_cfg(ctx).get("share_image_repos", True),
+        )
         # rc-2v8 (extended): check build-context sizes BEFORE running
         # docker build. Without this, a 6GB+ context goes straight to
         # buildkit and the user only learns they should have written a
