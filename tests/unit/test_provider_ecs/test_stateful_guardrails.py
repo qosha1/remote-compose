@@ -92,3 +92,42 @@ class TestEfsReplicasGuard:
                     {"name": "pgdata", "mount": "/var/lib/postgresql/data"},
                 ],
             )
+
+
+# rc: explicit `stateful: true` opt-in for single-instance services rc's
+# heuristics miss (a volume-less redis broker/cache — two overlapping tasks
+# split-brain). Forces stop-before-start (min=0/max=100, AZ-rebalancing off).
+def _emit_svc(tmp_path: Path, name: str, *, stateful: bool) -> str:
+    ctx = DeployContext(
+        project="app",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={},
+        provider_config={
+            "ecs": {"region": "us-east-2", "cluster": "app-prod", "vpc_cidr": "10.0.0.0/16"}
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            name: ServiceSpec(
+                name=name, cpu=256, memory=512, type="infrastructure",
+                image="redis:7", stateful=stateful,
+            )
+        },
+        secrets=[],
+    )
+    out = tmp_path / "tf"
+    ECSProvider().emit_terraform(ctx, out)
+    return (out / "services.tf").read_text()
+
+
+class TestExplicitStatefulOptIn:
+    def test_stateful_true_forces_stop_before_start(self, tmp_path):
+        tf = _emit_svc(tmp_path, "redis", stateful=True)
+        assert "deployment_minimum_healthy_percent = 0" in tf
+        assert "deployment_maximum_percent         = 100" in tf
+
+    def test_volumeless_default_is_rolling(self, tmp_path):
+        # Backward-compat: stateful=False (default) volume-less service is NOT
+        # forced to stop-before-start.
+        tf = _emit_svc(tmp_path, "redis", stateful=False)
+        assert "deployment_minimum_healthy_percent = 0" not in tf

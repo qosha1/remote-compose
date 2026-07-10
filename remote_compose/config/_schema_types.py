@@ -222,6 +222,10 @@ class ServiceV2:
     # rolling them opens a Cloud Map DNS gap. Deploy deliberately with
     # `rc deploy --services <svc>` (explicit filter overrides). Default True.
     auto_roll: bool = True
+    # rc: force single-instance stop-before-start deploy (min=0/max=100, AZ
+    # rebalancing off) for a service rc's heuristics miss — e.g. a volume-less
+    # redis broker/cache. Default False.
+    stateful: bool = False
     # rc-e5u.35.7: explicit framework hint. When set, cli_v2 merges the
     # named preset's lifecycle_hooks into this service's lifecycle dict
     # for hooks the user hasn't declared. ``django`` / ``rails`` /

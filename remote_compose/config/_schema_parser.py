@@ -152,6 +152,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
                 list(raw["env_from_secret"]) if "env_from_secret" in raw else []
             ),
             auto_roll=raw["auto_roll"] if "auto_roll" in raw else True,
+            stateful=raw["stateful"] if "stateful" in raw else False,
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")

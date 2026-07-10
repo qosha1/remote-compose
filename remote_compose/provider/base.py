@@ -128,6 +128,13 @@ class ServiceSpec:
     # deliberately with `rc deploy --services <svc>` (an explicit filter
     # overrides this). Default True = current behavior.
     auto_roll: bool = True
+    # rc: force stop-before-start deployment (minimumHealthyPercent=0,
+    # maximumPercent=100, AZ-rebalancing off) for a single-instance service that
+    # rc's heuristics don't otherwise catch — a volume-less broker/cache (redis)
+    # or any singleton where two overlapping tasks split-brain or contend. Same
+    # effect as an EFS mount or a `-beat`/`-scheduler` name, made explicit.
+    # Default False = current behavior (rolling deploy for stateless services).
+    stateful: bool = False
 
 
 @dataclass
