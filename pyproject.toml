@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote-compose"
-version = "0.4.1"
+version = "0.5.0"
 description = "Deploy docker-compose stacks to AWS ECS — terraform-backed, multi-cloud-ready"
 readme = "README.md"
 license = {text = "MIT"}
