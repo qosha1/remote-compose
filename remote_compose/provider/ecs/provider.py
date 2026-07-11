@@ -1214,6 +1214,14 @@ class ECSProvider(Provider):
             # not managed (AWS never creates it when insights is off). Set
             # true only for a cluster you actually want the metrics on.
             "container_insights": bool(ecs_cfg.get("container_insights", False)),
+            # provider_config.ecs.idle_timeout — the ALB's connection idle timeout
+            # (seconds). AWS's default is 60; long-lived connections (WebSockets,
+            # SSE, streaming responses) need it raised or the LB silently drops the
+            # socket. Emitted explicitly on aws_lb.main so the value is TRACKED in
+            # rc.yml instead of set out-of-band on the live LB (which then shows as
+            # perpetual drift on every plan). Default 60 == AWS default, so a stack
+            # that doesn't set it sees no change.
+            "alb_idle_timeout": int(ecs_cfg.get("idle_timeout", 60)),
             "has_file_secrets": has_file_secrets,
             "file_secrets": file_secrets,
             "all_secret_arns": all_secret_arns,

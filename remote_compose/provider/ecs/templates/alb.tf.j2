@@ -21,6 +21,10 @@ resource "aws_lb" "main" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = {{ public_subnet_ids_ref }}
+  # Connection idle timeout (provider_config.ecs.idle_timeout; default 60 = AWS
+  # default). Raise for long-lived connections (WebSockets/SSE/streaming) so the
+  # LB doesn't drop the socket mid-stream.
+  idle_timeout       = {{ alb_idle_timeout }}
 }
 
 {%- if not default_target_has_own_tg %}

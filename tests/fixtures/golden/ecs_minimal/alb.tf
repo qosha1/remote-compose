@@ -9,6 +9,10 @@ resource "aws_lb" "main" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id
+  # Connection idle timeout (provider_config.ecs.idle_timeout; default 60 = AWS
+  # default). Raise for long-lived connections (WebSockets/SSE/streaming) so the
+  # LB doesn't drop the socket mid-stream.
+  idle_timeout       = 60
 }
 resource "aws_lb_target_group" "default" {
   # rc-0zx: name_prefix + create_before_destroy so adding a service.domain
