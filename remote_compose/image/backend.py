@@ -23,7 +23,7 @@ import io
 import os
 import re
 import shlex
-import tarfile
+import zipfile
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -410,12 +410,15 @@ def _dockerignored(rel: str, patterns: list[str]) -> bool:
     return False
 
 
-def tar_build_context(root: Path, *, keep: Optional[set[str]] = None) -> bytes:
-    """Tar+gzip ``root`` honoring its ``.dockerignore`` (rc-8j7.5).
+def zip_build_context(root: Path, *, keep: Optional[set[str]] = None) -> bytes:
+    """Zip ``root`` honoring its ``.dockerignore`` (rc-8j7.5).
 
-    Deterministic (sorted walk), prunes ignored subtrees, and always keeps any
-    path in ``keep`` (the referenced Dockerfiles — excluding one would break
-    the build). Returns the gzipped tar bytes for a single S3 upload.
+    CodeBuild's S3 source auto-extracts a **ZIP** (it does NOT unpack tar.gz), so
+    the context is shipped as a deflated zip whose members are paths RELATIVE to
+    ``root`` — ``root/nginx/...`` becomes ``nginx/...`` at the extraction root, which
+    is exactly the context path the generated buildspec passes to buildx.
+    Deterministic (sorted walk), prunes ignored subtrees, and always keeps any path
+    in ``keep`` (the referenced Dockerfiles — excluding one would break the build).
     """
     root = Path(root).resolve()
     patterns = _load_dockerignore_patterns(root)
@@ -427,7 +430,7 @@ def tar_build_context(root: Path, *, keep: Optional[set[str]] = None) -> bytes:
         return any(kp == rel or kp.startswith(rel + "/") for kp in keep)
 
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = os.path.relpath(dirpath, root)
             rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
@@ -442,7 +445,7 @@ def tar_build_context(root: Path, *, keep: Optional[set[str]] = None) -> bytes:
                 rel = f"{rel_dir}/{fname}" if rel_dir else fname
                 if _dockerignored(rel, patterns) and rel not in keep:
                     continue
-                tar.add(os.path.join(dirpath, fname), arcname=rel, recursive=False)
+                zf.write(os.path.join(dirpath, fname), arcname=rel)
     return buf.getvalue()
 
 
@@ -584,21 +587,21 @@ class AwsCodeBuildBackend(BuildBackend):
             for df in (resolve_dockerfile(s) for s in specs)
             if df is not None
         }
-        tar_bytes = tar_build_context(root, keep=keep)
+        zip_bytes = zip_build_context(root, keep=keep)
         self._emit(
             f"  codebuild: packaged build context {root} "
-            f"({_human_bytes(len(tar_bytes))})"
+            f"({_human_bytes(len(zip_bytes))})"
         )
 
-        # 2. upload once to S3.
+        # 2. upload once to S3 (a ZIP — CodeBuild's S3 source only auto-extracts zip).
         bucket = cfg.source_bucket or self._derived_bucket(region, specs)
         key = (
             f"{CODEBUILD_SOURCE_KEY_PREFIX}/"
-            f"{self._project or 'rc'}/{uuid4().hex}.tar.gz"
+            f"{self._project or 'rc'}/{uuid4().hex}.zip"
         )
         s3 = self._session.client("s3", region_name=region)
         self._ensure_bucket(s3, bucket, region)
-        s3.put_object(Bucket=bucket, Key=key, Body=tar_bytes)
+        s3.put_object(Bucket=bucket, Key=key, Body=zip_bytes)
         self._emit(f"  codebuild: uploaded context to s3://{bucket}/{key}")
 
         # 3. generate the buildspec (same buildx per image).

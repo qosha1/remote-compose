@@ -91,9 +91,10 @@ to switch backends — only config: `provider_config.ecs.build.backend`,
 `AwsCodeBuildBackend.build_and_push(specs)` (in `remote_compose/image/backend.py`)
 now does the real work. Locked decisions:
 
-- **Context delivery = S3.** rc tars the common-ancestor build-context root
+- **Context delivery = S3.** rc **zips** the common-ancestor build-context root
   (honoring the root `.dockerignore`, best-effort) and uploads it **once** to
-  `s3://<bucket>/rc-build-context/<project>/<uuid>.tar.gz`. One upload covers
+  `s3://<bucket>/rc-build-context/<project>/<uuid>.zip`. (A zip, not tar.gz —
+  CodeBuild's S3 source auto-extracts ZIP only.) One upload covers
   every image — the django context is `.`, the small images live under
   `compose/production/*` in the same tree, so each buildx invocation references
   its context path **relative to the extracted root**.
@@ -259,7 +260,7 @@ Revert instantly with `RC_BUILD_BACKEND=local` (the default).
 
 - **Bucket lifecycle**: rc create-if-missing has no expiry on the source bucket;
   add an S3 lifecycle rule (expire `rc-build-context/` after N days) so old
-  context tarballs don't accumulate. Prefer a pre-provisioned bucket in prod.
+  context zips don't accumulate. Prefer a pre-provisioned bucket in prod.
 - **CodeBuild local cache**: the buildspec relies on the ECR registry cache
   (identical to local). Turning on CodeBuild `LOCAL_DOCKER_LAYER_CACHE` for an
   extra warm-cache win is a follow-up (project `cache` config) — measure first.

@@ -11,7 +11,7 @@ directly.
 
 from __future__ import annotations
 
-import tarfile
+import zipfile
 import io
 from pathlib import Path
 from unittest import mock
@@ -25,7 +25,7 @@ from remote_compose.image.backend import (
     CodeBuildError,
     create_build_backend,
     generate_codebuild_buildspec,
-    tar_build_context,
+    zip_build_context,
 )
 from remote_compose.image.builder import ImageBuildSpec
 
@@ -173,14 +173,14 @@ class TestBuildspec:
 # ---------------------------------------------------------------------------
 
 
-class TestTarContext:
+class TestZipContext:
     def _members(self, data: bytes) -> set[str]:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            return {m.name for m in tar.getmembers()}
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return set(zf.namelist())
 
-    def test_tars_files_with_posix_paths(self, tmp_path):
+    def test_zips_files_with_posix_paths(self, tmp_path):
         root = _repo_tree(tmp_path)
-        members = self._members(tar_build_context(root))
+        members = self._members(zip_build_context(root))
         assert "backend/app.py" in members
         assert "compose/production/django/Dockerfile" in members
 
@@ -190,7 +190,7 @@ class TestTarContext:
         (root / "node_modules" / "big.js").write_text("x")
         (root / "secret.env").write_text("TOKEN=1")
         (root / ".dockerignore").write_text("node_modules\n*.env\n")
-        members = self._members(tar_build_context(root))
+        members = self._members(zip_build_context(root))
         assert not any(m.startswith("node_modules") for m in members)
         assert "secret.env" not in members
         assert "backend/app.py" in members
@@ -200,7 +200,7 @@ class TestTarContext:
         (root / ".dockerignore").write_text("compose\n")
         # Without keep, the Dockerfile under compose/ would be dropped.
         keep = {"compose/production/django/Dockerfile"}
-        members = self._members(tar_build_context(root, keep=keep))
+        members = self._members(zip_build_context(root, keep=keep))
         assert "compose/production/django/Dockerfile" in members
 
 
@@ -292,7 +292,7 @@ class TestBuildAndPushFlow:
         # context uploaded exactly once (one tar covers all images).
         assert clients["s3"].put_object.call_count == 1
         put = clients["s3"].put_object.call_args.kwargs
-        assert put["Key"].endswith(".tar.gz")
+        assert put["Key"].endswith(".zip")
         assert isinstance(put["Body"], (bytes, bytearray))
 
     def test_start_build_targets_project_and_s3_source(self, tmp_path):
