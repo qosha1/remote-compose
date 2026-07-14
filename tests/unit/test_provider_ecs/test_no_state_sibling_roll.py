@@ -110,6 +110,37 @@ def test_owner_repo_fallback_and_sibling_roll():
     assert rolled["services"] == ["celery-beat", "celery-worker", "django", "nginx"]
 
 
+def test_no_roll_suppresses_force_roll_in_no_state():
+    """rc-8j7.8: `deploy --no-state --no-roll` (skip_force_roll) must NOT roll.
+
+    The terraform path already honors skip_force_roll; the --no-state build
+    path did not, so the CI "build (no roll)" step still blocked ~5min on
+    _wait_for_services_stable — a duplicate roll that also fired BEFORE the
+    later migrate+roll steps. Pushing images must still happen; only the roll
+    is suppressed.
+    """
+    provider = ECSProvider()
+    pushed_flag: dict = {}
+
+    def fake_build_and_push(ctx, outputs, warnings, **kw):
+        pushed_flag["called"] = True
+        return ["django", "nginx"]  # non-empty: images WERE pushed
+
+    with (
+        patch.object(provider, "session_factory", lambda c: _ecr_session()),
+        patch.object(
+            provider, "_build_and_push_images", side_effect=fake_build_and_push
+        ),
+        patch.object(provider, "_force_new_deployments") as force_roll,
+    ):
+        ctx = _ctx()
+        ctx.skip_force_roll = True
+        provider._deploy_no_state(ctx, None, None)
+
+    assert pushed_flag.get("called") is True  # images still built + pushed
+    force_roll.assert_not_called()  # but NO roll (and no steady-state wait)
+
+
 def test_owner_with_own_repo_still_resolves_directly():
     """Regression: when the owner DOES have its own repo, it's used (the
     fallback only kicks in when the own repo is absent)."""
