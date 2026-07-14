@@ -1671,9 +1671,25 @@ class ECSProvider(Provider):
             buildcache_repo = f"{registry_host}/{ctx.project}/buildcache"
             buildcache_managed = False
 
-        from ...image import ImageBuildSpec, ImageBuilder, ImagePusher
+        from ...image import ImageBuildSpec
+        from ...image.backend import (
+            UnknownBuildBackendError,
+            create_build_backend,
+            resolve_build_config,
+        )
         from ...no_cache_state import consume_no_cache
         from .ecr_auth import ECRAuthenticator
+
+        # rc-8j7.2/.4: resolve WHERE the build runs (backend) + cache mode +
+        # push mode + concurrency from env > provider_config.ecs.build >
+        # rc.yml build. A zero-config stack gets the all-default BuildConfig
+        # (local backend, mode=max, serial-safe bounded pool). A typo'd
+        # backend/cache_mode surfaces as a clean ProviderConfigError instead
+        # of a stack trace.
+        try:
+            build_cfg = resolve_build_config(ctx.provider_config, ctx.rc_yml_v2)
+        except (UnknownBuildBackendError, ValueError) as exc:
+            raise ProviderConfigError(str(exc)) from exc
 
         # rc-2kp: an `rc fix *` subcommand (bake-bind-mount-source,
         # django-tls, nginx-conf) drops a sentinel when it edits files
@@ -1687,14 +1703,14 @@ class ECSProvider(Provider):
                 "subcommand modified files since the last build) — "
                 "this build runs with --no-cache."
             )
-        builder = ImageBuilder(progress=self.progress)
         session = self.session_factory(ctx)
         auth = ECRAuthenticator(session=session)
-        pusher = ImagePusher(authenticator=auth, progress=self.progress)
 
         # Pre-authenticate the cache registry so buildx can pull/push cache
-        # layers. The pusher will re-auth the per-service registry (same
-        # ECR account/region in practice; ECRAuthenticator caches by host).
+        # layers. The SAME `auth` is handed to the build backend below, and
+        # ECRAuthenticator caches by host — so per-service pushes to the same
+        # ECR account/region (the common case) reuse this login instead of
+        # re-authenticating, which also keeps parallel pushes to one login.
         if buildcache_repo:
             cache_host = buildcache_repo.split("/", 1)[0]
             try:
@@ -1719,6 +1735,11 @@ class ECSProvider(Provider):
         skip_when_tag_exists = requested_tag is not None and requested_tag != "latest"
 
         pushed: list[str] = []
+        # rc-8j7.1: resolve each service to a ready-to-run ImageBuildSpec, then
+        # hand the batch to the configured BuildBackend. The ECR re-tag
+        # short-circuit (--tag re-use) stays here — it's a pure ECR API call,
+        # not a build — and its services are recorded in `pushed` directly.
+        build_specs: list[ImageBuildSpec] = []
         for spec in to_build:
             repo_url = repos.get(spec.name)
             if not repo_url:
@@ -1764,21 +1785,44 @@ class ECSProvider(Provider):
             build_tags = [latest_tag]
             if requested_tag and requested_tag != "latest":
                 build_tags.insert(0, f"{repo_url}:{requested_tag}")
-            build = ImageBuildSpec(
-                service=spec.name,
-                context=spec.build_context,
-                dockerfile=Path(spec.dockerfile) if spec.dockerfile else None,
-                target=spec.target,
-                build_args=dict(spec.build_args or {}),
-                tags=build_tags,
-                platform="linux/amd64",
-                cache_from=cache_from,
-                cache_to=cache_to,
-                no_cache=no_cache_pending,
+            build_specs.append(
+                ImageBuildSpec(
+                    service=spec.name,
+                    context=spec.build_context,
+                    dockerfile=Path(spec.dockerfile) if spec.dockerfile else None,
+                    target=spec.target,
+                    build_args=dict(spec.build_args or {}),
+                    tags=build_tags,
+                    platform="linux/amd64",
+                    cache_from=cache_from,
+                    cache_to=cache_to,
+                    no_cache=no_cache_pending,
+                    # rc-8j7.4: cache export mode + buildx --push are config-
+                    # driven; defaults (mode=max, push False) reproduce today's
+                    # --cache-to mode=max + --load + separate-push behavior.
+                    cache_mode=build_cfg.cache_mode,
+                    push=build_cfg.push,
+                )
             )
-            tags = builder.build(build)
-            pusher.push(tags)
-            pushed.append(spec.name)
+
+        # rc-8j7.1/.3: build + push through the configured backend. The local
+        # backend runs docker buildx here (parallelizing independent image
+        # groups up to build_cfg.max_workers); a remote backend (rc-8j7.5
+        # aws-codebuild) builds off the runner inside CodeBuild near ECR. The
+        # session + resolved CodeBuild config + project + region are threaded
+        # through so the remote backend can reach AWS; the local backend
+        # ignores them. Returns the built service names in input order.
+        backend = create_build_backend(
+            build_cfg.backend,
+            authenticator=auth,
+            progress=self.progress,
+            max_workers=build_cfg.max_workers,
+            session=session,
+            codebuild=build_cfg.codebuild,
+            project=ctx.project,
+            region=_ecs_cfg(ctx).get("region"),
+        )
+        pushed += backend.build_and_push(build_specs)
         return pushed
 
     def _ensure_buildcache_repo(self, session: Any, repo_url: str) -> bool:

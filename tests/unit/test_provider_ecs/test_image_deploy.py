@@ -622,3 +622,110 @@ class TestBuildcacheTerraformEmitted:
 
         assert "buildcache" not in services_tf
         assert "buildcache_repository" not in outputs_tf
+
+
+# ---------------------------------------------------------------------------
+# rc-8j7.2 / .4 — build-backend + cache-mode config flows through the provider
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfigFlowsThroughProvider:
+    def _ctx_with_build(self, tmp_path, build_cfg: dict):
+        api_ctx = tmp_path / "api"
+        api_ctx.mkdir()
+        (api_ctx / "Dockerfile").write_text("FROM alpine\n")
+        ctx = _ctx(
+            tmp_path,
+            {
+                "api": ServiceSpec(
+                    name="api",
+                    cpu=256,
+                    memory=512,
+                    type="application",
+                    build_context=api_ctx,
+                ),
+            },
+        )
+        ctx.provider_config["ecs"]["build"] = build_cfg
+        return ctx
+
+    def _runner(self, tmp_path):
+        runner = mock.MagicMock()
+        runner.output.return_value = {
+            "ecr_repositories": {
+                "value": {
+                    "api": "111.dkr.ecr.us-east-1.amazonaws.com/img-test/api",
+                }
+            },
+            "buildcache_repository": {
+                "value": "111.dkr.ecr.us-east-1.amazonaws.com/img-test/buildcache",
+            },
+        }
+        return runner
+
+    def _auth_token(self, mock_session):
+        token = base64.b64encode(b"AWS:pw").decode()
+        mock_session.client.return_value.get_authorization_token.return_value = {
+            "authorizationData": [
+                {
+                    "authorizationToken": token,
+                    "proxyEndpoint": "https://111.dkr.ecr.us-east-1.amazonaws.com",
+                }
+            ],
+        }
+
+    def test_cache_mode_min_reaches_buildx_cmd(self, tmp_path, mock_session):
+        # provider_config.ecs.build.cache_mode=min must land in --cache-to.
+        ctx = self._ctx_with_build(tmp_path, {"cache_mode": "min"})
+        runner = self._runner(tmp_path)
+        self._auth_token(mock_session)
+        provider = ECSProvider(
+            runner_factory=lambda d: runner,
+            session_factory=lambda c: mock_session,
+        )
+        popen_cmds: list[list] = []
+
+        def _fake_popen(cmd, *args, **kwargs):
+            popen_cmds.append(cmd)
+            proc = mock.Mock()
+            proc.stdout = mock.Mock()
+            proc.stdout.readline.return_value = ""
+            proc.stdout.close = mock.Mock()
+            proc.stderr = mock.Mock()
+            proc.stderr.readline.return_value = ""
+            proc.stderr.close = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.kill = mock.Mock()
+            return proc
+
+        with (
+            mock.patch("subprocess.run") as sub_run,
+            mock.patch("subprocess.Popen", side_effect=_fake_popen),
+        ):
+            sub_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            provider.deploy(ctx)
+
+        cmds = popen_cmds + [c.args[0] for c in sub_run.call_args_list]
+        buildx = [
+            c
+            for c in cmds
+            if len(c) >= 3 and c[1] == "buildx" and c[2] == "build"
+        ]
+        assert len(buildx) == 1
+        ct_idx = buildx[0].index("--cache-to")
+        assert ",mode=min," in buildx[0][ct_idx + 1]
+
+    def test_unknown_backend_raises_provider_config_error(
+        self, tmp_path, mock_session
+    ):
+        from remote_compose.provider.base import ProviderConfigError
+
+        ctx = self._ctx_with_build(tmp_path, {"backend": "not-a-backend"})
+        runner = self._runner(tmp_path)
+        provider = ECSProvider(
+            runner_factory=lambda d: runner,
+            session_factory=lambda c: mock_session,
+        )
+        with pytest.raises(ProviderConfigError, match="not-a-backend"):
+            provider.deploy(ctx)

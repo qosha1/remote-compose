@@ -42,6 +42,17 @@ class ImageBuildSpec:
     # since the last build (the registry cache may otherwise return
     # stale layers that don't reflect the user's edits).
     no_cache: bool = False
+    # rc-8j7.4: registry cache EXPORT mode for --cache-to. "max" (default)
+    # exports every intermediate layer so multi-stage pip/apt stages survive
+    # across machines; "min" exports only the final stage (smaller, faster
+    # round-trip, but cold pip layers). Only meaningful when cache_to is set.
+    cache_mode: str = "max"
+    # rc-8j7.4: when True, build via buildx `--push` — build AND push to the
+    # tags in one buildkit step — instead of `--load` + a separate
+    # `docker push`. Forces the buildx path even without cache args. Requires
+    # a working buildx builder + prior registry auth. Default False preserves
+    # the `--load` + ImagePusher path.
+    push: bool = False
 
 
 # rc-mtt: env-var knobs.
@@ -61,6 +72,80 @@ def _disable_buildcache_set() -> bool:
         "yes",
         "on",
     }
+
+
+# rc-8j7.5: the cache-to option suffix ECR requires. image-manifest=true +
+# oci-mediatypes=true make buildkit export an OCI image manifest instead of
+# its default manifest-list cache manifest (which ECR rejects). Kept as a
+# single constant so the local builder and the remote (CodeBuild) buildspec
+# format the cache export byte-identically.
+_CACHE_TO_ECR_SUFFIX = "image-manifest=true,oci-mediatypes=true"
+
+
+def resolve_dockerfile(spec: "ImageBuildSpec") -> Optional[Path]:
+    """The ``-f`` path for a spec, or None when it has no explicit dockerfile.
+
+    Docker resolves a relative ``-f`` against the caller's cwd, not the build
+    context, so a relative dockerfile is joined to the context (callers can
+    pass the compose-style ``./compose/.../Dockerfile`` relative path verbatim).
+    None means buildx uses the default ``<context>/Dockerfile``.
+    """
+    if not spec.dockerfile:
+        return None
+    df = spec.dockerfile
+    if not df.is_absolute():
+        df = spec.context / df
+    return df
+
+
+def buildx_build_flags(
+    spec: "ImageBuildSpec",
+    *,
+    cache_from: list[str],
+    cache_to: list[str],
+    dockerfile: Optional[str],
+) -> list[str]:
+    """The buildx-build flags shared by every backend (rc-8j7.5).
+
+    Returns the argv slice AFTER ``docker buildx build [--builder X]
+    [--push|--load]`` and BEFORE the trailing context path: ``-f``,
+    ``--target``, ``--platform``, ``--no-cache``, ``--build-arg``,
+    ``--cache-from``, ``--cache-to``, ``-t``. The local builder and the remote
+    CodeBuild buildspec both call this so cache refs + tags are formatted
+    identically no matter WHERE the build runs. The caller owns the
+    docker/buildx/builder prefix, the ``--push`` vs ``--load`` choice, and the
+    trailing context path — those differ by backend (local uses ``--load`` +
+    its ``rc-cache`` builder + an absolute context; CodeBuild uses ``--push`` +
+    a fresh builder + a context path relative to the extracted tar root).
+
+    ``dockerfile`` is the already-resolved ``-f`` value the caller wants on
+    this invocation (an absolute path for the local backend, a path relative to
+    the extraction root for CodeBuild); None omits ``-f``.
+    """
+    args: list[str] = []
+    if dockerfile:
+        args += ["-f", dockerfile]
+    if spec.target:
+        args += ["--target", spec.target]
+    if spec.platform:
+        args += ["--platform", spec.platform]
+    if spec.no_cache:
+        args += ["--no-cache"]
+    for key, value in spec.build_args.items():
+        args += ["--build-arg", f"{key}={value}"]
+    for ref in cache_from:
+        args += ["--cache-from", f"type=registry,ref={ref}"]
+    for ref in cache_to:
+        # mode=max exports every intermediate layer (not just final-stage) —
+        # without it cache hits only land on the last stage and the pip/apt
+        # layers rebuild every time. mode is config-driven (default max).
+        args += [
+            "--cache-to",
+            f"type=registry,ref={ref},mode={spec.cache_mode},{_CACHE_TO_ECR_SUFFIX}",
+        ]
+    for tag in spec.tags:
+        args += ["-t", tag]
+    return args
 
 
 class ImageBuilder:
@@ -184,7 +269,10 @@ class ImageBuilder:
         cache_from: list[str],
         cache_to: list[str],
     ) -> list[str]:
-        use_buildx = bool(cache_from or cache_to)
+        # rc-8j7.4: --push also requires buildx (classic `docker build` can't
+        # build-and-push in one step), so force the buildx path when push is
+        # requested even if no cache args are set.
+        use_buildx = bool(cache_from or cache_to or spec.push)
         builder_name = None
         if use_buildx:
             # Registry cache export (--cache-to type=registry) needs the
@@ -198,50 +286,32 @@ class ImageBuilder:
                 cache_from, cache_to = [], []
         if use_buildx:
             cmd = [self.docker_bin, "buildx", "build", "--builder", builder_name]
-            # --load brings the built image into the local docker image
-            # store so the subsequent `docker push` (against each tag) can
-            # find it. Without --load buildx would only export to the
-            # registry cache and the push would 404.
-            cmd.append("--load")
+            if spec.push:
+                # rc-8j7.4: build AND push to the registry in one buildkit
+                # step — no separate `docker push`. Mutually exclusive with
+                # --load (buildx rejects both).
+                cmd.append("--push")
+            else:
+                # --load brings the built image into the local docker image
+                # store so the subsequent `docker push` (against each tag) can
+                # find it. Without --load buildx would only export to the
+                # registry cache and the push would 404.
+                cmd.append("--load")
         else:
             cmd = [self.docker_bin, "build"]
-        if spec.dockerfile:
-            # Docker resolves a relative -f against the caller's cwd, not the
-            # build context. Join to the context so callers can pass the
-            # compose-style "./compose/.../Dockerfile" relative path verbatim.
-            df = spec.dockerfile
-            if not df.is_absolute():
-                df = spec.context / df
-            cmd += ["-f", str(df)]
-        if spec.target:
-            cmd += ["--target", spec.target]
-        if spec.platform:
-            cmd += ["--platform", spec.platform]
-        if spec.no_cache:
-            # rc-2kp: --no-cache forces every layer to rebuild from scratch.
-            # Combined with the empty cache_from above, this guarantees the
-            # next build reflects on-disk source state, not the registry's
-            # frozen idea of it.
-            cmd += ["--no-cache"]
-        for key, value in spec.build_args.items():
-            cmd += ["--build-arg", f"{key}={value}"]
-        for ref in cache_from:
-            cmd += ["--cache-from", f"type=registry,ref={ref}"]
-        for ref in cache_to:
-            # mode=max exports every intermediate layer (not just final-stage)
-            # — without it cache hits only land on the last stage and the
-            # `pip install` layer rebuilds every time.
-            # image-manifest=true,oci-mediatypes=true: ECR rejects buildkit's
-            # default cache manifest (the manifest-list form) — it only accepts
-            # an OCI image manifest. Without these the cache export to ECR fails
-            # and nothing persists. Harmless on registries that accept either.
-            cmd += [
-                "--cache-to",
-                f"type=registry,ref={ref},mode=max"
-                ",image-manifest=true,oci-mediatypes=true",
-            ]
-        for tag in spec.tags:
-            cmd += ["-t", tag]
+        # rc-8j7.5: the -f/--target/--platform/--no-cache/--build-arg/
+        # --cache-from/--cache-to/-t flags are built by the shared
+        # buildx_build_flags() so the local build and the remote CodeBuild
+        # buildspec stay byte-identical (same cache refs, same tags). --no-cache
+        # (rc-2kp) forces every layer to rebuild from on-disk source rather than
+        # the registry's frozen layers; the empty cache_from above pairs with it.
+        df = resolve_dockerfile(spec)
+        cmd += buildx_build_flags(
+            spec,
+            cache_from=cache_from,
+            cache_to=cache_to,
+            dockerfile=str(df) if df else None,
+        )
         cmd.append(str(spec.context))
 
         self._emit(f"$ {' '.join(cmd)}")

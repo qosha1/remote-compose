@@ -127,10 +127,10 @@ class TestEcsBuildFilter:
         }
 
         # Patch the actual builder/pusher to record what would be built
-        # without running docker.
-        # _build_and_push_images does `from ...image import ImageBuilder, ...`
-        # at call time. Patch the package-level re-exports + the auth module.
-        import remote_compose.image as _image
+        # without running docker. rc-8j7.1: _build_and_push_images builds
+        # through the LocalBuildBackend, which constructs ImageBuilder /
+        # ImagePusher from image.backend — patch that seam + the auth module.
+        import remote_compose.image.backend as _image
         import remote_compose.provider.ecs.ecr_auth as _auth
 
         built = []
@@ -204,7 +204,8 @@ class TestEcsBuildFilter:
             }
         }
 
-        import remote_compose.image as _image
+        # rc-8j7.1: builder/pusher are constructed inside the LocalBuildBackend.
+        import remote_compose.image.backend as _image
         import remote_compose.provider.ecs.ecr_auth as _auth
 
         built = []

@@ -50,8 +50,13 @@ _OUTPUTS = {
 
 @pytest.fixture
 def stub_image_modules():
-    """Stub ImageBuilder/ImagePusher/ECRAuthenticator + return spies."""
-    import remote_compose.image as _image
+    """Stub ImageBuilder/ImagePusher/ECRAuthenticator + return spies.
+
+    rc-8j7.1: the provider now builds+pushes through the LocalBuildBackend,
+    which constructs ImageBuilder/ImagePusher from ``image.backend`` — so
+    the stubs patch that seam, not the ``image`` package re-exports.
+    """
+    import remote_compose.image.backend as _image
     import remote_compose.provider.ecs.ecr_auth as _auth
 
     built = []
