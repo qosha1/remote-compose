@@ -544,3 +544,36 @@ class TestStreamAndWait:
             # returns (does not hang) despite the never-ending stream.
             self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
         assert logs.get_log_events.call_count < 50
+
+    def test_running_drain_is_bounded_so_status_is_rechecked(self):
+        # Regression (rc-8j7.7 round 2): while IN_PROGRESS, CloudWatch keeps
+        # handing back advancing pages (ingestion lag) and never reports caught
+        # up. The RUNNING-phase drain must be bounded by the poll interval so the
+        # loop re-checks buildStatus and reaches the terminal status — instead of
+        # one unbounded drain chasing the stream for minutes past a finished
+        # build (the ~5-min live deploy-step regression the first fix missed).
+        counter = itertools.count()
+
+        def endless(**kwargs):
+            i = next(counter)
+            return {
+                "events": [{"message": f"line {i}\n"}],
+                "nextForwardToken": f"f/{i}",
+            }
+
+        logs = mock.MagicMock()
+        logs.get_log_events.side_effect = endless
+        # Two IN_PROGRESS checks then SUCCEEDED: the loop can only reach the 3rd
+        # status if each running drain RETURNS (bounded) instead of swallowing it.
+        cb = self._cb(["IN_PROGRESS", "IN_PROGRESS", "SUCCEEDED"])
+        clock = itertools.count(0, 1.0)  # monotonic advances 1s per call
+        with mock.patch("remote_compose.image.backend.time.sleep"), mock.patch(
+            "remote_compose.image.backend.time.monotonic",
+            side_effect=lambda: next(clock),
+        ):
+            # Must return (not hang) and reach the terminal status check.
+            self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
+        # The loop re-checked status all three times — the running drain didn't
+        # block it chasing the endless stream.
+        assert cb.batch_get_builds.call_count == 3
+        assert logs.get_log_events.call_count < 100
