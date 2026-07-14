@@ -753,11 +753,20 @@ class AwsCodeBuildBackend(BuildBackend):
                 if group and stream:
                     self._final_drain(logs, group, stream, forward_token, tail)
                 break
-            # Still running: drain EVERY page currently available so streaming
-            # keeps pace with a chatty build, then poll again shortly.
+            # Still running: drain the pages available NOW, BOUNDED by one poll
+            # interval, so the loop re-checks buildStatus promptly. Without a
+            # deadline a single drain chases CloudWatch's ingestion lag for
+            # minutes past a build that already finished (CloudWatch keeps
+            # handing back new pages as it catches up), blocking the terminal
+            # check — that was the ~5-min deploy-step regression on a ~32s build.
             if group and stream:
                 forward_token = self._drain_logs(
-                    logs, group, stream, forward_token, tail
+                    logs,
+                    group,
+                    stream,
+                    forward_token,
+                    tail,
+                    deadline=time.monotonic() + CODEBUILD_POLL_INTERVAL_SECONDS,
                 )
             time.sleep(CODEBUILD_POLL_INTERVAL_SECONDS)
         if status != "SUCCEEDED":
