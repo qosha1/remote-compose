@@ -11,6 +11,7 @@ directly.
 
 from __future__ import annotations
 
+import itertools
 import zipfile
 import io
 from pathlib import Path
@@ -23,6 +24,7 @@ from remote_compose.image.backend import (
     AwsCodeBuildBackend,
     CodeBuildConfig,
     CodeBuildError,
+    CODEBUILD_FINAL_DRAIN_SECONDS,
     create_build_backend,
     generate_codebuild_buildspec,
     zip_build_context,
@@ -422,3 +424,123 @@ class TestFactoryThreadsRemoteInputs:
             "local", session=object(), codebuild=CodeBuildConfig(), project="p"
         )
         assert backend.name == "local"
+
+
+# ---------------------------------------------------------------------------
+# Log streaming / poll loop (rc-8j7.7 — CodeBuild log-drain / poll lag)
+#
+# The build is ~38s of real work but the deploy step measured ~6min: the loop
+# drained ONE log page per POLL_INTERVAL sleep so it fell minutes behind a
+# chatty stream. These lock the fix: drain every available page each poll, and
+# on a terminal status do ONE bounded final drain instead of crawling
+# CloudWatch to completion.
+# ---------------------------------------------------------------------------
+
+
+class FakeLogs:
+    """A CloudWatch `logs` stand-in that serves paged events by token.
+
+    ``get_log_events`` returns one page per call and advances the forward
+    token; once the caller walks past the last page it hands back the SAME
+    token with no events — exactly how real CloudWatch signals "caught up".
+    """
+
+    def __init__(self, pages: list[list[str]]):
+        self._pages = pages
+        self.call_count = 0
+
+    def get_log_events(self, **kwargs):
+        self.call_count += 1
+        token = kwargs.get("nextToken")
+        idx = 0 if token is None else int(token.split("/")[1])
+        if idx >= len(self._pages):
+            # Caught up: same token back, no new events.
+            return {"events": [], "nextForwardToken": token or "f/0"}
+        events = [{"message": m + "\n"} for m in self._pages[idx]]
+        return {"events": events, "nextForwardToken": f"f/{idx + 1}"}
+
+
+class TestStreamAndWait:
+    def _backend(self, logs, progress=None):
+        return AwsCodeBuildBackend(
+            session=FakeSession({"logs": logs}),
+            codebuild=CodeBuildConfig(service_role_arn=ROLE),
+            project="proj",
+            progress=progress,
+        )
+
+    def _cb(self, statuses):
+        cb = mock.MagicMock()
+        cb.batch_get_builds.side_effect = [
+            {
+                "builds": [
+                    {
+                        "buildStatus": s,
+                        "logs": {"groupName": "/g", "streamName": "s1"},
+                    }
+                ]
+            }
+            for s in statuses
+        ]
+        return cb
+
+    def test_drains_all_pages_and_stops_promptly_on_success(self):
+        # Three pages of logs, then SUCCEEDED. Every line must surface, exactly
+        # once, and the loop must NOT keep polling once terminal.
+        logs = FakeLogs([["a1", "a2"], ["b1", "b2"], ["c1", "c2"]])
+        cb = self._cb(["IN_PROGRESS", "SUCCEEDED"])
+        seen: list[str] = []
+        with mock.patch("remote_compose.image.backend.time.sleep") as slept:
+            self._backend(logs, progress=seen.append)._stream_and_wait(
+                cb, "bid", "us-east-2"
+            )
+        # nothing dropped, nothing duplicated.
+        for line in ("a1", "a2", "b1", "b2", "c1", "c2"):
+            assert sum(1 for e in seen if line in e) == 1
+        # exactly the two status checks — did not loop for extra intervals.
+        assert cb.batch_get_builds.call_count == 2
+        # slept only while running (once), never after terminal.
+        assert slept.call_count == 1
+        # bounded log reads: 3 pages + a caught-up probe + the final-drain
+        # probes — not an unbounded crawl.
+        assert logs.call_count <= 8
+
+    def test_failed_status_raises_with_log_tail(self):
+        logs = FakeLogs([["ERROR: pip install failed", "  see trace above"]])
+        cb = self._cb(["IN_PROGRESS", "FAILED"])
+        with mock.patch("remote_compose.image.backend.time.sleep"):
+            with pytest.raises(CodeBuildError) as exc:
+                self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
+        assert "FAILED" in str(exc.value)
+        assert "ERROR: pip install failed" in str(exc.value)
+
+    def test_final_drain_is_time_bounded_on_endless_stream(self):
+        # A stream that NEVER reports caught up: every page advances the token
+        # AND carries an event. The bounded final drain must stop at the time
+        # cap instead of crawling CloudWatch forever.
+        counter = itertools.count()
+
+        def endless(**kwargs):
+            i = next(counter)
+            return {
+                "events": [{"message": f"line {i}\n"}],
+                "nextForwardToken": f"f/{i}",
+            }
+
+        logs = mock.MagicMock()
+        logs.get_log_events.side_effect = endless
+        # Terminal on the first status check → straight into the bounded final
+        # drain (skips the unbounded running-phase drain).
+        cb = self._cb(["SUCCEEDED"])
+        # Fake clock: base 0 sets deadline = CODEBUILD_FINAL_DRAIN_SECONDS; a
+        # few ticks later we cross it and the drain must bail.
+        ticks = iter(
+            [0.0, 1.0, 2.0, CODEBUILD_FINAL_DRAIN_SECONDS + 1, CODEBUILD_FINAL_DRAIN_SECONDS + 2]
+        )
+        with mock.patch("remote_compose.image.backend.time.sleep"), mock.patch(
+            "remote_compose.image.backend.time.monotonic",
+            side_effect=lambda: next(ticks, CODEBUILD_FINAL_DRAIN_SECONDS + 99),
+        ):
+            # returns (does not hang) despite the never-ending stream.
+            self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
+        assert logs.get_log_events.call_count < 50

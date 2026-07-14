@@ -79,10 +79,20 @@ CODEBUILD_REMOTE_BUILDER = "rc-remote"
 CODEBUILD_SOURCE_KEY_PREFIX = "rc-build-context"
 # Derived source-bucket name prefix when none is configured.
 CODEBUILD_SOURCE_BUCKET_PREFIX = "rc-build-source"
-# How often to poll BatchGetBuilds while streaming logs, and how many trailing
-# log lines to keep for the failure message.
-CODEBUILD_POLL_INTERVAL_SECONDS = 5
+# How often to poll BatchGetBuilds while the build runs. Kept short so a
+# terminal buildStatus is noticed within a couple seconds of the ~38s build
+# actually finishing — the old 5s value let the poll loop lag the build.
+CODEBUILD_POLL_INTERVAL_SECONDS = 2
+# How many trailing log lines to keep for the failure message.
 CODEBUILD_LOG_TAIL_LINES = 50
+# Once the build reports terminal, CloudWatch may still be shipping the last
+# few log pages. We do ONE bounded catch-up drain — keep pulling late pages
+# until the stream stops advancing for CODEBUILD_FINAL_DRAIN_EMPTY_TRIES
+# consecutive passes OR this many seconds elapse, whichever comes first. This
+# is the cap that stops rc from crawling CloudWatch for minutes after a build
+# that already succeeded.
+CODEBUILD_FINAL_DRAIN_SECONDS = 15
+CODEBUILD_FINAL_DRAIN_EMPTY_TRIES = 2
 # CodeBuild buildStatus values that mean the build is finished.
 CODEBUILD_TERMINAL_STATUSES = (
     "SUCCEEDED",
@@ -735,12 +745,20 @@ class AwsCodeBuildBackend(BuildBackend):
             log_info = build.get("logs") or {}
             group = log_info.get("groupName")
             stream = log_info.get("streamName")
+            if status in CODEBUILD_TERMINAL_STATUSES:
+                # The build is done — do ONE bounded catch-up drain (not the
+                # unbounded running-phase drain) and return promptly. Waiting
+                # for CloudWatch to fully catch up here is what made the deploy
+                # step take minutes past a build that already finished.
+                if group and stream:
+                    self._final_drain(logs, group, stream, forward_token, tail)
+                break
+            # Still running: drain EVERY page currently available so streaming
+            # keeps pace with a chatty build, then poll again shortly.
             if group and stream:
                 forward_token = self._drain_logs(
                     logs, group, stream, forward_token, tail
                 )
-            if status in CODEBUILD_TERMINAL_STATUSES:
-                break
             time.sleep(CODEBUILD_POLL_INTERVAL_SECONDS)
         if status != "SUCCEEDED":
             tail_text = "\n".join(tail) if tail else "(no logs captured)"
@@ -756,23 +774,69 @@ class AwsCodeBuildBackend(BuildBackend):
         stream: str,
         forward_token: Optional[str],
         tail: "deque[str]",
+        deadline: Optional[float] = None,
     ) -> Optional[str]:
-        kwargs: dict[str, Any] = {
-            "logGroupName": group,
-            "logStreamName": stream,
-            "startFromHead": True,
-        }
-        if forward_token is not None:
-            kwargs["nextToken"] = forward_token
-        try:
-            resp = logs.get_log_events(**kwargs)
-        except Exception:  # noqa: BLE001 — stream may not exist yet
-            return forward_token
-        for event in resp.get("events") or []:
-            msg = (event.get("message") or "").rstrip("\n")
-            self._emit(f"  [codebuild] {msg}")
-            tail.append(msg)
-        return resp.get("nextForwardToken", forward_token)
+        """Drain ALL currently-available log pages (not just one).
+
+        ``get_log_events`` returns at most one page per call; a chatty build
+        emits many. Loop until CloudWatch reports the reader has caught up —
+        it hands back the SAME ``nextForwardToken`` (and an empty page) once
+        there's nothing more forward. When ``deadline`` (a ``time.monotonic``
+        value) is supplied, stop early once it passes so a stream that never
+        reports "caught up" can't spin forever.
+        """
+        token = forward_token
+        while True:
+            kwargs: dict[str, Any] = {
+                "logGroupName": group,
+                "logStreamName": stream,
+                "startFromHead": True,
+            }
+            if token is not None:
+                kwargs["nextToken"] = token
+            try:
+                resp = logs.get_log_events(**kwargs)
+            except Exception:  # noqa: BLE001 — stream may not exist yet
+                return token
+            events = resp.get("events") or []
+            for event in events:
+                msg = (event.get("message") or "").rstrip("\n")
+                self._emit(f"  [codebuild] {msg}")
+                tail.append(msg)
+            next_token = resp.get("nextForwardToken")
+            # Caught up: no events, or the token didn't advance.
+            if not events or next_token is None or next_token == token:
+                return next_token if next_token is not None else token
+            token = next_token
+            if deadline is not None and time.monotonic() >= deadline:
+                return token
+
+    def _final_drain(
+        self,
+        logs: Any,
+        group: str,
+        stream: str,
+        forward_token: Optional[str],
+        tail: "deque[str]",
+    ) -> Optional[str]:
+        """Bounded catch-up drain after the build reports terminal.
+
+        CloudWatch lags the build's terminal status by a page or few; keep
+        pulling until the stream stops advancing for
+        :data:`CODEBUILD_FINAL_DRAIN_EMPTY_TRIES` consecutive passes OR
+        :data:`CODEBUILD_FINAL_DRAIN_SECONDS` elapses — never block the deploy
+        on CloudWatch fully catching up.
+        """
+        deadline = time.monotonic() + CODEBUILD_FINAL_DRAIN_SECONDS
+        token = forward_token
+        idle = 0
+        while idle < CODEBUILD_FINAL_DRAIN_EMPTY_TRIES:
+            new_token = self._drain_logs(logs, group, stream, token, tail, deadline)
+            idle = idle + 1 if new_token == token else 0
+            token = new_token
+            if time.monotonic() >= deadline:
+                break
+        return token
 
     def _emit(self, msg: str) -> None:
         if self._progress:
