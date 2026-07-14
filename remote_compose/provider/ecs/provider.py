@@ -1541,7 +1541,16 @@ class ECSProvider(Provider):
             services_filter=services_filter,
             requested_tag=tag,
         )
-        if pushed:
+        if pushed and not getattr(ctx, "skip_force_roll", False):
+            # rc-8j7.8: --no-roll (skip_force_roll) MUST suppress the roll here
+            # too, exactly like the terraform path (see deploy() above). Without
+            # this guard a `deploy --no-state --no-roll` still force-rolls and
+            # blocks on _wait_for_services_stable (~5min) — the CI split builds
+            # with --no-roll, reconciles secrets + migrates, THEN rolls in a
+            # later step, so a roll here is a duplicate that also fires BEFORE
+            # migrations run. This was the phantom ~5min "build step", not the
+            # CodeBuild log drain.
+            #
             # Only the image-group OWNER is built+pushed, but EVERY sibling
             # that references that shared image must be force-rolled too —
             # otherwise siblings keep running the old image while the new
