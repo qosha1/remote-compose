@@ -112,9 +112,7 @@ class TestLocalBuildBackendDelegates:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             backend = create_build_backend("local")
             pushed = backend.build_and_push([_spec("api"), _spec("worker")])
@@ -129,14 +127,10 @@ class TestLocalBuildBackendDelegates:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             backend = create_build_backend("local")
-            pushed = backend.build_and_push(
-                [_spec("z"), _spec("a"), _spec("m")]
-            )
+            pushed = backend.build_and_push([_spec("z"), _spec("a"), _spec("m")])
         assert pushed == ["z", "a", "m"]
 
     def test_empty_specs_is_noop(self):
@@ -145,9 +139,7 @@ class TestLocalBuildBackendDelegates:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             backend = create_build_backend("local")
             assert backend.build_and_push([]) == []
@@ -157,12 +149,8 @@ class TestLocalBuildBackendDelegates:
     def test_authenticator_and_docker_bin_threaded_through(self):
         auth = object()
         with (
-            mock.patch(
-                "remote_compose.image.backend.ImageBuilder"
-            ) as builder_cls,
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher"
-            ) as pusher_cls,
+            mock.patch("remote_compose.image.backend.ImageBuilder") as builder_cls,
+            mock.patch("remote_compose.image.backend.ImagePusher") as pusher_cls,
         ):
             create_build_backend(
                 "local", authenticator=auth, docker_bin="/usr/bin/docker"
@@ -181,9 +169,7 @@ class TestLocalBuildBackendDelegates:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             backend = create_build_backend("local")
             spec = _spec("api")
@@ -242,9 +228,7 @@ class TestResolveBuildConfig:
 
     def test_unknown_backend_name_raises(self):
         with pytest.raises(UnknownBuildBackendError):
-            resolve_build_config(
-                {"ecs": {"build": {"backend": "wat"}}}, {}, env={}
-            )
+            resolve_build_config({"ecs": {"build": {"backend": "wat"}}}, {}, env={})
 
     def test_cache_mode_and_push_and_workers_resolved(self):
         cfg = resolve_build_config(
@@ -295,9 +279,7 @@ class TestLocalBuildBackendParallel:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             return create_build_backend("local", max_workers=max_workers)
 
@@ -371,9 +353,7 @@ class TestInstrumentation:
             mock.patch(
                 "remote_compose.image.backend.ImageBuilder", return_value=builder
             ),
-            mock.patch(
-                "remote_compose.image.backend.ImagePusher", return_value=pusher
-            ),
+            mock.patch("remote_compose.image.backend.ImagePusher", return_value=pusher),
         ):
             backend = create_build_backend("local", progress=events.append)
             backend.build_and_push([_spec("api"), _spec("worker")])

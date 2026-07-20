@@ -198,9 +198,7 @@ class LocalBuildBackend(BuildBackend):
         )
         return pushed
 
-    def _build_parallel(
-        self, specs: list[ImageBuildSpec], workers: int
-    ) -> list[str]:
+    def _build_parallel(self, specs: list[ImageBuildSpec], workers: int) -> list[str]:
         # Slot results by input index so the returned list stays in input
         # order even though builds finish out of order. The first spec to
         # raise fails the deploy (its exception propagates).
@@ -208,8 +206,7 @@ class LocalBuildBackend(BuildBackend):
         first_error: Optional[BaseException] = None
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(self._build_one, spec): i
-                for i, spec in enumerate(specs)
+                pool.submit(self._build_one, spec): i for i, spec in enumerate(specs)
             }
             for future in as_completed(futures):
                 idx = futures[future]
@@ -232,9 +229,7 @@ class LocalBuildBackend(BuildBackend):
         if not getattr(spec, "push", False):
             self._pusher.push(tags)
         # rc-8j7.6: per-image timing so before/after is measurable.
-        self._emit(
-            f"  {spec.service}: built+pushed in {time.monotonic() - start:.1f}s"
-        )
+        self._emit(f"  {spec.service}: built+pushed in {time.monotonic() - start:.1f}s")
         return spec.service
 
     def _emit(self, msg: str) -> None:
@@ -625,9 +620,7 @@ class AwsCodeBuildBackend(BuildBackend):
         build_id = self._start_build(
             cb, project_name, bucket, key, buildspec, region, specs
         )
-        self._emit(
-            f"  codebuild: started build {build_id} on project {project_name!r}"
-        )
+        self._emit(f"  codebuild: started build {build_id} on project {project_name!r}")
 
         # 6. stream logs + poll to completion (raises on non-SUCCEEDED).
         self._stream_and_wait(cb, build_id, region)
@@ -993,11 +986,11 @@ def _resolve_codebuild_config(
 
     return CodeBuildConfig(
         project_name=_pick(_CODEBUILD_PROJECT_ENV, "project_name", None) or None,
-        service_role_arn=(
-            _pick(_CODEBUILD_ROLE_ENV, "service_role_arn", None) or None
-        ),
+        service_role_arn=(_pick(_CODEBUILD_ROLE_ENV, "service_role_arn", None) or None),
         compute_type=str(
-            _pick(_CODEBUILD_COMPUTE_ENV, "compute_type", DEFAULT_CODEBUILD_COMPUTE_TYPE)
+            _pick(
+                _CODEBUILD_COMPUTE_ENV, "compute_type", DEFAULT_CODEBUILD_COMPUTE_TYPE
+            )
         ),
         image=str(_pick(_CODEBUILD_IMAGE_ENV, "image", DEFAULT_CODEBUILD_IMAGE)),
         source_bucket=_pick(_CODEBUILD_BUCKET_ENV, "source_bucket", None) or None,
