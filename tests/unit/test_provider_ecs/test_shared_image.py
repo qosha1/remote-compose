@@ -237,9 +237,7 @@ class TestShareImageReposOptOut:
 
     def test_emission_keeps_per_service_repos(self, tmp_path):
         out = tmp_path / "tf"
-        ECSProvider().emit_terraform(
-            _ctx_no_share(tmp_path, _shared3()), out
-        )
+        ECSProvider().emit_terraform(_ctx_no_share(tmp_path, _shared3()), out)
         services_tf = (out / "services.tf").read_text()
         for svc in ("django", "celery_worker", "celery_beat"):
             assert f'resource "aws_ecr_repository" "{svc}"' in services_tf

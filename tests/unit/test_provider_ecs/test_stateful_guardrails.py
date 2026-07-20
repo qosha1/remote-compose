@@ -103,14 +103,22 @@ def _emit_svc(tmp_path: Path, name: str, *, stateful: bool) -> str:
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
         provider_config={
-            "ecs": {"region": "us-east-2", "cluster": "app-prod", "vpc_cidr": "10.0.0.0/16"}
+            "ecs": {
+                "region": "us-east-2",
+                "cluster": "app-prod",
+                "vpc_cidr": "10.0.0.0/16",
+            }
         },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             name: ServiceSpec(
-                name=name, cpu=256, memory=512, type="infrastructure",
-                image="redis:7", stateful=stateful,
+                name=name,
+                cpu=256,
+                memory=512,
+                type="infrastructure",
+                image="redis:7",
+                stateful=stateful,
             )
         },
         secrets=[],

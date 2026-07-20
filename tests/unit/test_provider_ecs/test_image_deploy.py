@@ -708,17 +708,13 @@ class TestBuildConfigFlowsThroughProvider:
 
         cmds = popen_cmds + [c.args[0] for c in sub_run.call_args_list]
         buildx = [
-            c
-            for c in cmds
-            if len(c) >= 3 and c[1] == "buildx" and c[2] == "build"
+            c for c in cmds if len(c) >= 3 and c[1] == "buildx" and c[2] == "build"
         ]
         assert len(buildx) == 1
         ct_idx = buildx[0].index("--cache-to")
         assert ",mode=min," in buildx[0][ct_idx + 1]
 
-    def test_unknown_backend_raises_provider_config_error(
-        self, tmp_path, mock_session
-    ):
+    def test_unknown_backend_raises_provider_config_error(self, tmp_path, mock_session):
         from remote_compose.provider.base import ProviderConfigError
 
         ctx = self._ctx_with_build(tmp_path, {"backend": "not-a-backend"})

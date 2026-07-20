@@ -715,8 +715,8 @@ class ECSProvider(Provider):
             # cost: a stateless service goes through stop-then-start
             # rolling deploy (slower) instead of overlap. Acceptable.
             singleton = _looks_like_singleton_scheduler(name, spec.command)
-            stateful = len(svc_mounts) > 0 or singleton or getattr(
-                spec, "stateful", False
+            stateful = (
+                len(svc_mounts) > 0 or singleton or getattr(spec, "stateful", False)
             )
             # rc-kr7: a single-writer EFS volume (postgres data, sqlite) is one
             # access point; replicas>1 runs concurrent tasks against the same

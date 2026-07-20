@@ -17,7 +17,11 @@ from remote_compose.provider.ecs import ECSProvider
 
 
 def _ctx(tmp_path: Path, *, idle_timeout: int | None) -> DeployContext:
-    ecs: dict = {"region": "us-west-2", "cluster": "myapp-prod", "vpc_cidr": "10.0.0.0/16"}
+    ecs: dict = {
+        "region": "us-west-2",
+        "cluster": "myapp-prod",
+        "vpc_cidr": "10.0.0.0/16",
+    }
     if idle_timeout is not None:
         ecs["idle_timeout"] = idle_timeout
     return DeployContext(
@@ -30,8 +34,13 @@ def _ctx(tmp_path: Path, *, idle_timeout: int | None) -> DeployContext:
         services={
             # public service so the provider emits the ALB (aws_lb.main)
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512, type="proxy",
-                public=True, port=80, health_check_path="/",
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/",
             ),
         },
         secrets=[],

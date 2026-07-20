@@ -344,9 +344,10 @@ class TestBuildAndPushFlow:
         cp = clients["codebuild"].create_project.call_args.kwargs
         assert cp["name"] == "custom-proj"
         assert cp["environment"]["computeType"] == "BUILD_GENERAL1_2XLARGE"
-        assert clients["codebuild"].start_build.call_args.kwargs[
-            "projectName"
-        ] == "custom-proj"
+        assert (
+            clients["codebuild"].start_build.call_args.kwargs["projectName"]
+            == "custom-proj"
+        )
 
     def test_configured_source_bucket_skips_derivation(self, tmp_path):
         root = _repo_tree(tmp_path)
@@ -535,11 +536,20 @@ class TestStreamAndWait:
         # Fake clock: base 0 sets deadline = CODEBUILD_FINAL_DRAIN_SECONDS; a
         # few ticks later we cross it and the drain must bail.
         ticks = iter(
-            [0.0, 1.0, 2.0, CODEBUILD_FINAL_DRAIN_SECONDS + 1, CODEBUILD_FINAL_DRAIN_SECONDS + 2]
+            [
+                0.0,
+                1.0,
+                2.0,
+                CODEBUILD_FINAL_DRAIN_SECONDS + 1,
+                CODEBUILD_FINAL_DRAIN_SECONDS + 2,
+            ]
         )
-        with mock.patch("remote_compose.image.backend.time.sleep"), mock.patch(
-            "remote_compose.image.backend.time.monotonic",
-            side_effect=lambda: next(ticks, CODEBUILD_FINAL_DRAIN_SECONDS + 99),
+        with (
+            mock.patch("remote_compose.image.backend.time.sleep"),
+            mock.patch(
+                "remote_compose.image.backend.time.monotonic",
+                side_effect=lambda: next(ticks, CODEBUILD_FINAL_DRAIN_SECONDS + 99),
+            ),
         ):
             # returns (does not hang) despite the never-ending stream.
             self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
@@ -567,9 +577,12 @@ class TestStreamAndWait:
         # status if each running drain RETURNS (bounded) instead of swallowing it.
         cb = self._cb(["IN_PROGRESS", "IN_PROGRESS", "SUCCEEDED"])
         clock = itertools.count(0, 1.0)  # monotonic advances 1s per call
-        with mock.patch("remote_compose.image.backend.time.sleep"), mock.patch(
-            "remote_compose.image.backend.time.monotonic",
-            side_effect=lambda: next(clock),
+        with (
+            mock.patch("remote_compose.image.backend.time.sleep"),
+            mock.patch(
+                "remote_compose.image.backend.time.monotonic",
+                side_effect=lambda: next(clock),
+            ),
         ):
             # Must return (not hang) and reach the terminal status check.
             self._backend(logs)._stream_and_wait(cb, "bid", "us-east-2")
