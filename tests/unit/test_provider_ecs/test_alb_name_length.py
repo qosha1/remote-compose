@@ -25,14 +25,21 @@ def _alb_tf(tmp_path: Path, *, project: str) -> str:
         project=project,
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {"region": "us-west-2", "cluster": "c", "vpc_cidr": "10.0.0.0/16"}},
+        provider_config={
+            "ecs": {"region": "us-west-2", "cluster": "c", "vpc_cidr": "10.0.0.0/16"}
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
         services={
             # public service so the provider emits the ALB (aws_lb.main)
             "web": ServiceSpec(
-                name="web", cpu=256, memory=512, type="proxy",
-                public=True, port=80, health_check_path="/",
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/",
             ),
         },
         secrets=[],
@@ -83,7 +90,9 @@ def test_alb_fallback_name_fits_32_by_construction(tmp_path):
     """The truncate+md5 fallback is substr(project,0,A) + '-' + substr(md5,0,B);
     read A and B straight from the template and assert A+1+B <= 32, so bumping a
     substr bound into overflow territory fails here."""
-    a, b = _substr_bounds(_alb_name_expr(_alb_tf(tmp_path, project="foundry-tenant-marketing-agents")))
+    a, b = _substr_bounds(
+        _alb_name_expr(_alb_tf(tmp_path, project="foundry-tenant-marketing-agents"))
+    )
     assert a + 1 + b <= 32, f"fallback ALB name can reach {a + 1 + b} chars > 32"
 
 
