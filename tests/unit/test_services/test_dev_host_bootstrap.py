@@ -907,3 +907,63 @@ class TestWaitForPorts:
         monkeypatch.setattr("time.sleep", lambda *a: None)
         assert dev._wait_for_ports("1.2.3.4", [3011], timeout=30, interval=0) == []
         assert calls["n"] == 3
+
+
+class TestDestroyVerification:
+    """`destroy` must not report success when it destroyed nothing.
+
+    Terraform state lives in ./.rc/terraform-state/<name> — relative to the
+    CURRENT WORKING DIRECTORY. Running destroy from a different dir than the one
+    that ran `up` hands terraform an empty state: it destroys nothing and exits
+    0. rc printed "✓ destroyed" over a box that was still running and still
+    billing. Observed for real: `✓ destroyed 'rctest3'` followed by AWS
+    reporting that instance as `running`.
+    """
+
+    def _fake_boto(self, monkeypatch, states):
+        import sys as _sys
+        import types
+
+        reservations = [{"Instances": [{"State": {"Name": st}} for st in states]}]
+
+        class _Client:
+            def describe_instances(self, **kwargs):
+                return {"Reservations": reservations}
+
+        class _Session:
+            def __init__(self, *a, **k):
+                pass
+
+            def client(self, *a, **k):
+                return _Client()
+
+        fake = types.ModuleType("boto3")
+        fake.Session = _Session
+        monkeypatch.setitem(_sys.modules, "boto3", fake)
+
+    def test_running_instance_is_reported_as_alive(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        self._fake_boto(monkeypatch, ["running"])
+        assert dev._live_instance_states("rctest3", "us-west-1", None) == {"running"}
+
+    def test_terminated_instance_is_not_alive(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        self._fake_boto(monkeypatch, ["terminated", "shutting-down"])
+        assert dev._live_instance_states("rctest3", "us-west-1", None) == set()
+
+    def test_lookup_failure_does_not_block_the_command(self, monkeypatch):
+        import sys as _sys
+        import types
+
+        from remote_compose.cli_commands import dev
+
+        broken = types.ModuleType("boto3")
+
+        def _boom(*a, **k):
+            raise RuntimeError("no credentials")
+
+        broken.Session = _boom
+        monkeypatch.setitem(_sys.modules, "boto3", broken)
+        assert dev._live_instance_states("x", "us-west-1", None) == set()
