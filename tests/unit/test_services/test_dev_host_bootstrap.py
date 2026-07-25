@@ -852,3 +852,58 @@ class TestFailedComposeProjectsParsing:
     def test_garbage_lines_are_ignored(self, monkeypatch):
         dev = self._patch_ssh(monkeypatch, "nonsense\nfull\tNaN\nweb\t2\n")
         assert dev._failed_compose_projects("1.2.3.4", "PEM") == [("web", 2)]
+
+
+class TestWaitForPorts:
+    """`compose up -d` returning is not the same as the services being reachable.
+
+    Containers report Up while Django is still migrating and Next.js is still
+    compiling its first route, so --wait handed back a box whose ports answered
+    nothing for another few minutes.
+    """
+
+    def test_returns_empty_when_all_ports_accept(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        class _Sock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("socket.create_connection", lambda *a, **k: _Sock())
+        assert dev._wait_for_ports("1.2.3.4", [8012, 3011], timeout=5) == []
+
+    def test_reports_ports_that_never_listen(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        def _refuse(*a, **k):
+            raise OSError("refused")
+
+        monkeypatch.setattr("socket.create_connection", _refuse)
+        monkeypatch.setattr("time.sleep", lambda *a: None)
+        assert dev._wait_for_ports("1.2.3.4", [9999], timeout=1, interval=0) == [9999]
+
+    def test_stops_waiting_once_a_slow_port_comes_up(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        calls = {"n": 0}
+
+        class _Sock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _flaky(addr, timeout=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise OSError("not yet")
+            return _Sock()
+
+        monkeypatch.setattr("socket.create_connection", _flaky)
+        monkeypatch.setattr("time.sleep", lambda *a: None)
+        assert dev._wait_for_ports("1.2.3.4", [3011], timeout=30, interval=0) == []
+        assert calls["n"] == 3

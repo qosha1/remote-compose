@@ -461,6 +461,29 @@ def dev_up_cmd(
                     err=True,
                 )
                 sys.exit(1)
+
+            # `compose up -d` returning is not the same as the services being
+            # reachable: containers report Up while Django is still migrating and
+            # Next.js is still compiling its first route, so --wait would hand
+            # back a box whose ports answer nothing for another few minutes.
+            # The --port list is exactly the set the user said they care about.
+            if extra_ports:
+                click.echo(
+                    f"  waiting for ports {list(extra_ports)} to accept "
+                    f"connections..."
+                )
+                pending = _wait_for_ports(
+                    record.public_ip, [int(p) for p in extra_ports]
+                )
+                if pending:
+                    click.echo(
+                        f"  ! ports still not listening: {pending} — the stack "
+                        f"may still be warming up, or a service failed to bind. "
+                        f"Check `rc dev logs {name}`.",
+                        err=True,
+                    )
+                else:
+                    click.echo("  ✓ all requested ports are accepting connections")
         else:
             click.echo(
                 f"  ! cloud-init did not report 'done' within {wait_timeout}s — "
@@ -474,6 +497,38 @@ def dev_up_cmd(
             "files, compose up). The box is not usable yet — re-run with --wait "
             "to block until it is."
         )
+
+
+def _wait_for_ports(
+    public_ip: str, ports: list[int], timeout: int = 600, interval: int = 10
+) -> list[int]:
+    """Wait for each port to accept a TCP connection. Returns those that never did.
+
+    A plain TCP connect rather than an HTTP probe: rc has no idea what protocol
+    a given --port speaks, and a Django app answering 400 to a bare-IP Host
+    (ALLOWED_HOSTS) is up as far as provisioning is concerned. "Something is
+    listening" is the strongest claim rc can honestly make.
+
+    Deliberately advisory — provisioning already succeeded by this point, and a
+    service that is merely slow to bind is not a provisioning failure.
+    """
+    import socket
+    import time
+
+    deadline = time.time() + timeout
+    pending = list(ports)
+    while pending and time.time() < deadline:
+        still_pending = []
+        for port in pending:
+            try:
+                with socket.create_connection((public_ip, port), timeout=5):
+                    pass
+            except OSError:
+                still_pending.append(port)
+        pending = still_pending
+        if pending and time.time() < deadline:
+            time.sleep(interval)
+    return pending
 
 
 def _failed_compose_projects(public_ip: str, private_pem: str) -> list[tuple[str, int]]:
