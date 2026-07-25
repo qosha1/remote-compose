@@ -116,6 +116,12 @@ write_files:
       # -x/-y so a detached-created session is not pinned at 80x24, which
       # renders garbage when attached from a normal-size terminal.
       tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude {{ claude_flags }}"
+      # Clear the one-time "Do you trust this folder?" dialog. Without this,
+      # `rc dev attach` drops you on a modal prompt rather than a usable agent —
+      # which contradicts the "attach lands ready" promise `up` prints. The
+      # sleep lets the TUI finish its first paint before the keystroke lands.
+      sleep 6
+      tmux send-keys -t claude "1" Enter
       echo "claude tmux session started — attach with: tmux attach -t claude"
 
   - path: /home/ec2-user/.tmux.conf
