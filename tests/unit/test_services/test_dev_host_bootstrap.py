@@ -715,6 +715,17 @@ class TestTmuxHardening:
                 "/home/ec2-user/.local/bin/claude|" in start
             ), f"{src.type}: symlink target not guarded against self-reference"
 
+    def test_trust_prompt_is_cleared(self):
+        # `up` prints "attach lands ready". Without clearing the one-time
+        # "Do you trust this folder?" dialog, attaching drops the user on a
+        # modal prompt instead of a usable agent.
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]["content"]
+            assert (
+                'send-keys -t claude "1" Enter' in start
+            ), f"{src.type}: trust prompt left on screen for the attaching user"
+
 
 class TestCloudInitWait:
     """`rc dev up` returning is not the same as the box being usable."""
