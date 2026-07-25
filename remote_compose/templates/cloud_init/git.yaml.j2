@@ -76,9 +76,51 @@ write_files:
       if [ -f /home/ec2-user/.rc-dev-env ]; then
         set -a && source /home/ec2-user/.rc-dev-env && set +a
       fi
+      # tmux hardening lives in /home/ec2-user/.tmux.conf (a write_files entry
+      # below). AL2023's tmux 3.2a SEGFAULTS the whole server in
+      #   cmd_load_buffer_done -> tty_set_selection -> tty_putcode_ptr2
+      # when a clipboard write (`load-buffer -w`, which the claude TUI does)
+      # reaches a client whose terminal advertises the Ms (OSC-52) capability.
+      # That is exactly what happens when a human attaches from a normal
+      # terminal: the display garbles and EVERY session on the box dies, so
+      # `rc dev attach` afterwards has nothing to attach to.
+      #
+      # claude warns "~/.local/bin/claude missing or broken" on every start
+      # because npm installs it elsewhere and that dir does not exist. Resolve
+      # the real target BEFORE linking: once ~/.local/bin is on PATH,
+      # `command -v claude` finds the link itself and it self-references.
+      real_claude="$(command -v claude || true)"
+      case "$real_claude" in
+        /home/ec2-user/.local/bin/claude|"") real_claude=/usr/bin/claude ;;
+      esac
+      mkdir -p /home/ec2-user/.local/bin
+      ln -sf "$real_claude" /home/ec2-user/.local/bin/claude
       tmux kill-session -t claude 2>/dev/null || true
-      tmux new-session -d -s claude "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude {{ claude_flags }}"
+      # -x/-y so a detached-created session is not pinned at 80x24, which
+      # renders garbage when attached from a normal-size terminal.
+      tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude {{ claude_flags }}"
       echo "claude tmux session started — attach with: tmux attach -t claude"
+
+  - path: /home/ec2-user/.tmux.conf
+    permissions: '0644'
+    owner: ec2-user:ec2-user
+    content: |
+      # Avoid the tmux 3.2a tty_set_selection segfault documented in
+      # rc-dev-start-claude.sh: stripping Ms keeps tmux out of the crashing
+      # OSC-52 path. set-clipboard off does NOT cover it (load-buffer -w
+      # bypasses that option), so the override is the load-bearing line.
+      set -ga terminal-overrides ",*:Ms@"
+      set -g set-clipboard off
+      # A session created with `new-session -d` is pinned to its creation
+      # geometry; attaching from a different-size terminal then renders garbage
+      # until something forces a resize.
+      set -g window-size latest
+      setw -g aggressive-resize on
+      # The claude TUI asks for this explicitly on startup.
+      set -g focus-events on
+      set -g default-terminal "tmux-256color"
+      set -g history-limit 50000
+      set -g mouse on
 
   - path: /etc/profile.d/rc-dev.sh
     permissions: '0644'

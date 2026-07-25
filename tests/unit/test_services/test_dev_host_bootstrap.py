@@ -646,3 +646,95 @@ class TestSourceAutodetect:
 
         with pytest.raises(ValidationError):
             detect_source_from_cwd(non_repo)
+
+
+class TestTmuxHardening:
+    """The in-box agent session must survive a human attaching to it.
+
+    AL2023 ships tmux 3.2a, which segfaults the whole tmux server in
+    cmd_load_buffer_done -> tty_set_selection -> tty_putcode_ptr2 when a
+    clipboard write (`load-buffer -w`, which the claude TUI does) reaches a
+    client whose terminal advertises the Ms (OSC-52) capability. That is
+    exactly what a normal terminal does, so attaching killed every session on
+    the box and `rc dev attach` then had nothing to attach to.
+
+    Measured on AL2023 aarch64 by coredump count:
+      3.2a + xterm-256color / tmux-256color (have Ms) -> server dumped core
+      3.2a + screen-256color (no Ms)                  -> survived
+      3.2a + Ms stripped via terminal-overrides       -> survived
+    `set-clipboard off` does NOT cover it — an explicit `load-buffer -w`
+    bypasses that option — so the terminal-overrides line is load-bearing.
+    """
+
+    def _write_files(self, rendered):
+        body = "\n".join(rendered.splitlines()[1:])
+        return {f["path"]: f for f in yaml.safe_load(body)["write_files"]}
+
+    def _both_sources(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_tmux_conf_strips_ms_capability(self):
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            assert "/home/ec2-user/.tmux.conf" in files, f"{src.type}: no tmux.conf"
+            conf = files["/home/ec2-user/.tmux.conf"]["content"]
+            assert 'terminal-overrides ",*:Ms@"' in conf, f"{src.type}: Ms not stripped"
+
+    def test_tmux_conf_survives_reattach_at_a_different_size(self):
+        # A `new-session -d` session is pinned to its creation geometry;
+        # attaching from a different-size terminal renders garbage without this.
+        for src in self._both_sources():
+            conf = self._write_files(src.render_user_data())[
+                "/home/ec2-user/.tmux.conf"
+            ]["content"]
+            assert "window-size latest" in conf
+            assert "aggressive-resize on" in conf
+
+    def test_session_created_with_explicit_geometry(self):
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]["content"]
+            assert "-x 220 -y 50" in start, f"{src.type}: session pinned to 80x24"
+
+    def test_claude_symlink_resolves_real_target_not_itself(self):
+        # Once ~/.local/bin is on PATH, `command -v claude` finds the symlink
+        # being created, so a naive `ln -sf $(command -v claude)` self-links and
+        # claude reports "missing or broken (symlink points to ...)".
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]["content"]
+            assert (
+                "/home/ec2-user/.local/bin/claude|" in start
+            ), f"{src.type}: symlink target not guarded against self-reference"
+
+
+class TestCloudInitWait:
+    """`rc dev up` returning is not the same as the box being usable."""
+
+    def test_wait_helper_reports_done(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        class _Proc:
+            stdout = "status: done"
+
+        monkeypatch.setattr(dev.os, "chmod", lambda *a, **k: None)
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(), raising=False)
+        assert dev._wait_for_cloud_init("1.2.3.4", "PEM", timeout=30) is True
+
+    def test_wait_helper_reports_error_status(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        class _Proc:
+            stdout = "status: error"
+
+        monkeypatch.setattr(dev.os, "chmod", lambda *a, **k: None)
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(), raising=False)
+        assert dev._wait_for_cloud_init("1.2.3.4", "PEM", timeout=30) is False
