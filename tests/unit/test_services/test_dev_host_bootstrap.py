@@ -738,3 +738,42 @@ class TestCloudInitWait:
         monkeypatch.setattr(dev.os, "chmod", lambda *a, **k: None)
         monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(), raising=False)
         assert dev._wait_for_cloud_init("1.2.3.4", "PEM", timeout=30) is False
+
+
+class TestWriteFilesOwnership:
+    """write_files runs BEFORE the ec2-user account exists.
+
+    Naming a not-yet-existent owner aborts the entire write_files module:
+        ('write-files', OSError('Unknown user or group: getpwnam(): name not
+         found: ec2-user'))
+    cloud-init then reports status: error and NOTHING else runs — no clones, no
+    env files, no compose. The box boots and looks alive while being completely
+    unprovisioned, which is the worst possible failure mode. Files destined for
+    ec2-user must land root-owned and rely on rc-dev-bootstrap.sh's
+    `chown -R ec2-user:ec2-user /home/ec2-user`.
+    """
+
+    def _write_files(self, rendered):
+        body = "\n".join(rendered.splitlines()[1:])
+        return yaml.safe_load(body)["write_files"]
+
+    def _all_sources(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_no_write_file_declares_a_non_root_owner(self):
+        for src in self._all_sources():
+            for entry in self._write_files(src.render_user_data()):
+                owner = entry.get("owner")
+                assert owner in (None, "root:root"), (
+                    f"{src.type}: {entry['path']} declares owner={owner!r}; "
+                    "that user does not exist yet at write_files time and will "
+                    "abort cloud-init"
+                )

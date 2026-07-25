@@ -121,7 +121,13 @@ write_files:
 
   - path: /home/ec2-user/.tmux.conf
     permissions: '0644'
-    owner: ec2-user:ec2-user
+    # NO `owner:` here. write_files runs before the ec2-user account exists, so
+    # naming it aborts the ENTIRE module with
+    #   ('write-files', OSError('Unknown user or group: getpwnam(): name not
+    #    found: ec2-user'))
+    # which fails cloud-init outright — no clones, no compose, no box. It lands
+    # root-owned; rc-dev-bootstrap.sh's `chown -R ec2-user:ec2-user
+    # /home/ec2-user` (its first action) fixes ownership before anything reads it.
     content: |
       # Avoid the tmux 3.2a tty_set_selection segfault documented in
       # rc-dev-start-claude.sh: stripping Ms keeps tmux out of the crashing
