@@ -880,7 +880,60 @@ def dev_destroy_cmd(ctx, name, force, aws_profile):
     except RemoteComposeError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+    # Terraform state lives in ./.rc/terraform-state/<name>, i.e. it is relative
+    # to the CURRENT WORKING DIRECTORY. Running destroy from a different dir than
+    # the one that ran `up` gives terraform an empty state: it destroys nothing,
+    # exits 0, and we used to print "✓ destroyed" over the top of a box that is
+    # still running — and still billing. Verify against AWS before claiming it.
+    alive = _live_instance_states(name, region, aws_profile)
+    if alive:
+        click.echo(
+            f"  ! '{name}' still exists in AWS (state: {', '.join(sorted(alive))}) "
+            f"— terraform destroyed nothing.",
+            err=True,
+        )
+        click.echo(
+            "  Terraform state is per-directory (./.rc/terraform-state/). Re-run "
+            "destroy from the directory you ran `rc dev up` in.",
+            err=True,
+        )
+        sys.exit(1)
     click.echo(f"  ✓ destroyed '{name}'")
+
+
+def _live_instance_states(
+    name: str, region: str | None, aws_profile: str | None
+) -> set[str]:
+    """Instance states for dev-host `name` that are not terminated/shutting-down.
+
+    Used to confirm a destroy actually destroyed something. Best-effort: if the
+    lookup itself fails we return an empty set rather than blocking the command
+    on an unrelated AWS/credentials problem.
+    """
+    try:
+        import boto3
+
+        session = (
+            boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+        )
+        client = session.client("ec2", region_name=region)
+        resp = client.describe_instances(
+            Filters=[
+                {"Name": "tag:Name", "Values": [f"*{name}*"]},
+                {"Name": "tag:ManagedBy", "Values": ["rc-dev"]},
+            ]
+        )
+    except Exception:
+        return set()
+
+    states = set()
+    for reservation in resp.get("Reservations", []):
+        for inst in reservation.get("Instances", []):
+            state = inst.get("State", {}).get("Name", "")
+            if state not in ("terminated", "shutting-down"):
+                states.add(state)
+    return states
 
 
 @dev_group.command(name="logs")
