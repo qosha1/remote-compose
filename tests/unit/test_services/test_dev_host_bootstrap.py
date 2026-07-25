@@ -777,3 +777,78 @@ class TestWriteFilesOwnership:
                     "that user does not exist yet at write_files time and will "
                     "abort cloud-init"
                 )
+
+
+class TestComposeFailureSurfacing:
+    """A compose project that fails to start must not read as a healthy box.
+
+    The bootstrap used to run `docker compose up ... || true`. A compose file
+    that aborted instantly (missing env_file, bad YAML) was swallowed whole:
+    cloud-init still reported 'done' and `rc dev up` still reported success,
+    while half the services had never started. Observed in the wild — a
+    two-project box came up with only the second project running and nothing
+    anywhere said so.
+    """
+
+    def _bootstrap_script(self, rendered):
+        body = "\n".join(rendered.splitlines()[1:])
+        files = {f["path"]: f for f in yaml.safe_load(body)["write_files"]}
+        return files["/usr/local/bin/rc-dev-bootstrap.sh"]["content"]
+
+    def _all_sources(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_compose_failure_is_not_swallowed(self):
+        for src in self._all_sources():
+            script = self._bootstrap_script(src.render_user_data())
+            assert (
+                "up -d --build || true" not in script
+            ), f"{src.type}: compose failure is swallowed by `|| true`"
+
+    def test_bootstrap_records_per_project_exit_status(self):
+        for src in self._all_sources():
+            script = self._bootstrap_script(src.render_user_data())
+            assert (
+                ".rc-dev-compose-status" in script
+            ), f"{src.type}: no status file for the CLI to read"
+
+
+class TestFailedComposeProjectsParsing:
+    """`rc dev up --wait` must refuse to claim success on a partial box."""
+
+    def _patch_ssh(self, monkeypatch, stdout):
+        from remote_compose.cli_commands import dev
+
+        class _Proc:
+            pass
+
+        proc = _Proc()
+        proc.stdout = stdout
+        monkeypatch.setattr(dev.os, "chmod", lambda *a, **k: None)
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: proc, raising=False)
+        return dev
+
+    def test_reports_failed_project(self, monkeypatch):
+        dev = self._patch_ssh(monkeypatch, "full\t14\nbrowser-mgr\t0\n")
+        assert dev._failed_compose_projects("1.2.3.4", "PEM") == [("full", 14)]
+
+    def test_all_ok_reports_nothing(self, monkeypatch):
+        dev = self._patch_ssh(monkeypatch, "full\t0\nbrowser-mgr\t0\n")
+        assert dev._failed_compose_projects("1.2.3.4", "PEM") == []
+
+    def test_missing_status_file_is_not_a_failure(self, monkeypatch):
+        # Older boxes, or source types that run no compose at all.
+        dev = self._patch_ssh(monkeypatch, "")
+        assert dev._failed_compose_projects("1.2.3.4", "PEM") == []
+
+    def test_garbage_lines_are_ignored(self, monkeypatch):
+        dev = self._patch_ssh(monkeypatch, "nonsense\nfull\tNaN\nweb\t2\n")
+        assert dev._failed_compose_projects("1.2.3.4", "PEM") == [("web", 2)]

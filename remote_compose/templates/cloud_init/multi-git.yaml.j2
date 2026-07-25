@@ -69,13 +69,35 @@ write_files:
       chown -R ec2-user:ec2-user /home/ec2-user
       # Run each compose file as a SEPARATE project (-p <basename>) so
       # service-name conflicts across repos don't collide.
+      #
+      # Record each project's exit status to .rc-dev-compose-status so
+      # `rc dev up --wait` can report it. This used to be `|| true`, which
+      # silently swallowed failures: a compose file that aborted instantly (a
+      # missing env_file, say) left a box where cloud-init reported 'done',
+      # `rc dev up` reported success, and the user discovered only later that
+      # half their services never started. One project failing must NOT stop the
+      # others from being attempted, hence the per-project status rather than
+      # `set -e`.
+      : > /home/ec2-user/.rc-dev-compose-status
       for cf in {{ compose_filenames | join(' ') }}; do
         if [ -f "/home/ec2-user/$cf" ]; then
           project=$(basename "$cf" .yml | sed 's/^docker-compose\.//' | sed 's/[^a-zA-Z0-9]/-/g')
           echo "Starting compose project: $project (from $cf)"
-          docker compose -f "/home/ec2-user/$cf" -p "$project" up -d --build || true
+          log="/home/ec2-user/rc-dev-compose-$project.log"
+          # tee keeps the build streaming into cloud-init-output.log while also
+          # capturing it; pipefail (set above) makes the pipeline carry compose's
+          # exit status rather than tee's.
+          if docker compose -f "/home/ec2-user/$cf" -p "$project" up -d --build 2>&1 | tee "$log"; then
+            st=0
+          else
+            st=$?
+            echo "ERROR: compose project '$project' FAILED (exit $st) — see $log" >&2
+          fi
+          printf '%s\t%s\n' "$project" "$st" >> /home/ec2-user/.rc-dev-compose-status
         fi
       done
+      chown ec2-user:ec2-user /home/ec2-user/.rc-dev-compose-status 2>/dev/null || true
+      chown ec2-user:ec2-user /home/ec2-user/rc-dev-compose-*.log 2>/dev/null || true
 
   - path: /usr/local/bin/rc-dev-start-claude.sh
     permissions: '0755'

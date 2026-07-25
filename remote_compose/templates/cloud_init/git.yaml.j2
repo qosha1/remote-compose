@@ -59,12 +59,29 @@ write_files:
       # ops landed root-owned files in the home dir (rc-7v6).
       chown -R ec2-user:ec2-user /home/ec2-user
       # Try the common compose file names — first match wins.
+      # Record the exit status to .rc-dev-compose-status so `rc dev up --wait`
+      # can report a compose failure instead of leaving the user to discover
+      # later that their services never started.
+      : > /home/ec2-user/.rc-dev-compose-status
       for f in docker-compose.yml local.yml compose.yml docker-compose.local.yml; do
         if [ -f "$f" ]; then
-          docker compose -f "$f" up -d --build
+          project=$(basename "$f" .yml | sed 's/^docker-compose\.//' | sed 's/[^a-zA-Z0-9]/-/g')
+          log="/home/ec2-user/rc-dev-compose-$project.log"
+          # tee keeps the build streaming into cloud-init-output.log while also
+          # capturing it; pipefail (set above) makes the pipeline carry compose's
+          # exit status rather than tee's.
+          if docker compose -f "$f" up -d --build 2>&1 | tee "$log"; then
+            st=0
+          else
+            st=$?
+            echo "ERROR: compose project '$project' FAILED (exit $st) — see $log" >&2
+          fi
+          printf '%s\t%s\n' "$project" "$st" >> /home/ec2-user/.rc-dev-compose-status
           break
         fi
       done
+      chown ec2-user:ec2-user /home/ec2-user/.rc-dev-compose-status 2>/dev/null || true
+      chown ec2-user:ec2-user /home/ec2-user/rc-dev-compose-*.log 2>/dev/null || true
 
   - path: /usr/local/bin/rc-dev-start-claude.sh
     permissions: '0755'
