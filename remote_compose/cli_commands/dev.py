@@ -443,6 +443,24 @@ def dev_up_cmd(
         click.echo(f"\n  Waiting for cloud-init to finish (timeout {wait_timeout}s)...")
         if _wait_for_cloud_init(record.public_ip, priv_pem, wait_timeout):
             click.echo("  ✓ cloud-init done — repos cloned, compose up run")
+            # cloud-init reaching 'done' does NOT mean the compose projects
+            # started: the bootstrap keeps going past a failed project so the
+            # others still get a chance. Report per-project status, and do not
+            # claim success if any of them failed.
+            failed = _failed_compose_projects(record.public_ip, priv_pem)
+            if failed:
+                for project, code in failed:
+                    click.echo(
+                        f"  ! compose project '{project}' FAILED (exit {code}) — "
+                        f"log: ~/rc-dev-compose-{project}.log",
+                        err=True,
+                    )
+                click.echo(
+                    f"  the box is only partly provisioned. Inspect with "
+                    f"`rc dev ssh {name}`.",
+                    err=True,
+                )
+                sys.exit(1)
         else:
             click.echo(
                 f"  ! cloud-init did not report 'done' within {wait_timeout}s — "
@@ -456,6 +474,61 @@ def dev_up_cmd(
             "files, compose up). The box is not usable yet — re-run with --wait "
             "to block until it is."
         )
+
+
+def _failed_compose_projects(public_ip: str, private_pem: str) -> list[tuple[str, int]]:
+    """Return [(project, exit_code)] for compose projects that failed to start.
+
+    The bootstrap writes one `<project>\\t<exit_code>` line per compose file to
+    ~/.rc-dev-compose-status. It deliberately continues past a failing project so
+    the remaining ones still get attempted, which means cloud-init can reach
+    'done' with services missing — `up` must not report success in that case.
+
+    An unreadable/absent status file yields [] (older box, or a source type that
+    runs no compose), so this never invents a failure.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    try:
+        proc = subprocess.run(
+            [
+                "ssh",
+                "-i",
+                keypath,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=10",
+                f"ec2-user@{public_ip}",
+                "cat ~/.rc-dev-compose-status 2>/dev/null || true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.SubprocessError:
+        return []
+
+    failed: list[tuple[str, int]] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        project, raw = parts[0].strip(), parts[1].strip()
+        try:
+            code = int(raw)
+        except ValueError:
+            continue
+        if code != 0:
+            failed.append((project, code))
+    return failed
 
 
 def _wait_for_cloud_init(public_ip: str, private_pem: str, timeout: int = 1800) -> bool:
