@@ -216,6 +216,24 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     default=None,
     help="Path to a custom .claude/ directory to copy (default: $HOME/.claude).",
 )
+@click.option(
+    "--wait",
+    "wait",
+    is_flag=True,
+    help=(
+        "Block until cloud-init finishes (repos cloned, env files placed, "
+        "compose up run). Without this, `up` returns while the box is still "
+        "bootstrapping and is NOT yet usable."
+    ),
+)
+@click.option(
+    "--wait-timeout",
+    "wait_timeout",
+    type=int,
+    default=1800,
+    show_default=True,
+    help="Seconds to wait for cloud-init when --wait is given.",
+)
 @click.pass_context
 def dev_up_cmd(
     ctx,
@@ -235,6 +253,8 @@ def dev_up_cmd(
     skip_permissions,
     no_claude_config,
     claude_config_from,
+    wait,
+    wait_timeout,
 ):
     """Provision an EC2 dev-host and start the source's docker compose."""
     from remote_compose.exceptions import RemoteComposeError
@@ -410,6 +430,86 @@ def dev_up_cmd(
                 f"  ! claude config copy failed: {exc} — you'll need to login on first attach",
                 err=True,
             )
+
+    # Everything above returns as soon as EC2 + SG + SCP are done. cloud-init is
+    # still installing docker, cloning the repos, PLACING THE ENV FILES and
+    # running `docker compose up` for several more minutes, so the box is not
+    # usable yet. Be explicit about that rather than implying success.
+    if wait and record.public_ip:
+        keypair = service.credential_service.get_credential(
+            record.ssh_key_credential_id
+        )
+        priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
+        click.echo(f"\n  Waiting for cloud-init to finish (timeout {wait_timeout}s)...")
+        if _wait_for_cloud_init(record.public_ip, priv_pem, wait_timeout):
+            click.echo("  ✓ cloud-init done — repos cloned, compose up run")
+        else:
+            click.echo(
+                f"  ! cloud-init did not report 'done' within {wait_timeout}s — "
+                f"check `rc dev ssh {name}` then `cloud-init status`",
+                err=True,
+            )
+            sys.exit(1)
+    else:
+        click.echo(
+            "\n  NOTE: cloud-init is still bootstrapping (docker, clones, env "
+            "files, compose up). The box is not usable yet — re-run with --wait "
+            "to block until it is."
+        )
+
+
+def _wait_for_cloud_init(public_ip: str, private_pem: str, timeout: int = 1800) -> bool:
+    """Block until cloud-init reports 'done' on the box.
+
+    `rc dev up` otherwise returns while the bootstrap is still running, so
+    anything that SSHes in immediately afterwards races it — the classic symptom
+    is a caller finding the env files it just passed via --env "missing", on a
+    box that is perfectly fine minutes later.
+
+    Returns True on 'done', False on timeout or an error/degraded status.
+    """
+    import subprocess
+    import tempfile
+    import time
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    ssh_opts = [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=30",
+    ]
+    # `cloud-init status --wait` blocks and streams dots; discard those and read
+    # the terminal status. SSH may not be up for the first few tries.
+    remote_cmd = "sudo cloud-init status --wait >/dev/null 2>&1; cloud-init status"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        remaining = max(1, int(deadline - time.time()))
+        try:
+            proc = subprocess.run(
+                ["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", remote_cmd],
+                capture_output=True,
+                text=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        out = (proc.stdout or "").strip().lower()
+        if "done" in out:
+            return True
+        if "error" in out or "degraded" in out:
+            return False
+        time.sleep(5)
+    return False
 
 
 def _all_enabled_regions(service) -> list[str]:
