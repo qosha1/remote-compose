@@ -978,3 +978,33 @@ class TestDestroyVerification:
         broken.Session = _boom
         monkeypatch.setitem(_sys.modules, "boto3", broken)
         assert dev._live_instance_states("x", "us-west-1", None) == set()
+
+    def test_transient_running_then_terminated_is_not_a_failure(self, monkeypatch):
+        # EC2 can report 'running' for a few seconds after terraform tore the
+        # instance down. Checking once flagged successful teardowns as failures.
+        from remote_compose.cli_commands import dev
+
+        seq = [{"running"}, {"running"}, set()]
+        calls = {"n": 0}
+
+        def _states(*a, **k):
+            i = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            return seq[i]
+
+        monkeypatch.setattr(dev, "_live_instance_states", _states)
+        monkeypatch.setattr("time.sleep", lambda *a: None)
+        assert (
+            dev._live_instance_states_settled("box", "us-west-1", None, interval=0)
+            == set()
+        )
+        assert calls["n"] == 3
+
+    def test_persistently_running_is_still_reported(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        monkeypatch.setattr(dev, "_live_instance_states", lambda *a, **k: {"running"})
+        monkeypatch.setattr("time.sleep", lambda *a: None)
+        assert dev._live_instance_states_settled(
+            "box", "us-west-1", None, timeout=1, interval=0
+        ) == {"running"}
