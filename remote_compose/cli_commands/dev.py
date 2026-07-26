@@ -886,7 +886,7 @@ def dev_destroy_cmd(ctx, name, force, aws_profile):
     # the one that ran `up` gives terraform an empty state: it destroys nothing,
     # exits 0, and we used to print "✓ destroyed" over the top of a box that is
     # still running — and still billing. Verify against AWS before claiming it.
-    alive = _live_instance_states(name, region, aws_profile)
+    alive = _live_instance_states_settled(name, region, aws_profile)
     if alive:
         click.echo(
             f"  ! '{name}' still exists in AWS (state: {', '.join(sorted(alive))}) "
@@ -900,6 +900,34 @@ def dev_destroy_cmd(ctx, name, force, aws_profile):
         )
         sys.exit(1)
     click.echo(f"  ✓ destroyed '{name}'")
+
+
+def _live_instance_states_settled(
+    name: str,
+    region: str | None,
+    aws_profile: str | None,
+    timeout: int = 60,
+    interval: int = 5,
+) -> set[str]:
+    """Like _live_instance_states, but tolerant of EC2's eventual consistency.
+
+    describe-instances can still report 'running' for a few seconds after
+    terraform has torn the instance down. Checking once immediately after
+    destroy therefore flagged perfectly successful teardowns — observed live:
+    the warning fired, and the instance read 'terminated' seconds later. A check
+    that cries wolf on success gets ignored, which is worse than no check.
+
+    Polls until the instance reads terminated/shutting-down, or the timeout
+    expires; only then is it treated as genuinely still alive.
+    """
+    import time
+
+    deadline = time.time() + timeout
+    alive = _live_instance_states(name, region, aws_profile)
+    while alive and time.time() < deadline:
+        time.sleep(interval)
+        alive = _live_instance_states(name, region, aws_profile)
+    return alive
 
 
 def _live_instance_states(
