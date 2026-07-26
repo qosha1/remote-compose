@@ -1008,3 +1008,80 @@ class TestDestroyVerification:
         assert dev._live_instance_states_settled(
             "box", "us-west-1", None, timeout=1, interval=0
         ) == {"running"}
+
+
+class TestOrphanedEipRelease:
+    """An unassociated Elastic IP bills forever and is invisible unless you look.
+
+    terraform tags the dev host's address rc-dev-<name>-eip, so once the host is
+    gone an address still carrying that tag is definitionally orphaned. Three
+    such addresses were found in a live account (rc-dev-wjrep-eip and two
+    rc-dev-triage-*-eip), left by hosts that no longer existed.
+    """
+
+    def _fake_ec2(self, monkeypatch, addresses):
+        import sys as _sys
+        import types
+
+        released = []
+
+        class _Client:
+            def describe_addresses(self, **kwargs):
+                return {"Addresses": addresses}
+
+            def release_address(self, AllocationId=None):
+                released.append(AllocationId)
+
+        class _Session:
+            def __init__(self, *a, **k):
+                pass
+
+            def client(self, *a, **k):
+                return _Client()
+
+        fake = types.ModuleType("boto3")
+        fake.Session = _Session
+        monkeypatch.setitem(_sys.modules, "boto3", fake)
+        return released
+
+    def test_releases_unassociated_tagged_eip(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        released = self._fake_ec2(
+            monkeypatch,
+            [{"AllocationId": "eipalloc-1", "PublicIp": "1.2.3.4"}],
+        )
+        freed = dev._release_orphaned_eips("wjrep", "us-west-1", None)
+        assert freed == ["1.2.3.4"]
+        assert released == ["eipalloc-1"]
+
+    def test_leaves_attached_eip_alone(self, monkeypatch):
+        from remote_compose.cli_commands import dev
+
+        released = self._fake_ec2(
+            monkeypatch,
+            [
+                {
+                    "AllocationId": "eipalloc-1",
+                    "PublicIp": "1.2.3.4",
+                    "AssociationId": "eipassoc-9",
+                }
+            ],
+        )
+        assert dev._release_orphaned_eips("wjrep", "us-west-1", None) == []
+        assert released == []
+
+    def test_aws_error_does_not_fail_the_destroy(self, monkeypatch):
+        import sys as _sys
+        import types
+
+        from remote_compose.cli_commands import dev
+
+        broken = types.ModuleType("boto3")
+
+        def _boom(*a, **k):
+            raise RuntimeError("no credentials")
+
+        broken.Session = _boom
+        monkeypatch.setitem(_sys.modules, "boto3", broken)
+        assert dev._release_orphaned_eips("x", "us-west-1", None) == []

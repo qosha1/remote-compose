@@ -899,7 +899,56 @@ def dev_destroy_cmd(ctx, name, force, aws_profile):
             err=True,
         )
         sys.exit(1)
+
+    # An unassociated Elastic IP bills forever and is invisible unless you go
+    # looking. terraform tags ours rc-dev-<name>-eip, so once the host is gone
+    # any address still carrying that tag is definitionally orphaned — release
+    # it rather than leaving a silent monthly charge behind.
+    for ip in _release_orphaned_eips(name, region, aws_profile):
+        click.echo(f"  ✓ released orphaned Elastic IP {ip} (rc-dev-{name}-eip)")
+
     click.echo(f"  ✓ destroyed '{name}'")
+
+
+def _release_orphaned_eips(
+    name: str, region: str | None, aws_profile: str | None
+) -> list[str]:
+    """Release unassociated EIPs tagged for this dev host. Returns those freed.
+
+    Strictly scoped: the address must carry BOTH this host's
+    rc-dev-<name>-eip Name tag and ManagedBy=rc-dev, and must not be attached to
+    anything. Best-effort — an AWS error here must not fail an otherwise
+    successful destroy.
+    """
+    try:
+        import boto3
+
+        session = (
+            boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+        )
+        client = session.client("ec2", region_name=region)
+        resp = client.describe_addresses(
+            Filters=[
+                {"Name": "tag:Name", "Values": [f"rc-dev-{name}-eip"]},
+                {"Name": "tag:ManagedBy", "Values": ["rc-dev"]},
+            ]
+        )
+    except Exception:
+        return []
+
+    released = []
+    for addr in resp.get("Addresses", []):
+        if addr.get("AssociationId"):
+            continue  # still attached to something — leave it alone
+        alloc_id = addr.get("AllocationId")
+        if not alloc_id:
+            continue
+        try:
+            client.release_address(AllocationId=alloc_id)
+            released.append(addr.get("PublicIp", alloc_id))
+        except Exception:
+            continue
+    return released
 
 
 def _live_instance_states_settled(

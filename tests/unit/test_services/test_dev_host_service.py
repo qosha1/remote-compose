@@ -371,9 +371,20 @@ class TestDestroyHost:
         with pytest.raises(ValidationError):
             service.destroy_host("ghost")
 
-    def test_destroy_missing_with_force_noops(self, service):
-        # idempotent destroy with --force does not raise on missing host
+    def test_destroy_missing_with_force_still_tears_down(
+        self, service, mock_terraform_runner
+    ):
+        """--force is documented as "tear down even if not in state".
+
+        It used to `return` on exactly that path, doing NOTHING while the CLI
+        printed "✓ destroyed". Because dev-host state is per-directory, running
+        destroy from anywhere but the dir that ran `up` hit this every time, and
+        the host's Elastic IP was abandoned to bill indefinitely. It must still
+        not raise, but it must actually attempt the teardown.
+        """
         service.destroy_host("ghost", force=True)
+
+        mock_terraform_runner.destroy.assert_called_once()
 
 
 class TestSshCommand:
