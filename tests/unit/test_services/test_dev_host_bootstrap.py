@@ -726,6 +726,38 @@ class TestTmuxHardening:
                 'send-keys -t claude "1" Enter' in start
             ), f"{src.type}: trust prompt left on screen for the attaching user"
 
+    def test_systemd_vt220_term_is_not_inherited(self):
+        """cloud-init runs under systemd, whose default TERM is vt220.
+
+        Left in place, the tmux SERVER stores TERM=vt220 in its global env and
+        every pane process inherits it — so the claude TUI thinks it is driving
+        a 1983 terminal and falls back to ACS line-drawing, which renders as
+        stray letters and symbols all over the UI. Observed on a live box:
+        the claude process had TERM=vt220 while tmux rendered the pane as
+        tmux-256color. The two disagreeing is what garbles the display.
+        """
+        for src in self._both_sources():
+            start = self._write_files(src.render_user_data())[
+                "/usr/local/bin/rc-dev-start-claude.sh"
+            ]["content"]
+            assert "unset TERM" in start, f"{src.type}: systemd TERM leaks into tmux"
+
+    def test_utf8_locale_is_set_for_the_agent(self):
+        # AL2023 ships no LANG at all -> POSIX/C locale -> UTF-8 glyphs render
+        # as mojibake.
+        for src in self._both_sources():
+            start = self._write_files(src.render_user_data())[
+                "/usr/local/bin/rc-dev-start-claude.sh"
+            ]["content"]
+            assert "C.UTF-8" in start, f"{src.type}: no UTF-8 locale for the agent"
+
+    def test_login_shells_get_a_utf8_locale(self):
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            assert (
+                "/etc/profile.d/rc-dev-locale.sh" in files
+            ), f"{src.type}: interactive ssh sessions still land in POSIX locale"
+
 
 class TestCloudInitWait:
     """`rc dev up` returning is not the same as the box being usable."""

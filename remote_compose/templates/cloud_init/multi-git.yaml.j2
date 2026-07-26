@@ -3,6 +3,7 @@ package_update: true
 package_upgrade: false
 packages:
   - docker
+  - ncurses-term
   - git
   - tmux
   - jq
@@ -108,6 +109,20 @@ write_files:
       if [ -f /home/ec2-user/.rc-dev-env ]; then
         set -a && source /home/ec2-user/.rc-dev-env && set +a
       fi
+      # This script runs from cloud-init, i.e. under systemd, whose default TERM
+      # is vt220. Without clearing it the tmux SERVER stores TERM=vt220 in its
+      # global environment and every process started in a pane inherits it — so
+      # the claude TUI believes it is driving a 1983 terminal and falls back to
+      # ACS line-drawing, which renders as stray letters and symbols all over
+      # the UI. tmux renders the pane as tmux-256color meanwhile, so the two
+      # disagree. Unset it and let tmux assign the pane TERM from
+      # default-terminal.
+      unset TERM
+      # AL2023 ships no LANG at all, so the process lands in the POSIX/C locale
+      # and UTF-8 box-drawing/glyphs come out as mojibake. C.utf8 is always
+      # present on this AMI.
+      export LANG="${LANG:-C.UTF-8}"
+      export LC_ALL="${LC_ALL:-C.UTF-8}"
       # tmux hardening — MUST exist before the session is created.
       #
       # AL2023 ships tmux 3.2a, which SEGFAULTS THE WHOLE SERVER in
@@ -173,6 +188,15 @@ write_files:
       set -g default-terminal "tmux-256color"
       set -g history-limit 50000
       set -g mouse on
+
+  - path: /etc/profile.d/rc-dev-locale.sh
+    permissions: '0644'
+    content: |
+      # AL2023 ships no LANG, so an interactive ssh session lands in the
+      # POSIX/C locale and renders UTF-8 output as mojibake. C.utf8 is always
+      # present on this AMI.
+      export LANG="${LANG:-C.UTF-8}"
+      export LC_ALL="${LC_ALL:-C.UTF-8}"
 
   - path: /etc/profile.d/rc-dev.sh
     permissions: '0644'
