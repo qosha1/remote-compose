@@ -681,12 +681,26 @@ class TestTmuxHardening:
             ),
         ]
 
-    def test_tmux_conf_strips_ms_capability(self):
+    def test_crash_protection_still_exists_as_a_fallback(self):
+        """The Ms strip must remain reachable, but NOT unconditionally.
+
+        This test used to assert .tmux.conf hardcoded `terminal-overrides
+        ",*:Ms@"`. That stopped the 3.2a segfault but also permanently disabled
+        copy-to-clipboard, because Ms *is* OSC-52 — sessions survived and
+        nothing could be copied out of them. The strip now lives in the 3.2a
+        safe-mode branch of rc-dev-start-claude.sh, used only when the tmux 3.5a
+        build is unavailable. See TestClipboardWorksOnTheBox.
+        """
         for src in self._both_sources():
             files = self._write_files(src.render_user_data())
-            assert "/home/ec2-user/.tmux.conf" in files, f"{src.type}: no tmux.conf"
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]["content"]
+            assert (
+                'terminal-overrides ",*:Ms@"' in start
+            ), f"{src.type}: lost the 3.2a segfault protection entirely"
             conf = files["/home/ec2-user/.tmux.conf"]["content"]
-            assert 'terminal-overrides ",*:Ms@"' in conf, f"{src.type}: Ms not stripped"
+            assert (
+                'terminal-overrides ",*:Ms@"' not in conf
+            ), f"{src.type}: strip is unconditional again — copy will be dead"
 
     def test_tmux_conf_survives_reattach_at_a_different_size(self):
         # A `new-session -d` session is pinned to its creation geometry;
@@ -1157,3 +1171,72 @@ class TestAttachForcesUtf8:
         assert (
             "C.UTF-8" in self._attach_source()
         ), "attach does not export a UTF-8 locale"
+
+
+class TestClipboardWorksOnTheBox:
+    """Copy-to-clipboard must actually work, not be traded away for stability.
+
+    AL2023's tmux 3.2a segfaults the whole server in tty_set_selection when a
+    clipboard write reaches a client whose terminal advertises Ms (OSC-52). The
+    only 3.2a workaround is stripping Ms — which is precisely the capability
+    that makes copy work over SSH. Sessions survived but nothing could be copied
+    out of them, which is not an acceptable resting state.
+
+    So the bootstrap builds tmux 3.5a (no such bug) and the clipboard policy is
+    chosen from the version actually present, falling back to the Ms-stripping
+    safe mode only if that build failed.
+    """
+
+    def _files(self, src):
+        body = "\n".join(src.render_user_data().splitlines()[1:])
+        doc = yaml.safe_load(body)
+        return {f["path"]: f["content"] for f in doc["write_files"]}, doc
+
+    def _both(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_builds_a_tmux_without_the_segfault(self):
+        for src in self._both():
+            _, doc = self._files(src)
+            runcmd = "\n".join(str(x) for x in doc["runcmd"])
+            assert "tmux-3.5a.tar.gz" in runcmd, f"{src.type}: no fixed tmux built"
+
+    def test_conf_does_not_hardcode_the_ms_strip(self):
+        # Hardcoding it means copy is permanently dead even on a good tmux.
+        for src in self._both():
+            files, _ = self._files(src)
+            conf = files["/home/ec2-user/.tmux.conf"]
+            assert (
+                'terminal-overrides ",*:Ms@"' not in conf
+            ), f"{src.type}: .tmux.conf unconditionally disables copy"
+            assert "source-file -q ~/.tmux.clipboard.conf" in conf
+
+    def test_clipboard_enabled_when_tmux_is_new_enough(self):
+        for src in self._both():
+            files, _ = self._files(src)
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]
+            assert "set -g set-clipboard on" in start, f"{src.type}: never enables copy"
+
+    def test_falls_back_to_safe_mode_if_the_build_failed(self):
+        # A failed build must not leave a box whose sessions segfault on copy.
+        for src in self._both():
+            files, _ = self._files(src)
+            start = files["/usr/local/bin/rc-dev-start-claude.sh"]
+            assert (
+                'terminal-overrides ",*:Ms@"' in start
+            ), f"{src.type}: no 3.2a safe-mode fallback"
+
+    def test_mouse_drag_reaches_the_system_clipboard(self):
+        for src in self._both():
+            files, _ = self._files(src)
+            assert (
+                "copy-pipe-and-cancel" in files["/home/ec2-user/.tmux.conf"]
+            ), f"{src.type}: drag selects into tmux's buffer only"
