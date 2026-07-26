@@ -464,15 +464,28 @@ class DevHostService(BaseService):
         self._save_state(hosts)
 
     def destroy_host(self, name: str, force: bool = False) -> None:
+        """Tear the host down. With force=True, proceed even if it is unknown.
+
+        --force is documented as "tear down even if not in state", but this used
+        to `return` on that exact path — doing NOTHING while the CLI printed
+        "✓ destroyed". Since dev-host state is per-directory, running destroy
+        from anywhere but the dir that ran `up` hit that branch every time. The
+        instance often got cleaned up by other means later; the EIP, a separate
+        terraform resource, was simply abandoned and billed indefinitely. That
+        is where the stray rc-dev-<name>-eip addresses come from.
+
+        Now force actually attempts the terraform destroy. With no terraform
+        state present it is a harmless no-op, which is the same idempotence the
+        old early-return was reaching for — minus the silent abandonment.
+        """
         hosts = self._load_state()
-        if name not in hosts:
-            if force:
-                return  # idempotent no-op
+        if name not in hosts and not force:
             raise DevHostNotFoundError(f"dev host {name!r} not found in state")
 
         self.terraform_runner.destroy()
-        del hosts[name]
-        self._save_state(hosts)
+        if name in hosts:
+            del hosts[name]
+            self._save_state(hosts)
 
     def get_ssh_command(self, name: str) -> str:
         """Return a shell-ready ssh invocation string for `rc dev ssh`."""
