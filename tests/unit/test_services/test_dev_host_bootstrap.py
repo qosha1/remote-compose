@@ -1117,3 +1117,43 @@ class TestOrphanedEipRelease:
         broken.Session = _boom
         monkeypatch.setitem(_sys.modules, "boto3", broken)
         assert dev._release_orphaned_eips("x", "us-west-1", None) == []
+
+
+class TestAttachForcesUtf8:
+    """`rc dev attach` must not hand the user an ACS-garbled UI.
+
+    tmux decides whether the CLIENT can do UTF-8 from its locale, and
+    `ssh host '<cmd>'` is a non-login non-interactive shell, so /etc/profile.d
+    never runs and LANG is empty. tmux then re-encodes the pane's box-drawing
+    into ACS escapes, which render as streams of `qqqq` and stray `m`/`l`.
+    Measured on a live box from the raw attach stream:
+
+        tmux attach              -> 65 ACS escapes,   0 UTF-8 box chars
+        LANG=C.UTF-8 tmux attach ->  0 ACS escapes, 634 UTF-8 box chars
+        tmux -u attach           ->  0 ACS escapes, 634 UTF-8 box chars
+
+    This is a client-side decision — fixing TERM/locale for the pane process on
+    the box does NOT help.
+    """
+
+    def _attach_source(self):
+        import inspect
+
+        from remote_compose.cli_commands import dev
+
+        return inspect.getsource(dev.dev_attach_cmd.callback)
+
+    def test_attach_passes_dash_u(self):
+        assert (
+            "tmux -u attach" in self._attach_source()
+        ), "attach does not force UTF-8 (-u); the agent UI will render as ACS"
+
+    def test_fallback_new_session_also_forces_utf8(self):
+        assert (
+            "tmux -u new-session" in self._attach_source()
+        ), "fallback session does not force UTF-8"
+
+    def test_attach_exports_a_utf8_locale(self):
+        assert (
+            "C.UTF-8" in self._attach_source()
+        ), "attach does not export a UTF-8 locale"

@@ -759,9 +759,27 @@ def dev_attach_cmd(name, session):
     os.chmod(keypath, 0o600)
 
     # -t forces a TTY so tmux works through ssh
+    # `tmux -u` forces UTF-8 output regardless of the client's locale.
+    #
+    # Without it the agent UI renders as streams of `qqqqqqqq` and stray `m`/`l`
+    # characters: tmux decides whether the CLIENT can do UTF-8 by inspecting its
+    # locale, and `ssh host '<cmd>'` is a non-login, non-interactive shell — so
+    # /etc/profile.d never runs and LANG is empty. tmux concludes the terminal
+    # is not UTF-8 capable and re-encodes the pane's box-drawing into ACS
+    # (alternate character set) escapes, which is what those letters are.
+    # Measured on a live box, capturing the raw attach stream:
+    #   tmux attach                   -> 65 ACS escapes,  0 UTF-8 box chars
+    #   LANG=C.UTF-8 tmux attach      ->  0 ACS escapes, 634 UTF-8 box chars
+    #   tmux -u attach                ->  0 ACS escapes, 634 UTF-8 box chars
+    # Note this is a CLIENT-side decision: fixing TERM/locale for the pane
+    # process on the box does not help, because the re-encoding happens when
+    # tmux paints the attaching terminal. LANG is exported too so anything the
+    # user runs inside the session inherits a sane locale.
     remote_cmd = (
-        f"tmux attach -t {session} 2>/dev/null || "
-        f"tmux new-session -s {session} 'cd ~/$(ls ~ | head -1) 2>/dev/null; claude'"
+        'export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"; '
+        f"tmux -u attach -t {session} 2>/dev/null || "
+        f"tmux -u new-session -s {session} "
+        f"'cd ~/$(ls ~ | head -1) 2>/dev/null; claude'"
     )
     cmd = [
         "ssh",
