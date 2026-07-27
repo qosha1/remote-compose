@@ -234,7 +234,11 @@ class DevHostService(BaseService):
         self,
         name: str,
         source: SourceSpec,
-        instance_type: str = "t4g.medium",
+        # t4g.2xlarge (8 vCPU): provisioning is dominated by CPU-bound docker
+        # image builds, so cores buy wall-clock — 20m on t4g.large vs 10m43s on
+        # this, same multi-repo stack. t4g.medium is NOT a safe default: it OOMs
+        # during the builds.
+        instance_type: str = "t4g.2xlarge",
         region: Optional[str] = None,
         ebs_size_gb: int = 30,
     ) -> DevHostRecord:

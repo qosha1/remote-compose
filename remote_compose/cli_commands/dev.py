@@ -148,8 +148,12 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
 @click.option(
     "--instance-type",
     "instance_type",
-    default="t4g.medium",
-    help="EC2 instance type (default: t4g.medium ARM).",
+    default="t4g.2xlarge",
+    help="EC2 instance type (default: t4g.2xlarge ARM, 8 vCPU). Provisioning is "
+    "dominated by CPU-bound docker image builds, so cores buy wall-clock: the "
+    "same multi-repo stack took 20m on t4g.large (2 vCPU) and 10m43s on "
+    "t4g.2xlarge. Drop to t4g.large to halve the hourly cost if you don't mind "
+    "the wait; t4g.medium OOMs during builds.",
 )
 @click.option(
     "--region", "region", default=None, help="AWS region (default: rc.yml region)."
