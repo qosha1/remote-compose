@@ -423,3 +423,35 @@ class TestInstanceTypeAllowlist:
 
         with pytest.raises(ValidationError):
             get_arch("bogus.99xlarge")
+
+
+class TestDefaultInstanceType:
+    """The default must be able to actually build the stack.
+
+    t4g.medium (the old default) OOMs during the docker image builds, so the
+    documented default could never produce a working multi-repo box. And since
+    provisioning is dominated by CPU-bound builds, cores buy wall-clock
+    directly: measured 20m on t4g.large (2 vCPU) vs 10m43s on t4g.2xlarge
+    (8 vCPU) for the same three-repo stack.
+    """
+
+    def test_cli_default_is_2xlarge(self):
+        from remote_compose.cli_commands.dev import dev_up_cmd
+
+        opt = next(p for p in dev_up_cmd.params if p.name == "instance_type")
+        assert opt.default == "t4g.2xlarge", f"CLI default is {opt.default}"
+
+    def test_service_default_matches_cli(self):
+        import inspect
+
+        from remote_compose.dev_host.service import DevHostService
+
+        sig = inspect.signature(DevHostService.create_host)
+        assert sig.parameters["instance_type"].default == "t4g.2xlarge"
+
+    def test_default_is_a_known_arm_type(self):
+        # An unknown type raises ValidationError at create_host and the AMI
+        # lookup would pick the wrong architecture.
+        from remote_compose.utils.ec2_instance_types import get_arch
+
+        assert get_arch("t4g.2xlarge") == "arm64"

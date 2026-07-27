@@ -29,7 +29,9 @@ rc dev up alice \
 
 In about five minutes, you get back:
 
-- A fresh EC2 instance (defaults to `t4g.medium`, ARM, $0.034/hr)
+- A fresh EC2 instance (defaults to `t4g.2xlarge`, ARM, ~$0.27/hr — 8 vCPU,
+  chosen because provisioning is dominated by CPU-bound image builds;
+  pass `--instance-type t4g.large` for a cheaper, slower box)
 - Docker installed, your repo cloned, `docker compose up -d --build` already run
 - **Claude Code preinstalled and already authenticated** (your local OAuth token shipped to the box)
 - A tmux session named `claude` waiting at the repo root
