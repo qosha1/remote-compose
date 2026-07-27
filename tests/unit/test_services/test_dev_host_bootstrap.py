@@ -57,17 +57,18 @@ class TestGitSource:
         assert "docker" in rendered.lower()
         assert "compose" in rendered.lower()
 
-    def test_render_user_data_omits_env_block_when_no_secrets(self):
+    def test_render_user_data_omits_wait_when_no_secrets(self):
         from remote_compose.dev_host.bootstrap import GitSource
 
         rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
 
-        # No GH_TOKEN, no ANTHROPIC_API_KEY → no `path: /tmp/rc-dev-env-staging`
-        # entry in write_files (the conditional `if [ -f ... ]` references in the
-        # bootstrap script are fine — they're a no-op when the file doesn't exist).
+        # Nothing to deliver → the bootstrap must NOT block waiting for a file
+        # that will never arrive. (The conditional `if [ -f ... ]` reference is
+        # fine — it's a no-op when the file doesn't exist.)
         assert "path: /tmp/rc-dev-env-staging" not in rendered
+        assert "never delivered /tmp/rc-dev-env-staging" not in rendered
 
-    def test_render_user_data_with_secrets_writes_staging_file(self):
+    def test_render_user_data_with_secrets_waits_for_ssh_delivery(self):
         from remote_compose.dev_host.bootstrap import GitSource
 
         rendered = GitSource(
@@ -75,9 +76,22 @@ class TestGitSource:
             extra_env={"FOO": "bar"},
         ).render_user_data()
 
-        assert "path: /tmp/rc-dev-env-staging" in rendered
+        # The payload is SCP'd post-boot, so cloud-init must wait for it rather
+        # than carry it — but it must never *write* it.
+        assert "never delivered /tmp/rc-dev-env-staging" in rendered
+        assert "path: /tmp/rc-dev-env-staging" not in rendered
 
-    def test_render_user_data_with_gh_token_writes_env_staging(self):
+    def test_render_user_data_never_carries_the_gh_token(self):
+        """user-data is the worst place a PAT can sit.
+
+        It is readable from inside the box over IMDS and from outside with
+        ec2:DescribeInstanceAttribute, and terraform takes user_data_base64 as
+        an ordinary variable — so the same bytes also land in the operator's
+        terraform.tfvars.json and terraform.tfstate. One render, four copies.
+
+        The token now reaches the box over SSH (see _deliver_dev_env), so the
+        rendered blob must reference GH_TOKEN without containing one.
+        """
         from remote_compose.dev_host.bootstrap import GitSource
 
         src = GitSource(
@@ -85,12 +99,14 @@ class TestGitSource:
         )
         rendered = src.render_user_data()
 
-        # gh_token must surface in the staged env file (so bootstrap can use it)
-        assert "/tmp/rc-dev-env-staging" in rendered
+        assert "ghp_secrettoken" not in rendered
+        # ...but the box still knows to expect one, and how to use it.
+        assert "never delivered /tmp/rc-dev-env-staging" in rendered
         assert "GH_TOKEN" in rendered
-        assert "ghp_secrettoken" in rendered
+        # The value itself is what the CLI hands over SSH.
+        assert "export GH_TOKEN=ghp_secrettoken" in src.dev_env_content()
 
-    def test_render_user_data_with_extra_env_includes_each_key(self):
+    def test_render_user_data_never_carries_extra_env_values(self):
         from remote_compose.dev_host.bootstrap import GitSource
 
         src = GitSource(
@@ -99,10 +115,12 @@ class TestGitSource:
         )
         rendered = src.render_user_data()
 
-        assert "ANTHROPIC_API_KEY" in rendered
-        assert "sk-ant-test" in rendered
-        assert "OTHER_VAR" in rendered
-        assert "hello" in rendered
+        assert "sk-ant-test" not in rendered
+        assert "hello" not in rendered
+
+        env = src.dev_env_content()
+        assert "export ANTHROPIC_API_KEY=sk-ant-test" in env
+        assert "export OTHER_VAR=hello" in env
 
     def test_claude_tmux_starter_in_runcmd(self):
         from remote_compose.dev_host.bootstrap import GitSource
@@ -264,7 +282,7 @@ class TestMultiGitSource:
         # default target dir = repo basename without .git
         assert "/home/ec2-user/sentinal" in rendered
 
-    def test_render_with_gh_token_writes_env_staging(self):
+    def test_render_never_carries_the_gh_token(self):
         from remote_compose.dev_host.bootstrap import MultiGitSource
 
         src = MultiGitSource(
@@ -274,8 +292,10 @@ class TestMultiGitSource:
         )
         rendered = src.render_user_data()
 
-        assert "path: /tmp/rc-dev-env-staging" in rendered
-        assert "ghp_secret" in rendered
+        assert "ghp_secret" not in rendered
+        assert "path: /tmp/rc-dev-env-staging" not in rendered
+        assert "never delivered /tmp/rc-dev-env-staging" in rendered
+        assert "export GH_TOKEN=ghp_secret" in src.dev_env_content()
 
     def test_skip_permissions_propagates_to_claude_command(self):
         from remote_compose.dev_host.bootstrap import MultiGitSource
@@ -521,6 +541,26 @@ class TestSanitizedSourceRepr:
 
         assert "https://github.com/x/y.git" in out
         assert "main" in out
+
+    def test_redacts_the_dict_form_read_back_from_the_state_file(self):
+        # `rc dev status` prints record.source, which is the plain dict loaded
+        # out of .rc/dev-hosts.yml — not a dataclass. That branch used to fall
+        # through to a raw repr, so a state file written before the scrub landed
+        # would put its live PAT on the terminal.
+        from remote_compose.cli_commands.dev import _sanitized_source_repr
+
+        out = _sanitized_source_repr(
+            {
+                "type": "git",
+                "url": "https://github.com/x/y.git",
+                "ref": "main",
+                "gh_token": "gho_stalefaketokenfortestsonly00000000",
+            }
+        )
+
+        assert "gho_stalefaketokenfortestsonly00000000" not in out
+        assert "<redacted>" in out
+        assert "https://github.com/x/y.git" in out
 
 
 class TestComposePortAutoDetect:
@@ -1335,6 +1375,21 @@ class TestUserDataFitsEc2Limit:
             f"{self.EC2_USER_DATA_LIMIT} cap; provisioning will roll back"
         )
 
+    def test_compressed_user_data_fits_the_limit_with_secrets(self):
+        # The secret-bearing render takes a different branch (the wait-for-SSH
+        # -delivery block), so measure that one too rather than assuming the
+        # no-secrets blob is the worst case.
+        from remote_compose.dev_host.service import _compress_user_data
+
+        src = self._realistic_multigit()
+        src.gh_token = "gho_" + "x" * 36
+        src.extra_env = {"ANTHROPIC_API_KEY": "sk-ant-" + "y" * 95}
+        blob = _compress_user_data(src.render_user_data())
+        assert len(blob) < self.EC2_USER_DATA_LIMIT, (
+            f"compressed user-data is {len(blob)} bytes — over EC2's "
+            f"{self.EC2_USER_DATA_LIMIT} cap; provisioning will roll back"
+        )
+
     def test_compression_is_deterministic(self):
         # Non-deterministic bytes (gzip mtime) would make every terraform plan
         # show a user-data diff and replace the instance.
@@ -1415,3 +1470,103 @@ class TestNoTokenPersistedOnDisk:
         assert (
             "gho_supersecretvalue" not in boot.split("credential.helper")[1][:200]
         ), "credential helper has a literal token baked into it"
+
+
+class TestDevEnvDeliveredOverSsh:
+    """The token reaches the box over SSH instead of riding in user-data.
+
+    user-data was the wrong channel three times over: IMDS hands it to anything
+    running on the box, ec2:DescribeInstanceAttribute hands it to anyone in the
+    account, and terraform copies it verbatim into the operator's local
+    terraform.tfvars.json and terraform.tfstate — confirmed by inflating the
+    gzip blob out of a real .rc/terraform-state/ tree and finding a live gho_
+    prefix in it.
+
+    SSH is a channel `rc dev up` already opens for --env and --compose files,
+    and cloud-init already knew how to pick a staged file up from
+    /tmp/rc-dev-env-staging, so this reuses both.
+    """
+
+    def _delivery_call(self, content="export GH_TOKEN=ghp_secret"):
+        from unittest.mock import patch
+
+        from remote_compose.cli_commands.dev import _deliver_dev_env
+
+        with (
+            patch("remote_compose.cli_commands.dev._wait_for_ssh"),
+            patch("subprocess.run") as run,
+        ):
+            _deliver_dev_env("203.0.113.42", "-----BEGIN KEY-----", content)
+        return run.call_args
+
+    def test_secret_goes_over_stdin_not_the_command_line(self):
+        # An argv-borne secret is visible in `ps aux` on the box for as long as
+        # the command runs, to every user on it.
+        call = self._delivery_call()
+
+        assert call.kwargs["input"] == b"export GH_TOKEN=ghp_secret"
+        assert "ghp_secret" not in " ".join(call.args[0])
+
+    def test_file_is_created_unreadable_to_other_users(self):
+        # scp would create it 0644 and leave a window before any chmod. umask
+        # 077 means it is 0600 from the instant it exists.
+        call = self._delivery_call()
+
+        assert "umask 077" in call.args[0][-1]
+        assert "/tmp/rc-dev-env-staging" in call.args[0][-1]
+
+    def test_waits_for_ssh_before_writing(self):
+        from unittest.mock import patch
+
+        from remote_compose.cli_commands.dev import _deliver_dev_env
+
+        with (
+            patch("remote_compose.cli_commands.dev._wait_for_ssh") as wait,
+            patch("subprocess.run"),
+        ):
+            _deliver_dev_env("203.0.113.42", "-----BEGIN KEY-----", "export A=1")
+
+        wait.assert_called_once()
+
+    def test_failure_is_raised_not_swallowed(self):
+        # `rc dev up` catches this and warns; silently continuing would produce
+        # a box that clones nothing private and says nothing about why.
+        import subprocess
+        from unittest.mock import patch
+
+        import pytest as _pytest
+
+        from remote_compose.cli_commands.dev import _deliver_dev_env
+
+        with (
+            patch("remote_compose.cli_commands.dev._wait_for_ssh"),
+            patch(
+                "subprocess.run", side_effect=subprocess.CalledProcessError(255, "ssh")
+            ),
+        ):
+            with _pytest.raises(subprocess.CalledProcessError):
+                _deliver_dev_env("203.0.113.42", "-----BEGIN KEY-----", "export A=1")
+
+    def test_bootstrap_waits_for_the_delivery_before_cloning(self):
+        # Ordering is the whole contract: cloud-init reaches this script minutes
+        # after sshd is up, but if it ever cloned first the token would arrive
+        # too late to matter.
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        for src in (
+            GitSource(url="https://github.com/owner/repo.git", gh_token="ghp_x"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/repo.git"}],
+                compose_filenames=["x.yml"],
+                gh_token="ghp_x",
+            ),
+        ):
+            body = "\n".join(src.render_user_data().splitlines()[1:])
+            files = {
+                f["path"]: f["content"] for f in yaml.safe_load(body)["write_files"]
+            }
+            boot = files["/usr/local/bin/rc-dev-bootstrap.sh"]
+
+            wait_at = boot.index("never delivered /tmp/rc-dev-env-staging")
+            clone_at = boot.index("git clone")
+            assert wait_at < clone_at, f"{src.type}: clone runs before the token lands"

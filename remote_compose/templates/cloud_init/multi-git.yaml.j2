@@ -16,6 +16,24 @@ write_files:
       #!/bin/bash
       set -euo pipefail
       chown -R ec2-user:ec2-user /home/ec2-user
+{% if expect_env_delivery %}
+      # Secrets ($GH_TOKEN, ANTHROPIC_API_KEY) are deliberately NOT in user-data.
+      # user-data is readable from inside the box over IMDS and from outside with
+      # ec2:DescribeInstanceAttribute, and terraform carries it verbatim into the
+      # operator's terraform.tfvars.json + terraform.tfstate — so a PAT put there
+      # leaks to four places at once. `rc dev up` SCPs them to this path instead,
+      # over the same post-boot SSH channel it already uses for --env/--compose.
+      #
+      # SSH is up minutes before runcmd reaches this script, so the file has
+      # normally already landed; wait anyway. If it never arrives, keep going —
+      # public repos still clone, and the warning names the reason the private
+      # ones didn't.
+      for i in $(seq 1 60); do
+        [ -f /tmp/rc-dev-env-staging ] && break
+        sleep 5
+      done
+      [ -f /tmp/rc-dev-env-staging ] || echo "WARNING: rc dev up never delivered /tmp/rc-dev-env-staging — GH_TOKEN absent, private clones will fail." >&2
+{% endif %}
       if [ -f /tmp/rc-dev-env-staging ]; then
         cp /tmp/rc-dev-env-staging /home/ec2-user/.rc-dev-env
         chown ec2-user:ec2-user /home/ec2-user/.rc-dev-env
@@ -231,13 +249,6 @@ write_files:
         set -a && . "$HOME/.rc-dev-env" && set +a
       fi
       cd "$RC_DEV_WORKSPACE" 2>/dev/null || true
-{% if has_env %}
-  - path: /tmp/rc-dev-env-staging
-    permissions: '0600'
-    owner: root:root
-    content: |
-{{ rc_dev_env_content | indent(6, True) }}
-{% endif %}
 
 runcmd:
   # A t4g.large running the full stack sits at ~90% memory with ZERO swap, and

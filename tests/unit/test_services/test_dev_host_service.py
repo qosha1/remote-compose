@@ -455,3 +455,144 @@ class TestDefaultInstanceType:
         from remote_compose.utils.ec2_instance_types import get_arch
 
         assert get_arch("t4g.2xlarge") == "arm64"
+
+
+class TestNoSecretsInStateFile:
+    """.rc/dev-hosts.yml is plain YAML in the operator's working directory.
+
+    It was storing the live clone PAT verbatim under source.gh_token — one per
+    box ever provisioned, still sitting there long after those boxes were
+    destroyed. Nothing reads the field back, so it has no business being
+    written; the box gets its token over SSH at provision time.
+    """
+
+    STALE = "gho_stalefaketokenfortestsonly00000000"
+
+    def _state(self, tmp_path):
+        import yaml
+
+        return yaml.safe_load((tmp_path / "dev-hosts.yml").read_text())["hosts"]
+
+    def test_create_host_does_not_persist_the_token(self, service, tmp_path):
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        service.create_host(
+            name="alice",
+            source=GitSource(
+                url="https://github.com/owner/repo.git",
+                ref="main",
+                gh_token=self.STALE,
+                extra_env={"ANTHROPIC_API_KEY": "sk-ant-fake"},
+            ),
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+
+        raw = (tmp_path / "dev-hosts.yml").read_text()
+        assert self.STALE not in raw
+        assert "sk-ant-fake" not in raw
+        source = self._state(tmp_path)["alice"]["source"]
+        assert "gh_token" not in source
+        assert "extra_env" not in source
+        # ...and the parts that identify the box are untouched.
+        assert source["url"] == "https://github.com/owner/repo.git"
+        assert source["ref"] == "main"
+
+    def test_create_host_does_not_persist_the_token_on_rollback_failure(
+        self, service, mock_terraform_runner, tmp_path
+    ):
+        # The failure path writes its own state entry so the orphan stays
+        # trackable — it must scrub too, or the leak just moves.
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        mock_terraform_runner.apply.side_effect = RuntimeError("apply blew up")
+        mock_terraform_runner.destroy.side_effect = RuntimeError("destroy blew up too")
+
+        with pytest.raises(RuntimeError):
+            service.create_host(
+                name="alice",
+                source=GitSource(
+                    url="https://github.com/owner/repo.git", gh_token=self.STALE
+                ),
+                instance_type="t4g.medium",
+                region="us-west-1",
+            )
+
+        raw = (tmp_path / "dev-hosts.yml").read_text()
+        assert self._state(tmp_path)["alice"]["status"] == "failed"
+        assert self.STALE not in raw
+
+    def test_existing_state_file_is_scrubbed_on_the_next_write(
+        self, service, tmp_path, mock_aws_factory
+    ):
+        # Four live tokens were sitting in a real state file when this landed.
+        # Rewriting on save means the first ordinary command after upgrading
+        # cleans them out, with no separate migration to remember to run.
+        import yaml
+
+        (tmp_path / "dev-hosts.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "hosts": {
+                        "legacy": {
+                            "name": "legacy",
+                            "source": {
+                                "type": "git",
+                                "url": "https://github.com/owner/repo.git",
+                                "ref": "main",
+                                "gh_token": self.STALE,
+                            },
+                            "instance_type": "t4g.medium",
+                            "region": "us-west-1",
+                            "instance_id": "i-0123456789abcdef0",
+                            "status": "running",
+                        }
+                    }
+                }
+            )
+        )
+
+        service.stop_host("legacy")
+
+        raw = (tmp_path / "dev-hosts.yml").read_text()
+        assert self.STALE not in raw
+        assert self._state(tmp_path)["legacy"]["status"] == "stopped"
+        assert (
+            self._state(tmp_path)["legacy"]["source"]["url"]
+            == "https://github.com/owner/repo.git"
+        )
+
+    def test_legacy_state_file_still_loads(self, service, tmp_path):
+        # Back-compat: rc must not choke on a file written by the old code.
+        import yaml
+
+        from remote_compose.dev_host.bootstrap import source_from_dict
+
+        (tmp_path / "dev-hosts.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "hosts": {
+                        "legacy": {
+                            "name": "legacy",
+                            "source": {
+                                "type": "git",
+                                "url": "https://github.com/owner/repo.git",
+                                "ref": "main",
+                                "gh_token": self.STALE,
+                                "extra_env": {"ANTHROPIC_API_KEY": "sk-ant-fake"},
+                            },
+                            "instance_type": "t4g.medium",
+                            "region": "us-west-1",
+                            "status": "running",
+                        }
+                    }
+                }
+            )
+        )
+
+        record = service.get_host("legacy")
+        assert [h.name for h in service.list_hosts()] == ["legacy"]
+        # The serialized form still round-trips through source_from_dict.
+        assert source_from_dict(record.source).url == (
+            "https://github.com/owner/repo.git"
+        )

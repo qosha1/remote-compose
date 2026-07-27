@@ -10,11 +10,17 @@ Two flavors of one tool:
 ### 🚀 `rc dev up` — disposable cloud dev environments with an agent inside
 
 ```bash
-rc dev up alice \
+GH_TOKEN="$(gh auth token)" rc dev up alice \
   --repo https://github.com/owner/myapp \
-  --compose docker-compose.yml \
-  --gh-token "$(gh auth token)" --skip-permissions
+  --compose docker-compose.yml --skip-permissions
 ```
+
+Private repos need a GitHub PAT. `rc dev up` looks for one in the StartSimpli
+vault first (via the local `simpli` CLI, and only if it can actually read the
+repos you asked for), then falls back to `$GH_TOKEN`. `--no-vault` skips the
+lookup; `--gh-token` still works but puts the token in your shell history.
+Whichever it finds is handed to the box over SSH — never through EC2 user-data,
+and never written to `.rc/dev-hosts.yml`.
 
 In ~5 minutes you get a fresh EC2 box with: docker, your repo cloned, the compose stack running, and **Claude Code pre-authenticated in a tmux session** waiting for you to attach. `rc dev attach alice` drops you into it. One box per agent or per branch. Work in parallel on isolated infra. `rc dev destroy` when done.
 

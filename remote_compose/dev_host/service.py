@@ -179,7 +179,9 @@ class DevHostService(BaseService):
 
     def _save_state(self, hosts: dict[str, dict]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(yaml.safe_dump({"hosts": hosts}, sort_keys=True))
+        self.state_path.write_text(
+            yaml.safe_dump({"hosts": _scrub_secrets(hosts)}, sort_keys=True)
+        )
 
     def _write_tfvars_if_possible(self, variables: dict) -> None:
         """Write terraform.tfvars.json to runner.working_dir if it's a real path.
@@ -514,18 +516,54 @@ class DevHostService(BaseService):
         return f"ssh -o StrictHostKeyChecking=no -i <key> ec2-user@{host}"
 
 
-def _source_to_dict(source: SourceSpec) -> dict:
-    """Serialize a SourceSpec dataclass to a state-file dict."""
-    if hasattr(source, "to_dict"):
-        return source.to_dict()
-    # dataclass fallback
-    from dataclasses import asdict as _asdict, is_dataclass
+def _scrub_secrets(hosts: dict[str, dict]) -> dict[str, dict]:
+    """Drop credential-bearing source fields from what goes on disk.
 
-    if is_dataclass(source):
-        return _asdict(source)
-    if isinstance(source, dict):
-        return source
-    raise TypeError(f"unsupported source type: {type(source)!r}")
+    .rc/dev-hosts.yml is an ordinary un-encrypted YAML file in the operator's
+    working directory, and it was storing live `gho_` PATs verbatim under
+    source.gh_token — four of them, one per box ever provisioned, still there
+    long after the boxes were destroyed.
+
+    Applied on save rather than only at write time so this also *cleans*: every
+    state-mutating command (up / stop / start / destroy) rewrites the whole
+    file, so the first one to run after this change strips whatever the old
+    code left behind. Reads stay tolerant — source_from_dict still accepts the
+    field, so a state file written by an older rc loads without complaint.
+    """
+    from .bootstrap import SECRET_SOURCE_FIELDS
+
+    cleaned = {}
+    for name, host in hosts.items():
+        if not isinstance(host, dict):
+            cleaned[name] = host
+            continue
+        source = host.get("source")
+        if isinstance(source, dict) and any(f in source for f in SECRET_SOURCE_FIELDS):
+            host = dict(host)
+            host["source"] = {
+                k: v for k, v in source.items() if k not in SECRET_SOURCE_FIELDS
+            }
+        cleaned[name] = host
+    return cleaned
+
+
+def _source_to_dict(source: SourceSpec) -> dict:
+    """Serialize a SourceSpec dataclass to a state-file dict, minus secrets."""
+    from .bootstrap import SECRET_SOURCE_FIELDS
+
+    if hasattr(source, "to_dict"):
+        d = source.to_dict()
+    else:
+        # dataclass fallback
+        from dataclasses import asdict as _asdict, is_dataclass
+
+        if is_dataclass(source):
+            d = _asdict(source)
+        elif isinstance(source, dict):
+            d = source
+        else:
+            raise TypeError(f"unsupported source type: {type(source)!r}")
+    return {k: v for k, v in d.items() if k not in SECRET_SOURCE_FIELDS}
 
 
 def _compress_user_data(user_data: str) -> str:

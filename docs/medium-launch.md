@@ -20,10 +20,9 @@ It does two things, and the first one is the one I actually want to talk about.
 ## `rc dev up` — a fresh EC2 box with Claude inside, in five minutes
 
 ```bash
-rc dev up alice \
+GH_TOKEN="$(gh auth token)" rc dev up alice \
   --repo https://github.com/owner/myapp \
   --compose docker-compose.yml \
-  --gh-token "$(gh auth token)" \
   --skip-permissions
 ```
 

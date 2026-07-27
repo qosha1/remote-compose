@@ -110,6 +110,79 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     return tfvars_path
 
 
+def _repo_slugs(source) -> list[str]:
+    """github.com owner/name for every repo this source will clone."""
+    from remote_compose.dev_host.vault import github_slug
+
+    urls = []
+    if getattr(source, "url", ""):
+        urls.append(source.url)
+    for repo in getattr(source, "repos", None) or []:
+        if isinstance(repo, dict) and repo.get("url"):
+            urls.append(repo["url"])
+    return [slug for slug in (github_slug(u) for u in urls) if slug]
+
+
+def _resolve_gh_token(
+    ctx, source, gh_token: str | None, vault_env: str | None, no_vault: bool
+) -> tuple[str, str]:
+    """Pick the GitHub PAT to clone with. Returns (token, printable-origin).
+
+    Order: an explicit --gh-token flag, then the StartSimpli vault, then
+    $GH_TOKEN.
+
+    The flag outranks the vault because it is an unambiguous instruction —
+    someone passing a specific token wants that token, typically because the
+    vault's is stale or wrong-scoped. $GH_TOKEN ranks *below* the vault: it is
+    ambient, frequently a leftover export nobody remembers setting, and the
+    whole point of this change is that the vault becomes the default source.
+    `--no-vault` restores the old ordering for anyone who wants it.
+
+    The vault's answer is checked against the repos actually being cloned
+    before it is preferred. Vault entries are shared and long-lived, so the
+    token in one is routinely scoped to a different set of repos than the
+    caller's — measured: the GitHub PAT presently in the debugg-ai dev vault
+    cannot see the debugg-ai repos `rc dev up` clones. Promoting it over a
+    working $GH_TOKEN on the strength of its name alone would trade a working
+    provision for a clone that 403s inside cloud-init six minutes later.
+
+    The vault is never mandatory. Any failure — not installed, not configured,
+    offline, no GitHub key, wrong scope — falls through to $GH_TOKEN and, if
+    that is empty too, to an un-authenticated clone, which is all a public repo
+    needs. The origin string is printed by the caller and never holds a secret.
+    """
+    from click.core import ParameterSource
+
+    from remote_compose.dev_host import vault as vault_mod
+
+    if gh_token and ctx.get_parameter_source("gh_token") == ParameterSource.COMMANDLINE:
+        # rc-h40: a token passed as a flag lands in shell history, `ps aux`, and
+        # any wrapper script's log. Honor it, but say so.
+        click.echo(
+            "  ⚠️  --gh-token was passed as a flag — leaks into shell history "
+            "and any wrapper-script logs. Prefer the vault (drop the flag) or "
+            "'GH_TOKEN=$(gh auth token) rc dev up ...'.",
+            err=True,
+        )
+        return gh_token, "--gh-token flag"
+
+    if no_vault:
+        vault_reason = "--no-vault"
+    else:
+        found = vault_mod.resolve_gh_token(env_slug=vault_env)
+        if found:
+            usable, why_not = vault_mod.token_can_read(found.token, _repo_slugs(source))
+            if usable:
+                return found.token, found.origin
+            vault_reason = f"{found.origin} {why_not}"
+        else:
+            vault_reason = found.reason
+
+    if gh_token:
+        return gh_token, f"$GH_TOKEN (vault not used: {vault_reason})"
+    return "", f"none — private clones will fail (vault not used: {vault_reason})"
+
+
 # ---------- new EC2 dev-host commands ----------
 
 
@@ -176,8 +249,22 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     "gh_token",
     default=None,
     envvar="GH_TOKEN",
-    help="GitHub PAT for cloning private repos (default: $GH_TOKEN). "
-    "WARNING: lands in EC2 user-data.",
+    help="GitHub PAT for cloning private repos. Overrides the vault when passed "
+    "as a flag; used as the fallback when it comes from $GH_TOKEN.",
+)
+@click.option(
+    "--vault-env",
+    "vault_env",
+    default=None,
+    envvar="RC_DEV_VAULT_ENV",
+    help="StartSimpli vault environment to read the GitHub PAT from "
+    "(default: the sole environment configured for the local `simpli` CLI).",
+)
+@click.option(
+    "--no-vault",
+    "no_vault",
+    is_flag=True,
+    help="Skip the StartSimpli vault lookup and use --gh-token / $GH_TOKEN only.",
 )
 @click.option(
     "--anthropic-key",
@@ -251,6 +338,8 @@ def dev_up_cmd(
     ebs_size_gb,
     aws_profile,
     gh_token,
+    vault_env,
+    no_vault,
     anthropic_key,
     env_files,
     extra_ports,
@@ -312,19 +401,13 @@ def dev_up_cmd(
             source.ref = branch
 
     # Inject secrets — GitSource and MultiGitSource share the same fields
+    token_origin = ""
     if isinstance(source, (GitSource, MultiGitSource)):
-        if gh_token:
-            source.gh_token = gh_token
-            # rc-h40: token leaks easily when passed via flag (shell history,
-            # /tmp/* logs from wrappers, ps -aux). Prefer env var.
-            if os.environ.get("GH_TOKEN") != gh_token:
-                click.echo(
-                    "  ⚠️  --gh-token was passed as a flag — leaks into shell "
-                    "history and any wrapper-script logs. Prefer "
-                    "'GH_TOKEN=$(gh auth token) rc dev up ...' (envvar is "
-                    "auto-picked up).",
-                    err=True,
-                )
+        resolved_token, token_origin = _resolve_gh_token(
+            ctx, source, gh_token, vault_env, no_vault
+        )
+        if resolved_token:
+            source.gh_token = resolved_token
         if anthropic_key:
             source.extra_env = dict(source.extra_env or {})
             source.extra_env["ANTHROPIC_API_KEY"] = anthropic_key
@@ -343,6 +426,11 @@ def dev_up_cmd(
     # rc-h40: sanitize source repr so secrets (gh_token, ANTHROPIC_API_KEY)
     # in dataclass fields don't print to stdout / scrollback / wrapper logs.
     click.echo(f"  source: {_sanitized_source_repr(source)}")
+    # Where the clone credential came from — provenance, never the value. Worth
+    # a line: the fallback chain is silent otherwise, and "which token is this
+    # box using" is the first question when a private clone 403s.
+    if token_origin:
+        click.echo(f"  github token: {token_origin}")
     if isinstance(source, (GitSource, MultiGitSource)) and source.skip_permissions:
         click.echo("  claude: --dangerously-skip-permissions (autonomous mode)")
 
@@ -389,6 +477,38 @@ def dev_up_cmd(
             for port in extra_ports:
                 _authorize_sg_port(sg_id, int(port), region, aws_profile)
                 click.echo(f"  ✓ port {port} open")
+
+    # Hand the box its secrets over SSH rather than through user-data, and do it
+    # FIRST: the cloud-init bootstrap blocks on this file before cloning, so
+    # every second here is a second the clone is stalled. See _deliver_dev_env.
+    dev_env_content = (
+        source.dev_env_content() if hasattr(source, "dev_env_content") else ""
+    )
+    if dev_env_content:
+        if not record.public_ip:
+            click.echo(
+                "  ! no public IP yet — cannot deliver GH_TOKEN over SSH. "
+                "Private repos will not clone.",
+                err=True,
+            )
+        else:
+            click.echo("\n  Delivering box secrets over SSH — waiting for SSH...")
+            keypair = service.credential_service.get_credential(
+                record.ssh_key_credential_id
+            )
+            priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
+            try:
+                _deliver_dev_env(record.public_ip, priv_pem, dev_env_content)
+                click.echo(
+                    "  ✓ secrets staged at /tmp/rc-dev-env-staging "
+                    "(never written to EC2 user-data)"
+                )
+            except Exception as exc:
+                click.echo(
+                    f"  ! secret delivery failed: {exc} — the box will clone "
+                    f"without $GH_TOKEN and private repos will fail.",
+                    err=True,
+                )
 
     # Copy env files into the box (requires SSH to be up — wait for it)
     if env_files or compose_files:
@@ -1118,7 +1238,11 @@ def dev_status_cmd(name):
     click.echo(f"public_ip:     {record.public_ip}")
     click.echo(f"public_dns:    {record.public_dns}")
     click.echo(f"created_at:    {record.created_at}")
-    click.echo(f"source:        {record.source}")
+    # State files written before secrets were scrubbed still carry a live
+    # source.gh_token; printing the raw dict put it on the terminal (and in the
+    # scrollback of whatever wrapper ran it). Redact on the way out — the file
+    # itself gets cleaned by the next state-mutating command.
+    click.echo(f"source:        {_sanitized_source_repr(record.source)}")
 
 
 # ---------- helpers shared with existing rc dev push ----------
@@ -1367,14 +1491,23 @@ _SECRET_FIELDS = (
 
 
 def _sanitized_source_repr(source) -> str:
-    """Render a source dataclass for stdout WITHOUT leaking secret-bearing
-    fields (gh_token, ANTHROPIC_API_KEY in extra_env, etc.). rc-h40."""
+    """Render a source for stdout WITHOUT leaking secret-bearing fields
+    (gh_token, ANTHROPIC_API_KEY in extra_env, etc.). rc-h40.
+
+    Accepts both a live SourceSpec dataclass and the plain dict form read back
+    out of .rc/dev-hosts.yml — `rc dev status` prints the latter, and older
+    state files still have a live PAT in it.
+    """
     from dataclasses import asdict, is_dataclass
 
     cls = type(source).__name__
-    if not is_dataclass(source):
+    if isinstance(source, dict):
+        cls = source.get("type", "source")
+        d = {k: v for k, v in source.items() if k != "type"}
+    elif is_dataclass(source):
+        d = asdict(source)
+    else:
         return f"{cls}({source!r})"
-    d = asdict(source)
     safe = {}
     for k, v in d.items():
         if any(s in k.lower() for s in _SECRET_FIELDS):
@@ -1439,6 +1572,80 @@ def _ports_from_compose(compose_paths) -> list[int]:
     return sorted(seen)
 
 
+def _ssh_opts_for(private_pem: str) -> list[str]:
+    """Materialize the private key to a 0600 temp file and return ssh/scp opts."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    return [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=5",
+    ]
+
+
+def _wait_for_ssh(public_ip: str, ssh_opts: list[str], timeout: int = 180) -> None:
+    """Block until sshd answers, or raise. AL2023 gets there in well under a minute."""
+    import subprocess
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (
+            subprocess.call(
+                ["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            == 0
+        ):
+            return
+        time.sleep(5)
+    raise click.ClickException(f"SSH never came up within {timeout // 60} minutes")
+
+
+def _deliver_dev_env(public_ip: str, private_pem: str, content: str) -> None:
+    """Hand the box its .rc-dev-env payload ($GH_TOKEN etc.) over SSH.
+
+    This is the whole point of the change: the payload used to be a write_files
+    entry in cloud-init, which put a live PAT into EC2 user-data (IMDS-readable
+    on the box, DescribeInstanceAttribute-readable off it) and into the local
+    terraform.tfvars.json / terraform.tfstate that carry user_data_base64.
+
+    Written through `cat` under `umask 077` rather than scp so the file is 0600
+    from the instant it exists — scp would create it world-readable and leave a
+    window before a follow-up chmod — and so the secret never lands in a temp
+    file on the operator's disk on the way out either.
+
+    The cloud-init bootstrap waits for this path before cloning, moves it to
+    ~/.rc-dev-env (0600) and deletes it.
+    """
+    import subprocess
+
+    ssh_opts = _ssh_opts_for(private_pem)
+    _wait_for_ssh(public_ip, ssh_opts)
+    subprocess.run(
+        ["ssh"]
+        + ssh_opts
+        + [
+            f"ec2-user@{public_ip}",
+            "umask 077 && cat > /tmp/rc-dev-env-staging",
+        ],
+        input=content.encode("utf-8"),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> None:
     """SCP a docker-compose file to /home/ec2-user/<basename> on the box.
 
@@ -1495,38 +1702,9 @@ def _wait_for_ssh_and_copy_env(
     likely still in flight and hasn't done its chown yet).
     """
     import subprocess
-    import tempfile
-    import time
 
-    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
-        kf.write(private_pem.encode("utf-8"))
-        keypath = kf.name
-    os.chmod(keypath, 0o600)
-
-    ssh_opts = [
-        "-i",
-        keypath,
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=5",
-    ]
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        if (
-            subprocess.call(
-                ["ssh"] + ssh_opts + [f"ec2-user@{public_ip}", "true"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            == 0
-        ):
-            break
-        time.sleep(5)
-    else:
-        raise click.ClickException("SSH never came up within 3 minutes")
+    ssh_opts = _ssh_opts_for(private_pem)
+    _wait_for_ssh(public_ip, ssh_opts)
 
     # Stage to /tmp/rc-dev-envs first (always writable), then sudo-cp into the
     # repo dir. This avoids racing the cloud-init chown of /home/ec2-user.
