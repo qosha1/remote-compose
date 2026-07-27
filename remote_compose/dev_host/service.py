@@ -262,6 +262,15 @@ class DevHostService(BaseService):
         user_data = (
             source.render_user_data() if hasattr(source, "render_user_data") else ""
         )
+        # EC2 caps user-data at 16 KiB, and the multi-git template had grown to
+        # 16,442 bytes — provisioning failed outright, terraform rolled back, and
+        # the "error" was the truncated blob itself, which reads like nothing in
+        # particular. Every comment added to cloud-init pushed toward that cliff.
+        #
+        # cloud-init detects and inflates gzip-compressed user-data, so compress
+        # it: the same payload lands around 4 KiB, leaving real headroom instead
+        # of a tripwire nobody sees until a box refuses to build.
+        user_data_b64 = _compress_user_data(user_data)
 
         tags = {
             "DevHost": name,
@@ -272,7 +281,7 @@ class DevHostService(BaseService):
             "instance_type": instance_type,
             "ami_id": ami,
             "ssh_public_key": public_openssh,
-            "user_data": user_data,
+            "user_data_base64": user_data_b64,
             "ebs_size_gb": ebs_size_gb,
             "tags": tags,
             "region": region,
@@ -513,3 +522,23 @@ def _source_to_dict(source: SourceSpec) -> dict:
     if isinstance(source, dict):
         return source
     raise TypeError(f"unsupported source type: {type(source)!r}")
+
+
+def _compress_user_data(user_data: str) -> str:
+    """gzip+base64 a cloud-config blob so it fits EC2's 16 KiB user-data cap.
+
+    cloud-init sniffs the gzip magic bytes and inflates the payload itself, so
+    this is transparent on the box. mtime is pinned to 0 so the same input
+    always produces identical bytes — otherwise every terraform plan would show
+    a spurious user-data diff and replace the instance.
+    """
+    import base64
+    import gzip
+    import io
+
+    if not user_data:
+        return ""
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+        gz.write(user_data.encode("utf-8"))
+    return base64.b64encode(buf.getvalue()).decode("ascii")

@@ -99,7 +99,7 @@ class TestDevHostModuleValidates:
             "subnet_id",
             "ssh_public_key",
             "security_group_ports",
-            "user_data",
+            "user_data_base64",
             "ebs_size_gb",
             "tags",
         ):
