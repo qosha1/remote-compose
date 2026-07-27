@@ -1356,3 +1356,62 @@ class TestUserDataFitsEc2Limit:
         from remote_compose.dev_host.service import _compress_user_data
 
         assert _compress_user_data("") == ""
+
+
+class TestNoTokenPersistedOnDisk:
+    """The GitHub PAT must not survive in .git/config.
+
+    Cloning with the token in the URL leaves a live gho_ credential in
+    .git/config for every repo on the box, and tools copy it onward — beads
+    lifts the remote URL verbatim into .beads/config.yaml, so the token lands in
+    a second file nobody thinks to check. Found exactly that on two live boxes,
+    across all three repos.
+
+    Verified on a box that resetting origin + answering git auth from $GH_TOKEN
+    keeps fetch AND push working, so this costs no functionality.
+    """
+
+    def _bootstrap(self, src):
+        body = "\n".join(src.render_user_data().splitlines()[1:])
+        files = {f["path"]: f["content"] for f in yaml.safe_load(body)["write_files"]}
+        return files["/usr/local/bin/rc-dev-bootstrap.sh"]
+
+    def _both(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_origin_is_reset_to_a_clean_url(self):
+        for src in self._both():
+            assert "remote set-url origin" in self._bootstrap(
+                src
+            ), f"{src.type}: tokenized clone URL left in .git/config"
+
+    def test_auth_comes_from_the_environment(self):
+        for src in self._both():
+            boot = self._bootstrap(src)
+            assert "credential.helper" in boot, f"{src.type}: no credential helper"
+            assert (
+                "password=$GH_TOKEN" in boot
+            ), f"{src.type}: helper does not read the token from the env"
+
+    def test_helper_does_not_bake_the_token_at_render_time(self):
+        # The helper must reference $GH_TOKEN literally; rendering it with a
+        # concrete value would put the secret straight back into user-data.
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        src = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/backend.git"}],
+            compose_filenames=["docker-compose.full.yml"],
+            gh_token="gho_supersecretvalue",
+        )
+        boot = self._bootstrap(src)
+        assert (
+            "gho_supersecretvalue" not in boot.split("credential.helper")[1][:200]
+        ), "credential helper has a literal token baked into it"

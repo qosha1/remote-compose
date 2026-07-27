@@ -32,6 +32,14 @@ write_files:
       if [ -f /home/ec2-user/.rc-dev-env ]; then
         set -a && source /home/ec2-user/.rc-dev-env && set +a
       fi
+      # Never persist the PAT. Cloning with the token in the URL leaves it in
+      # .git/config on every repo, world-readable to anything on the box, and
+      # tools copy it onward — beads lifts the remote URL verbatim into its own
+      # config, so a live gho_ token ends up in a second file nobody thinks to
+      # check. Instead: reset origin to the clean URL and answer git's auth
+      # prompts from $GH_TOKEN in the environment, which is already present via
+      # .rc-dev-env. Nothing secret touches disk.
+      sudo -u ec2-user git config --global credential.helper '!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f'
       # Clone with optional GH token (set via SSM-injected env or runcmd export)
       if [ -n "${GH_TOKEN:-}" ]; then
         sudo -u ec2-user GH_TOKEN="${GH_TOKEN}" git clone "https://x-access-token:${GH_TOKEN}@github.com/{{ url | replace('https://github.com/', '') }}" {{ repo_name }}
@@ -40,6 +48,7 @@ write_files:
       fi
       cd {{ repo_name }}
       sudo -u ec2-user git checkout {{ ref }} || sudo -u ec2-user git checkout -b {{ ref }}
+      sudo -u ec2-user git remote set-url origin {{ url }}
       # Place any env files staged by `rc dev up --env <file>` into their
       # original cwd-relative paths under /home/ec2-user/. Done HERE (after
       # clone+checkout) to avoid pre-creating subdirs that block clone.
