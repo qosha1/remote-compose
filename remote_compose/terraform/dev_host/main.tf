@@ -88,7 +88,7 @@ resource "aws_instance" "dev_host" {
   associate_public_ip_address = true
   key_name                    = aws_key_pair.dev_host.key_name
   vpc_security_group_ids      = [aws_security_group.dev_host.id]
-  user_data                   = var.user_data
+  user_data_base64            = var.user_data_base64
   user_data_replace_on_change = false
 
   root_block_device {

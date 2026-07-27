@@ -1286,3 +1286,73 @@ class TestSwapfile:
             assert r.index("/swapfile") < r.index(
                 "rc-dev-bootstrap.sh"
             ), f"{src.type}: swap configured after the builds it protects"
+
+
+class TestUserDataFitsEc2Limit:
+    """EC2 caps user-data at 16 KiB and the multi-git blob crossed it.
+
+    At 16,442 bytes provisioning failed outright and terraform rolled the box
+    back. The surfaced "error" was the truncated blob itself, which reads like
+    nothing in particular — so a box that simply refused to build was the only
+    symptom. Every comment added to cloud-init pushed toward that cliff.
+
+    cloud-init inflates gzip-compressed user-data itself, so compressing takes
+    the same payload to ~8 KiB and turns a tripwire into real headroom.
+    """
+
+    EC2_USER_DATA_LIMIT = 16384
+
+    def _realistic_multigit(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        return MultiGitSource(
+            repos=[
+                {
+                    "url": "https://github.com/debugg-ai/debuggai-api",
+                    "target": "sentinal",
+                },
+                {
+                    "url": "https://github.com/debugg-ai/react-web-app",
+                    "target": "react-web-app",
+                },
+                {
+                    "url": "https://github.com/debugg-ai/browser-mgr",
+                    "target": "browser-mgr",
+                },
+            ],
+            compose_filenames=[
+                "docker-compose.full.yml",
+                "docker-compose.browser-mgr.yml",
+            ],
+        )
+
+    def test_compressed_user_data_fits_the_limit(self):
+        from remote_compose.dev_host.service import _compress_user_data
+
+        blob = _compress_user_data(self._realistic_multigit().render_user_data())
+        assert len(blob) < self.EC2_USER_DATA_LIMIT, (
+            f"compressed user-data is {len(blob)} bytes — over EC2's "
+            f"{self.EC2_USER_DATA_LIMIT} cap; provisioning will roll back"
+        )
+
+    def test_compression_is_deterministic(self):
+        # Non-deterministic bytes (gzip mtime) would make every terraform plan
+        # show a user-data diff and replace the instance.
+        from remote_compose.dev_host.service import _compress_user_data
+
+        raw = self._realistic_multigit().render_user_data()
+        assert _compress_user_data(raw) == _compress_user_data(raw)
+
+    def test_compressed_blob_is_gzip(self):
+        # cloud-init sniffs the gzip magic bytes to know it must inflate.
+        import base64
+
+        from remote_compose.dev_host.service import _compress_user_data
+
+        raw = base64.b64decode(_compress_user_data("#cloud-config\n"))
+        assert raw[:2] == b"\x1f\x8b", "not gzip — cloud-init will not inflate it"
+
+    def test_empty_user_data_stays_empty(self):
+        from remote_compose.dev_host.service import _compress_user_data
+
+        assert _compress_user_data("") == ""

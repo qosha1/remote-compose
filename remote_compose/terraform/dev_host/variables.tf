@@ -36,8 +36,8 @@ variable "security_group_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
-variable "user_data" {
-  description = "Cloud-init #cloud-config blob rendered by SourceSpec.render_user_data()."
+variable "user_data_base64" {
+  description = "gzip+base64 cloud-config blob (cloud-init inflates it). Compressed because EC2 caps user-data at 16 KiB."
   type        = string
 }
 
