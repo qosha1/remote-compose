@@ -231,6 +231,14 @@ write_files:
 {% endif %}
 
 runcmd:
+  # A t4g.large running the full stack sits at ~90% memory with ZERO swap, and
+  # AL2023 provisions none. Under pressure the kernel thrashes in reclaim rather
+  # than OOM-killing anything, so the box goes UNREACHABLE while looking healthy
+  # from AWS: status checks ok, CPU credits fine, TCP accepted on :22, but sshd
+  # can never fork and the SSH banner never arrives. Observed exactly that — and
+  # zero OOM kills in the journal, which is what makes it so confusing to
+  # diagnose. Swap turns "unreachable" into merely "slow".
+  - 'if ! swapon --show | grep -q .; then fallocate -l 4G /swapfile; chmod 600 /swapfile; mkswap /swapfile >/dev/null 2>&1; swapon /swapfile; if ! grep -q "^/swapfile" /etc/fstab; then echo "/swapfile none swap sw 0 0" >> /etc/fstab; fi; fi; swapon --show'
   - systemctl enable --now docker
   - usermod -aG docker ec2-user
   - mkdir -p /usr/local/lib/docker/cli-plugins

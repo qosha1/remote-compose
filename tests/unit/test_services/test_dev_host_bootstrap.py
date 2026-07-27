@@ -1240,3 +1240,49 @@ class TestClipboardWorksOnTheBox:
             assert (
                 "copy-pipe-and-cancel" in files["/home/ec2-user/.tmux.conf"]
             ), f"{src.type}: drag selects into tmux's buffer only"
+
+
+class TestSwapfile:
+    """A box with no swap goes UNREACHABLE rather than degrading.
+
+    A t4g.large running the full stack sits at ~90% memory and AL2023 ships no
+    swap. Under pressure the kernel thrashes in reclaim instead of OOM-killing
+    anything, so sshd can never fork: TCP is accepted on :22 but the banner
+    never arrives, while AWS still reports status checks ok and healthy CPU
+    credits. Observed live, with ZERO OOM kills in the journal — which is what
+    makes it so misleading. Swap turns "unreachable" into "slow".
+    """
+
+    def _runcmd(self, src):
+        body = "\n".join(src.render_user_data().splitlines()[1:])
+        return "\n".join(str(x) for x in yaml.safe_load(body)["runcmd"])
+
+    def _both(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_swap_is_provisioned(self):
+        for src in self._both():
+            r = self._runcmd(src)
+            assert "/swapfile" in r and "swapon" in r, f"{src.type}: no swap configured"
+
+    def test_swap_survives_reboot(self):
+        for src in self._both():
+            assert "/etc/fstab" in self._runcmd(
+                src
+            ), f"{src.type}: swap not persisted, lost on reboot"
+
+    def test_swap_is_set_up_before_the_image_builds(self):
+        # The Playwright/Chromium build is the memory spike that needs it.
+        for src in self._both():
+            r = self._runcmd(src)
+            assert r.index("/swapfile") < r.index(
+                "rc-dev-bootstrap.sh"
+            ), f"{src.type}: swap configured after the builds it protects"
