@@ -729,6 +729,100 @@ def dev_list_cmd(regions, all_regions):
         )
 
 
+def _claude_session_command(source: dict) -> str:
+    """Shell command that (re)launches the in-box claude session.
+
+    Mirrors what cloud-init's `runcmd` originally launched for this source's
+    `type`, so a session rebuilt after a stop/start (or a dead-session attach
+    fallback) comes back identical to first boot — same working dir, same
+    `--dangerously-skip-permissions` flag if the box was provisioned with it.
+    `runcmd` only ever fires on first boot, so nothing re-derives this later
+    unless we do it explicitly.
+    """
+    from remote_compose.dev_host.bootstrap import _repo_name_from_url
+
+    flags = "--dangerously-skip-permissions" if source.get("skip_permissions") else ""
+    if source.get("type") == "git" and source.get("url"):
+        repo_name = _repo_name_from_url(source["url"])
+        cd = f"cd /home/ec2-user/{repo_name} 2>/dev/null || cd /home/ec2-user"
+    else:
+        # multi-git/image/local/script sources all land at /home/ec2-user.
+        cd = "cd /home/ec2-user"
+    claude_cmd = f"claude {flags}".strip()
+    return f"{cd}; {claude_cmd}"
+
+
+def _ssh_opts(keypath: str) -> list[str]:
+    return [
+        "-i",
+        keypath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+    ]
+
+
+def _wait_for_ssh_ready(public_ip: str, private_pem: str, timeout: int = 180) -> bool:
+    """Poll until the box accepts an SSH command, or timeout."""
+    import subprocess
+    import tempfile
+    import time
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            proc = subprocess.run(
+                ["ssh"] + _ssh_opts(keypath) + [f"ec2-user@{public_ip}", "true"],
+                capture_output=True,
+                timeout=15,
+            )
+            if proc.returncode == 0:
+                return True
+        except subprocess.SubprocessError:
+            pass
+        time.sleep(5)
+    return False
+
+
+def _relaunch_claude_session(public_ip: str, private_pem: str, source: dict) -> bool:
+    """(Re)create the `claude` tmux session on a box that's already reachable.
+
+    A no-op if the session is somehow already alive (e.g. a very fast
+    stop/start that didn't actually kill it) — `tmux has-session` short
+    circuits the recreation.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+
+    launch_cmd = _claude_session_command(source)
+    remote_cmd = (
+        "tmux has-session -t claude 2>/dev/null && exit 0; "
+        f"tmux new-session -d -s claude -x 220 -y 50 '{launch_cmd}'"
+    )
+    try:
+        proc = subprocess.run(
+            ["ssh"] + _ssh_opts(keypath) + [f"ec2-user@{public_ip}", remote_cmd],
+            capture_output=True,
+            timeout=30,
+        )
+        return proc.returncode == 0
+    except subprocess.SubprocessError:
+        return False
+
+
 @dev_group.command(name="attach")
 @click.argument("name")
 @click.option(
@@ -779,11 +873,11 @@ def dev_attach_cmd(name, session):
     # process on the box does not help, because the re-encoding happens when
     # tmux paints the attaching terminal. LANG is exported too so anything the
     # user runs inside the session inherits a sane locale.
+    launch_cmd = _claude_session_command(record.source)
     remote_cmd = (
         'export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"; '
         f"tmux -u attach -t {session} 2>/dev/null || "
-        f"tmux -u new-session -s {session} "
-        f"'cd ~/$(ls ~ | head -1) 2>/dev/null; claude'"
+        f"tmux -u new-session -s {session} '{launch_cmd}'"
     )
     cmd = [
         "ssh",
@@ -875,6 +969,31 @@ def dev_start_cmd(name):
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
     click.echo(f"  ✓ started '{name}'")
+
+    # `stop`/`start` is a real EC2 power-off, not a suspend — it kills the
+    # in-box tmux server. cloud-init's `runcmd` (which launched the original
+    # `claude {flags}` session) only ever runs on first boot, so without this
+    # the box comes back with no claude session at all, and a subsequent
+    # `rc dev attach` used to fall back to a bare, unflagged `claude` —
+    # silently dropping --dangerously-skip-permissions and re-triggering the
+    # folder-trust prompt every time.
+    record = service.get_host(name)
+    if not record.public_ip:
+        return
+    cred = service.credential_service.get_credential(record.ssh_key_credential_id)
+    private_pem, _ = service.credential_service.get_ssh_keypair(cred)
+
+    click.echo("  waiting for SSH to restore the claude session...")
+    if _wait_for_ssh_ready(record.public_ip, private_pem) and _relaunch_claude_session(
+        record.public_ip, private_pem, record.source
+    ):
+        click.echo("  ✓ claude tmux session restored")
+    else:
+        click.echo(
+            "  ⚠️  couldn't confirm the claude session restarted — "
+            f"check with `rc dev attach {name}`.",
+            err=True,
+        )
 
 
 @dev_group.command(name="destroy")
