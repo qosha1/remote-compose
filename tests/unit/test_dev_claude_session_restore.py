@@ -149,7 +149,9 @@ class TestStartRestoresClaudeSession:
         runner = CliRunner()
         with (
             patch.object(dev_cli, "_build_service", return_value=service),
-            patch.object(dev_cli, "_wait_for_ssh_ready", return_value=True) as wait_mock,
+            patch.object(
+                dev_cli, "_wait_for_ssh_ready", return_value=True
+            ) as wait_mock,
             patch.object(
                 dev_cli, "_relaunch_claude_session", return_value=True
             ) as relaunch_mock,
