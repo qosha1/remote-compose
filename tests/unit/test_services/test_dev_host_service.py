@@ -455,3 +455,43 @@ class TestDefaultInstanceType:
         from remote_compose.utils.ec2_instance_types import get_arch
 
         assert get_arch("t4g.2xlarge") == "arm64"
+
+
+class TestDefaultEbsSize:
+    """30GiB (the old default) left a multi-repo box at 94% full right after
+    first boot: ~9GB images + ~7GB build cache + containers + volumes on top
+    of the OS and three repo checkouts (sentinal, react-web-app, browser-mgr).
+    Measured live on a running dev host. Heavy rebuild days (many agent
+    stacks in flight) fill whatever headroom is left even faster.
+    """
+
+    def test_cli_default_is_100gb(self):
+        from remote_compose.cli_commands.dev import dev_up_cmd
+
+        opt = next(p for p in dev_up_cmd.params if p.name == "ebs_size_gb")
+        assert opt.default == 100, f"CLI default is {opt.default}"
+
+    def test_service_default_matches_cli(self):
+        import inspect
+
+        from remote_compose.dev_host.service import DevHostService
+
+        sig = inspect.signature(DevHostService.create_host)
+        assert sig.parameters["ebs_size_gb"].default == 100
+
+    def test_terraform_default_matches(self):
+        from pathlib import Path
+
+        variables_tf = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "remote_compose"
+            / "terraform"
+            / "dev_host"
+            / "variables.tf"
+        )
+        content = variables_tf.read_text()
+        assert 'variable "ebs_size_gb"' in content
+        block = content.split('variable "ebs_size_gb"', 1)[1].split("}", 1)[0]
+        assert (
+            "default     = 100" in block
+        ), "terraform variable default drifted from the CLI/service default"

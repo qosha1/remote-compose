@@ -162,8 +162,8 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     "--ebs-size-gb",
     "ebs_size_gb",
     type=int,
-    default=30,
-    help="Root EBS size in GiB (default: 30).",
+    default=100,
+    help="Root EBS size in GiB (default: 100).",
 )
 @click.option(
     "--aws-profile",
