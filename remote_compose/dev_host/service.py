@@ -240,7 +240,12 @@ class DevHostService(BaseService):
         # during the builds.
         instance_type: str = "t4g.2xlarge",
         region: Optional[str] = None,
-        ebs_size_gb: int = 30,
+        # 30GiB (the old default) leaves a multi-repo box (sentinal +
+        # react-web-app + browser-mgr, 3 docker compose projects) at 94% full
+        # right after first boot — ~9GB images + ~7GB build cache + containers
+        # + volumes on top of the OS and repo checkouts. Heavy rebuild days
+        # (many agent stacks in flight) fill the remaining headroom fast.
+        ebs_size_gb: int = 100,
     ) -> DevHostRecord:
         # validate inputs eagerly
         arch = get_arch(instance_type)  # raises ValidationError on unknown

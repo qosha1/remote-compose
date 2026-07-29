@@ -44,7 +44,7 @@ variable "user_data_base64" {
 variable "ebs_size_gb" {
   description = "Root EBS volume size in GiB (gp3)."
   type        = number
-  default     = 30
+  default     = 100
 }
 
 variable "tags" {
