@@ -495,3 +495,61 @@ class TestDefaultEbsSize:
         assert (
             "default     = 100" in block
         ), "terraform variable default drifted from the CLI/service default"
+
+
+class TestFilesystemKeyStoreOverwritesStaleKeys:
+    """destroy_host doesn't remove local key material, so re-provisioning a
+    same-named box after a previous one was destroyed hits whatever mode that
+    leftover file was in. A 0400 leftover used to crash store_ssh_keypair with
+    a raw PermissionError instead of just being overwritten — hit for real
+    provisioning a fresh 'crawlgraph4' after a chmod 400'd leftover from an
+    earlier destroyed box of the same name.
+    """
+
+    def test_overwrites_a_readonly_leftover_private_key(self, tmp_path):
+        from remote_compose.dev_host.service import FilesystemKeyStore
+
+        store = FilesystemKeyStore(root=tmp_path)
+        priv_path = tmp_path / "dev-host-alice-key.pem"
+        priv_path.write_text("stale-old-key")
+        priv_path.chmod(0o400)
+
+        cred = store.store_ssh_keypair(
+            name="dev-host-alice-key",
+            private_pem="fresh-new-key",
+            public_openssh="ssh-ed25519 AAAA fake",
+        )
+
+        assert priv_path.read_text() == "fresh-new-key"
+        assert cred.id == str(priv_path)
+
+    def test_overwrites_a_readonly_leftover_public_key(self, tmp_path):
+        from remote_compose.dev_host.service import FilesystemKeyStore
+
+        store = FilesystemKeyStore(root=tmp_path)
+        pub_path = tmp_path / "dev-host-alice-key.pub"
+        pub_path.write_text("stale-old-pub")
+        pub_path.chmod(0o400)
+
+        store.store_ssh_keypair(
+            name="dev-host-alice-key",
+            private_pem="fresh-new-key",
+            public_openssh="ssh-ed25519 AAAA fresh",
+        )
+
+        assert pub_path.read_text() == "ssh-ed25519 AAAA fresh"
+
+    def test_fresh_keypair_still_gets_correct_modes(self, tmp_path):
+        from remote_compose.dev_host.service import FilesystemKeyStore
+
+        store = FilesystemKeyStore(root=tmp_path)
+        store.store_ssh_keypair(
+            name="dev-host-bob-key",
+            private_pem="key-material",
+            public_openssh="ssh-ed25519 AAAA fake",
+        )
+
+        priv_path = tmp_path / "dev-host-bob-key.pem"
+        pub_path = tmp_path / "dev-host-bob-key.pub"
+        assert oct(priv_path.stat().st_mode)[-3:] == "600"
+        assert oct(pub_path.stat().st_mode)[-3:] == "644"

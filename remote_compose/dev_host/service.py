@@ -66,9 +66,21 @@ class FilesystemKeyStore:
         self.root.mkdir(parents=True, exist_ok=True)
         priv_path = self.root / f"{name}.pem"
         pub_path = self.root / f"{name}.pub"
+        # destroy_host doesn't remove local key material, so re-provisioning a
+        # same-named box after a previous one was destroyed hits whatever this
+        # file's mode was left at. write_text() needs write permission on an
+        # EXISTING file to truncate it — a 0400 leftover (however it got that
+        # way: a prior chmod, restrictive umask, etc.) then crashes with a raw
+        # PermissionError instead of just being overwritten. Ensure writability
+        # first so storing a keypair for `name` always succeeds.
+        if priv_path.exists():
+            priv_path.chmod(0o600)
         priv_path.write_text(private_pem)
         priv_path.chmod(0o600)
+        if pub_path.exists():
+            pub_path.chmod(0o600)
         pub_path.write_text(public_openssh)
+        pub_path.chmod(0o644)
 
         # SimpleNamespace gives a generic credential-like object with .id and .name.
         from types import SimpleNamespace
