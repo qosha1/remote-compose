@@ -11,6 +11,8 @@ aws_client_factory; production wires the real ones via the constructor.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -192,6 +194,42 @@ class DevHostService(BaseService):
     def _save_state(self, hosts: dict[str, dict]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(yaml.safe_dump({"hosts": hosts}, sort_keys=True))
+
+    @contextlib.contextmanager
+    def _locked_state(self):
+        """Read-modify-write the state file under an exclusive file lock.
+
+        create_host used to load `hosts` once at the top of the method,
+        then save that same (by then minutes-stale, post-terraform-apply)
+        snapshot at the end — every save overwrote the WHOLE file with
+        whatever was in memory, however stale. Two `rc dev up`s running
+        concurrently (e.g. provisioning several boxes in parallel) would
+        each finish with a snapshot missing the other's entry, and whichever
+        saved last silently dropped it. Hit for real: spinning up 3 boxes at
+        once lost 2 of them from local state — they were fine in AWS the
+        whole time (`rc dev list` still finds them by tag), but `rc dev
+        attach`/`ssh`/`stop`/`start`/`destroy` all key off this file via
+        get_host(), so an untracked box can't be managed by name until
+        something re-adds it.
+
+        flock is per-process-group and released automatically on close, so
+        this is safe even if the process dies mid-critical-section (no
+        stale lock left behind, unlike a lockfile-existence convention).
+        """
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.touch(exist_ok=True)
+        with open(self.state_path, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                loaded = yaml.safe_load(f.read()) or {}
+                hosts = loaded.get("hosts", {}) or {}
+                yield hosts
+                f.seek(0)
+                f.truncate()
+                f.write(yaml.safe_dump({"hosts": hosts}, sort_keys=True))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     def _write_tfvars_if_possible(self, variables: dict) -> None:
         """Write terraform.tfvars.json to runner.working_dir if it's a real path.
@@ -389,8 +427,8 @@ class DevHostService(BaseService):
             status="running" if tf_outputs.get("instance_id") else "pending",
         )
 
-        hosts[name] = record.to_dict()
-        self._save_state(hosts)
+        with self._locked_state() as locked_hosts:
+            locked_hosts[name] = record.to_dict()
         return record
 
     def list_hosts(self) -> list[DevHostRecord]:
@@ -480,18 +518,18 @@ class DevHostService(BaseService):
         ec2 = self.aws_client_factory.get_client("ec2", region_name=record.region)
         if record.instance_id:
             ec2.stop_instances(InstanceIds=[record.instance_id])
-        hosts = self._load_state()
-        hosts[name]["status"] = "stopped"
-        self._save_state(hosts)
+        with self._locked_state() as hosts:
+            if name in hosts:
+                hosts[name]["status"] = "stopped"
 
     def start_host(self, name: str) -> None:
         record = self.get_host(name)
         ec2 = self.aws_client_factory.get_client("ec2", region_name=record.region)
         if record.instance_id:
             ec2.start_instances(InstanceIds=[record.instance_id])
-        hosts = self._load_state()
-        hosts[name]["status"] = "running"
-        self._save_state(hosts)
+        with self._locked_state() as hosts:
+            if name in hosts:
+                hosts[name]["status"] = "running"
 
     def destroy_host(self, name: str, force: bool = False) -> None:
         """Tear the host down. With force=True, proceed even if it is unknown.
@@ -527,9 +565,12 @@ class DevHostService(BaseService):
             self._refresh_tfvars_for_destroy(name, hosts[name])
 
         self.terraform_runner.destroy()
-        if name in hosts:
-            del hosts[name]
-            self._save_state(hosts)
+        # Reload under lock immediately before removing — terraform destroy
+        # can take ~1min, and the `hosts` loaded at the top of this method
+        # would otherwise go stale over that window the same way
+        # create_host's did (see _locked_state).
+        with self._locked_state() as locked_hosts:
+            locked_hosts.pop(name, None)
 
     def _refresh_tfvars_for_destroy(self, name: str, stored: dict) -> None:
         try:

@@ -387,6 +387,72 @@ class TestDestroyHost:
         mock_terraform_runner.destroy.assert_called_once()
 
 
+class TestConcurrentCreateHostDoesNotLoseEntries:
+    """create_host used to load `hosts` once at the top of the method,
+    before the (multi-minute) terraform apply, then save that same
+    by-then-stale snapshot at the end — every save overwrote the WHOLE
+    file with whatever was in memory. A second create_host finishing its
+    entire lifecycle while the first's apply was still in flight got
+    silently dropped by the first's eventual save. Hit for real:
+    provisioning 3 boxes in parallel lost 2 of them from local state (they
+    were fine in AWS; only local bookkeeping broke, but rc dev
+    attach/ssh/stop/start/destroy all key off this file).
+    """
+
+    def test_second_create_finishing_mid_apply_is_not_lost(
+        self, mock_credential_service, mock_aws_factory, tmp_path
+    ):
+        from remote_compose.dev_host.bootstrap import GitSource
+        from remote_compose.dev_host.service import DevHostService
+
+        service = DevHostService(
+            credential_service=mock_credential_service,
+            terraform_runner=None,
+            aws_client_factory=mock_aws_factory,
+            state_path=tmp_path / "dev-hosts.yml",
+        )
+
+        alice_runner = MagicMock()
+        bob_runner = MagicMock()
+        bob_runner.apply.return_value = {
+            "instance_id": "i-bob",
+            "public_ip": "203.0.113.20",
+            "public_dns": "ec2-203-0-113-20.compute.amazonaws.com",
+        }
+
+        def alice_apply_side_effect(*_a, **_k):
+            # Simulate "bob" finishing its ENTIRE create_host lifecycle
+            # while alice's apply is still in flight — exactly what running
+            # two `rc dev up`s in parallel produces.
+            service.terraform_runner = bob_runner
+            service.create_host(
+                name="bob",
+                source=GitSource(url="https://github.com/owner/bob.git", ref="main"),
+                instance_type="t4g.large",
+                region="us-west-1",
+            )
+            service.terraform_runner = alice_runner
+            return {
+                "instance_id": "i-alice",
+                "public_ip": "203.0.113.10",
+                "public_dns": "ec2-203-0-113-10.compute.amazonaws.com",
+            }
+
+        alice_runner.apply.side_effect = alice_apply_side_effect
+        service.terraform_runner = alice_runner
+
+        service.create_host(
+            name="alice",
+            source=GitSource(url="https://github.com/owner/alice.git", ref="main"),
+            instance_type="t4g.large",
+            region="us-west-1",
+        )
+
+        hosts = service._load_state()
+        assert "alice" in hosts, "the first (outer) create_host lost its own entry"
+        assert "bob" in hosts, "the second (inner/concurrent) create_host got dropped"
+
+
 class TestDestroyRefreshesTfvarsForSchemaDrift:
     """terraform.tfvars.json reflects whatever variable schema was current
     when the box was created. If the module's variables change later (e.g.
