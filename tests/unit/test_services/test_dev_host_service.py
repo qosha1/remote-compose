@@ -387,6 +387,84 @@ class TestDestroyHost:
         mock_terraform_runner.destroy.assert_called_once()
 
 
+class TestDestroyRefreshesTfvarsForSchemaDrift:
+    """terraform.tfvars.json reflects whatever variable schema was current
+    when the box was created. If the module's variables change later (e.g.
+    user_data -> user_data_base64, added for the user-data-gzip fix), destroy
+    used to fail outright on any box old enough to predate the change — "No
+    value for required variable" — even though nothing about tearing it down
+    depends on that variable's value. Hit for real destroying a box created
+    before that change. destroy must regenerate tfvars from the stored
+    record first.
+    """
+
+    def test_destroy_rewrites_stale_tfvars_before_destroying(
+        self, mock_credential_service, mock_aws_factory, tmp_path
+    ):
+        import json
+
+        from remote_compose.dev_host.bootstrap import GitSource
+        from remote_compose.dev_host.service import DevHostService
+
+        tf_dir = tmp_path / "tf"
+        tf_dir.mkdir()
+        runner = MagicMock()
+        runner.working_dir = tf_dir
+        runner.apply.return_value = {
+            "instance_id": "i-stale",
+            "public_ip": "203.0.113.9",
+            "public_dns": "ec2-203-0-113-9.compute.amazonaws.com",
+        }
+
+        service = DevHostService(
+            credential_service=mock_credential_service,
+            terraform_runner=runner,
+            aws_client_factory=mock_aws_factory,
+            state_path=tmp_path / "dev-hosts.yml",
+        )
+        service.create_host(
+            name="alice",
+            source=GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            instance_type="t4g.large",
+            region="us-west-1",
+        )
+
+        # Simulate schema drift: an old-format tfvars.json missing a variable
+        # the module now requires, as if the box predated the module change.
+        (tf_dir / "terraform.tfvars.json").write_text(
+            json.dumps({"name": "alice", "user_data": "stale-old-format"})
+        )
+
+        service.destroy_host("alice")
+
+        rewritten = json.loads((tf_dir / "terraform.tfvars.json").read_text())
+        assert "user_data_base64" in rewritten
+        assert rewritten["instance_type"] == "t4g.large"
+        runner.destroy.assert_called_once()
+
+    def test_destroy_still_tears_down_if_tfvars_refresh_fails(
+        self, mock_credential_service, mock_terraform_runner, mock_aws_factory, tmp_path
+    ):
+        """An unreconstructable stored source must not block the teardown
+        itself — refreshing tfvars is a best-effort improvement, not a new
+        way for destroy to fail."""
+        from remote_compose.dev_host.service import DevHostService
+
+        service = DevHostService(
+            credential_service=mock_credential_service,
+            terraform_runner=mock_terraform_runner,
+            aws_client_factory=mock_aws_factory,
+            state_path=tmp_path / "dev-hosts.yml",
+        )
+        service._save_state(
+            {"alice": {"name": "alice", "source": {"type": "bogus-unknown-type"}}}
+        )
+
+        service.destroy_host("alice")  # must not raise
+
+        mock_terraform_runner.destroy.assert_called_once()
+
+
 class TestSshCommand:
     def test_get_ssh_command_uses_stored_key(self, service, git_source):
         service.create_host(

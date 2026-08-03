@@ -24,7 +24,7 @@ from ..exceptions import (
 )
 from ..utils.ec2_instance_types import get_arch
 from ..utils.ami_catalog import get_ami_id
-from .bootstrap import SourceSpec
+from .bootstrap import SourceSpec, source_from_dict
 
 
 # Minimal local stand-in for BaseService — avoids the from-django import
@@ -512,10 +512,53 @@ class DevHostService(BaseService):
         if name not in hosts and not force:
             raise DevHostNotFoundError(f"dev host {name!r} not found in state")
 
+        # The persisted terraform.tfvars.json reflects whatever variable
+        # schema was current when the box was CREATED. If the module's
+        # variables have changed since (e.g. user_data -> user_data_base64,
+        # added in the user-data-gzip fix), destroy fails outright with "No
+        # value for required variable" on any box old enough to predate the
+        # change — even though nothing about tearing it down actually
+        # depends on that variable's value. Regenerate tfvars from the
+        # stored record first so destroy keeps working across schema drift
+        # instead of leaving old boxes permanently stuck (and billing).
+        # Best-effort: any failure here just leaves the existing tfvars.json
+        # in place, i.e. today's behavior — never a new way to fail.
+        if name in hosts:
+            self._refresh_tfvars_for_destroy(name, hosts[name])
+
         self.terraform_runner.destroy()
         if name in hosts:
             del hosts[name]
             self._save_state(hosts)
+
+    def _refresh_tfvars_for_destroy(self, name: str, stored: dict) -> None:
+        try:
+            source = source_from_dict(stored.get("source") or {})
+            user_data = (
+                source.render_user_data() if hasattr(source, "render_user_data") else ""
+            )
+            ssh_public_key = ""
+            cred_id = stored.get("ssh_key_credential_id")
+            if cred_id:
+                cred = self.credential_service.get_credential(cred_id)
+                _, ssh_public_key = self.credential_service.get_ssh_keypair(cred)
+            variables = {
+                "name": name,
+                "instance_type": stored.get("instance_type") or "t4g.large",
+                "ami_id": stored.get("ami") or "",
+                "ssh_public_key": ssh_public_key,
+                "user_data_base64": _compress_user_data(user_data),
+                # Not persisted anywhere on the record — irrelevant for a
+                # pure destroy (it deletes whatever's in tfstate regardless
+                # of variable-driven attribute values; only presence/type
+                # matters for terraform to evaluate the plan).
+                "ebs_size_gb": 100,
+                "tags": {"DevHost": name, "ManagedBy": "rc-dev"},
+                "region": stored.get("region") or "",
+            }
+            self._write_tfvars_if_possible(variables)
+        except Exception:
+            pass
 
     def get_ssh_command(self, name: str) -> str:
         """Return a shell-ready ssh invocation string for `rc dev ssh`."""
