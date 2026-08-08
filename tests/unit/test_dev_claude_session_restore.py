@@ -7,6 +7,14 @@ before this fix a stopped-then-started box came back with no claude session
 at all, and `rc dev attach`'s dead-session fallback launched a bare,
 unflagged `claude` — silently dropping --dangerously-skip-permissions and
 re-triggering the folder-trust prompt on every stop/start cycle.
+
+Also covers --continue (resume the agent's actual conversation, not just a
+fresh session, across a stop/start or Spot interruption) and its `|| claude
+{flags}` fallback — load-bearing, not defensive filler: measured live,
+`claude --continue` in interactive mode can exit 1 ("No deferred tool marker
+found in the resumed session"), and a command that exits non-zero as a
+detached tmux pane's sole process kills the pane, the window, and the whole
+tmux server with it.
 """
 
 from __future__ import annotations
@@ -47,7 +55,7 @@ class TestClaudeSessionCommand:
             }
         )
         assert "--dangerously-skip-permissions" not in cmd
-        assert cmd.rstrip().endswith("claude")
+        assert cmd.rstrip().endswith("claude --continue || claude")
 
     def test_git_source_ssh_style_url(self):
         cmd = dev_cli._claude_session_command(
@@ -63,19 +71,47 @@ class TestClaudeSessionCommand:
         cmd = dev_cli._claude_session_command(
             {"type": "multi-git", "skip_permissions": True}
         )
-        assert cmd == "cd /home/ec2-user; claude --dangerously-skip-permissions"
+        assert cmd == (
+            "cd /home/ec2-user; "
+            "claude --continue --dangerously-skip-permissions "
+            "|| claude --dangerously-skip-permissions"
+        )
 
     def test_multi_git_source_without_skip_permissions(self):
         cmd = dev_cli._claude_session_command(
             {"type": "multi-git", "skip_permissions": False}
         )
-        assert cmd == "cd /home/ec2-user; claude"
+        assert cmd == "cd /home/ec2-user; claude --continue || claude"
 
     def test_source_missing_skip_permissions_key_defaults_off(self):
         # ImageSource/LocalSource/ScriptSource never carry this field at all.
         cmd = dev_cli._claude_session_command({"type": "image"})
         assert "--dangerously-skip-permissions" not in cmd
-        assert cmd == "cd /home/ec2-user; claude"
+        assert cmd == "cd /home/ec2-user; claude --continue || claude"
+
+    def test_always_includes_continue_regardless_of_skip_permissions(self):
+        # A stop/start or a Spot interruption stopping the box is only half
+        # handled by the code on disk surviving — the relaunched agent needs
+        # --continue to resume its actual conversation too.
+        for skip_permissions in (True, False):
+            cmd = dev_cli._claude_session_command(
+                {"type": "multi-git", "skip_permissions": skip_permissions}
+            )
+            assert "--continue" in cmd
+
+    def test_continue_has_a_fallback_to_bare_claude(self):
+        # Load-bearing, not defensive filler — measured live, `claude
+        # --continue` in interactive mode can exit 1 ("No deferred tool
+        # marker found in the resumed session"), and a command that exits
+        # non-zero as a detached tmux pane's sole process kills the pane,
+        # the window, and the whole tmux server with it. Without a fallback
+        # baked into the command itself, a failed --continue means `rc dev
+        # attach` has nothing at all to attach to.
+        for skip_permissions in (True, False):
+            cmd = dev_cli._claude_session_command(
+                {"type": "multi-git", "skip_permissions": skip_permissions}
+            )
+            assert " || claude" in cmd
 
 
 # ---------------------------------------------------------------------------

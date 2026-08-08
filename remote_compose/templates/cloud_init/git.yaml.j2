@@ -150,7 +150,22 @@ write_files:
       tmux kill-session -t claude 2>/dev/null || true
       # -x/-y so a detached-created session is not pinned at 80x24, which
       # renders garbage when attached from a normal-size terminal.
-      tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude {{ claude_flags }}"
+      # --continue: resumes the most recent conversation for this directory
+      # if one exists (stop/start, Spot interruption). The box surviving a
+      # stop is only half the story without this — the relaunched agent
+      # otherwise has no memory of what it was doing even though the code on
+      # disk is untouched.
+      #
+      # `|| claude {{ claude_flags }}` fallback is load-bearing, not
+      # defensive filler: measured live, `claude --continue` in interactive
+      # mode can exit 1 ("No deferred tool marker found in the resumed
+      # session" — seen on a box whose copied ~/.claude.json carried a stale
+      # deferred-tool reference), and a command that exits non-zero as a
+      # detached tmux pane's sole process kills the pane, the window, and
+      # the whole tmux SERVER with it — `rc dev attach` then has nothing to
+      # attach to at all. The fallback keeps a session launching even when
+      # resuming fails for any reason.
+      tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user/{{ repo_name }} 2>/dev/null || cd /home/ec2-user; claude --continue {{ claude_flags }} || claude {{ claude_flags }}"
       # Clear the one-time "Do you trust this folder?" dialog. Without this,
       # `rc dev attach` drops you on a modal prompt rather than a usable agent —
       # which contradicts the "attach lands ready" promise `up` prints. The

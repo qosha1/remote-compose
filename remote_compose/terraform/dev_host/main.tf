@@ -91,6 +91,22 @@ resource "aws_instance" "dev_host" {
   user_data_base64            = var.user_data_base64
   user_data_replace_on_change = false
 
+  # spot_instance_type=persistent + interruption_behavior=stop (NOT the
+  # default one-time/terminate) so a Spot reclamation stops the instance —
+  # same as a deliberate `rc dev stop` — instead of destroying it. Without
+  # this, `rc dev start` would have nothing to start: a terminated instance
+  # is gone, EBS and all.
+  dynamic "instance_market_options" {
+    for_each = var.spot ? [1] : []
+    content {
+      market_type = "spot"
+      spot_options {
+        spot_instance_type             = "persistent"
+        instance_interruption_behavior = "stop"
+      }
+    }
+  }
+
   root_block_device {
     volume_type = "gp3"
     volume_size = var.ebs_size_gb

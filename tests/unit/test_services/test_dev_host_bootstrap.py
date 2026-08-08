@@ -1133,6 +1133,60 @@ class TestOrphanedEipRelease:
         assert dev._release_orphaned_eips("x", "us-west-1", None) == []
 
 
+class TestFirstBootSessionIsResumable:
+    """The first-boot claude session must launch with --continue, with a
+    fallback to bare `claude` if it fails.
+
+    A box surviving a stop (deliberate `rc dev stop`, or a Spot interruption
+    configured to stop rather than terminate) is only half the story if the
+    relaunched agent has no memory of what it was doing — the code on disk
+    survives either way, but without --continue every relaunch starts a
+    brand new conversation.
+
+    The `|| claude {flags}` fallback is load-bearing, not defensive filler.
+    Measured live: `claude --continue` in interactive mode can exit 1 with
+    "No deferred tool marker found in the resumed session" — seen on a box
+    whose copied ~/.claude.json carried a stale deferred-tool reference from
+    the local machine, not a case of "no prior session" (that case IS a safe
+    no-op, verified separately). A command that exits non-zero as a detached
+    tmux pane's sole process kills the pane, the window, and the whole tmux
+    SERVER along with it — `rc dev attach` then has nothing to attach to at
+    all, on a box that never even got the chance to use --continue for real.
+    """
+
+    def test_git_source_first_boot_uses_continue(self):
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+        assert "claude --continue" in rendered
+
+    def test_git_source_first_boot_has_fallback(self):
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+        assert "claude --continue" in rendered
+        assert " || claude" in rendered
+
+    def test_multi_git_source_first_boot_uses_continue(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        rendered = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/backend.git"}],
+            compose_filenames=["docker-compose.full.yml"],
+        ).render_user_data()
+        assert "claude --continue" in rendered
+
+    def test_multi_git_source_first_boot_has_fallback(self):
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        rendered = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/backend.git"}],
+            compose_filenames=["docker-compose.full.yml"],
+        ).render_user_data()
+        assert "claude --continue" in rendered
+        assert " || claude" in rendered
+
+
 class TestAttachForcesUtf8:
     """`rc dev attach` must not hand the user an ACS-garbled UI.
 

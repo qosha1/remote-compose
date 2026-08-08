@@ -166,6 +166,17 @@ def _write_tfvars(host_name: str, variables: dict) -> Path:
     help="Root EBS size in GiB (default: 100).",
 )
 @click.option(
+    "--spot/--no-spot",
+    "spot",
+    default=True,
+    show_default=True,
+    help="Request the instance as a persistent Spot Instance (~50-65% "
+    "cheaper for the t4g family) instead of on-demand. Configured to STOP "
+    "rather than terminate on reclamation, so `rc dev stop`/`start` keeps "
+    "working — the tradeoff is `start` needing spare Spot capacity, which "
+    "on-demand doesn't.",
+)
+@click.option(
     "--aws-profile",
     "aws_profile",
     default=None,
@@ -249,6 +260,7 @@ def dev_up_cmd(
     instance_type,
     region,
     ebs_size_gb,
+    spot,
     aws_profile,
     gh_token,
     anthropic_key,
@@ -345,6 +357,11 @@ def dev_up_cmd(
     click.echo(f"  source: {_sanitized_source_repr(source)}")
     if isinstance(source, (GitSource, MultiGitSource)) and source.skip_permissions:
         click.echo("  claude: --dangerously-skip-permissions (autonomous mode)")
+    click.echo(
+        "  capacity: spot (persistent, stops on reclamation)"
+        if spot
+        else "  capacity: on-demand"
+    )
 
     if not aws_profile:
         aws_profile = _aws_profile_from_rc_yml(ctx) or os.environ.get("AWS_PROFILE")
@@ -362,6 +379,7 @@ def dev_up_cmd(
             instance_type=instance_type,
             region=region,
             ebs_size_gb=ebs_size_gb,
+            spot=spot,
         )
     except RemoteComposeError as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -705,7 +723,7 @@ def dev_list_cmd(regions, all_regions):
         return
 
     click.echo(
-        f"{'NAME':<22} {'STATUS':<10} {'TYPE':<14} {'REGION':<12} "
+        f"{'NAME':<22} {'STATUS':<10} {'TYPE':<14} {'CAP':<8} {'REGION':<12} "
         f"{'PUBLIC_IP':<16} {'TRACKED':<10}"
     )
     for h in sorted(hosts, key=lambda r: (r.region or "", r.name)):
@@ -715,8 +733,9 @@ def dev_list_cmd(regions, all_regions):
             tracked = "stale"  # in state, not in AWS
         else:
             tracked = "yes"
+        cap = "spot" if h.spot else "ondmd"
         click.echo(
-            f"{h.name:<22} {h.status:<10} {h.instance_type or '-':<14} "
+            f"{h.name:<22} {h.status:<10} {h.instance_type or '-':<14} {cap:<8} "
             f"{h.region or '-':<12} {h.public_ip or '-':<16} {tracked:<10}"
         )
     untracked = [h for h in hosts if h.tracked is False]
@@ -738,6 +757,21 @@ def _claude_session_command(source: dict) -> str:
     `--dangerously-skip-permissions` flag if the box was provisioned with it.
     `runcmd` only ever fires on first boot, so nothing re-derives this later
     unless we do it explicitly.
+
+    Always includes --continue: resumes the agent's most recent conversation
+    for this directory if one exists (stop/start, a Spot interruption that
+    stopped the box). The box surviving a stop is only half the story —
+    without this, the relaunched agent has no memory of what it was doing
+    even though the code on disk is untouched.
+
+    Falls back to a bare `claude {flags}` if --continue fails, via a shell
+    `||` baked into the returned command — load-bearing, not defensive
+    filler. Measured live: `claude --continue` in interactive mode can exit
+    1 with "No deferred tool marker found in the resumed session" (seen on a
+    box whose copied ~/.claude.json carried a stale deferred-tool
+    reference), and a command that exits non-zero as a detached tmux pane's
+    sole process kills the pane, the window, and the whole tmux SERVER along
+    with it — `rc dev attach` then has nothing to attach to at all.
     """
     from remote_compose.dev_host.bootstrap import _repo_name_from_url
 
@@ -748,8 +782,9 @@ def _claude_session_command(source: dict) -> str:
     else:
         # multi-git/image/local/script sources all land at /home/ec2-user.
         cd = "cd /home/ec2-user"
-    claude_cmd = f"claude {flags}".strip()
-    return f"{cd}; {claude_cmd}"
+    claude_cmd = f"claude --continue {flags}".strip()
+    fallback_cmd = f"claude {flags}".strip()
+    return f"{cd}; {claude_cmd} || {fallback_cmd}"
 
 
 def _ssh_opts(keypath: str) -> list[str]:
@@ -1230,6 +1265,7 @@ def dev_status_cmd(name):
 
     click.echo(f"name:          {record.name}")
     click.echo(f"status:        {record.status}")
+    click.echo(f"capacity:      {'spot' if record.spot else 'on-demand'}")
     click.echo(f"instance_type: {record.instance_type}")
     click.echo(f"region:        {record.region}")
     click.echo(f"ami:           {record.ami}")

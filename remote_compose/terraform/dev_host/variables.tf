@@ -47,6 +47,22 @@ variable "ebs_size_gb" {
   default     = 100
 }
 
+variable "spot" {
+  description = <<-EOT
+    Request the instance as a persistent Spot Instance instead of on-demand
+    (~50-65% cheaper for the t4g family — confirmed via the Pricing API, not
+    estimated). Uses spot_instance_type=persistent + interruption_behavior=
+    stop, NOT the default one-time/terminate combination, specifically so
+    `rc dev stop`/`start` keeps working the same way it does for on-demand:
+    a reclaimed Spot instance stops (EBS preserved) instead of terminating.
+    The real tradeoff is start-time capacity, not data loss: `rc dev start`
+    on a stopped Spot instance needs AWS to have spare capacity at or below
+    the current spot price, which on-demand doesn't require.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags applied to every resource. Must include DevHost and ManagedBy."
   type        = map(string)

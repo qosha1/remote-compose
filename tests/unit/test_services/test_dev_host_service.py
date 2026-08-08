@@ -641,6 +641,143 @@ class TestDefaultEbsSize:
         ), "terraform variable default drifted from the CLI/service default"
 
 
+class TestDefaultSpot:
+    """~50-65% cheaper than on-demand for the t4g family (confirmed via the
+    AWS Pricing API — not estimated). persistent + interruption_behavior=
+    stop (set in the terraform module, not here) keeps `rc dev stop`/`start`
+    working the same way it does on-demand — a reclaimed Spot instance stops
+    rather than terminates.
+    """
+
+    def test_cli_default_is_true(self):
+        from remote_compose.cli_commands.dev import dev_up_cmd
+
+        opt = next(p for p in dev_up_cmd.params if p.name == "spot")
+        assert opt.default is True, f"CLI default is {opt.default}"
+
+    def test_service_default_matches_cli(self):
+        import inspect
+
+        from remote_compose.dev_host.service import DevHostService
+
+        sig = inspect.signature(DevHostService.create_host)
+        assert sig.parameters["spot"].default is True
+
+    def test_terraform_default_matches(self):
+        from pathlib import Path
+
+        variables_tf = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "remote_compose"
+            / "terraform"
+            / "dev_host"
+            / "variables.tf"
+        )
+        content = variables_tf.read_text()
+        assert 'variable "spot"' in content
+        block = content.split('variable "spot"', 1)[1].split("}", 1)[0]
+        assert (
+            "default     = true" in block
+        ), "terraform variable default drifted from the CLI/service default"
+
+    def test_terraform_uses_persistent_stop_not_one_time_terminate(self):
+        """A plain spot request (one-time + terminate-on-interruption, AWS's
+        own defaults) would make a reclaimed box permanently gone — `rc dev
+        start` would have nothing to start. persistent + stop is what keeps
+        the stop/start lifecycle this tool depends on working the same way
+        it does for on-demand boxes."""
+        from pathlib import Path
+
+        main_tf = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "remote_compose"
+            / "terraform"
+            / "dev_host"
+            / "main.tf"
+        )
+        content = main_tf.read_text()
+        assert 'spot_instance_type             = "persistent"' in content
+        assert 'instance_interruption_behavior = "stop"' in content
+
+
+class TestCreateHostPassesSpot:
+    def test_default_spot_true_reaches_terraform_and_record(
+        self, service, git_source, mock_terraform_runner
+    ):
+        record = service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+
+        call_kwargs = mock_terraform_runner.apply.call_args.kwargs
+        variables = call_kwargs.get("variables") or {}
+        assert variables.get("spot") is True
+        assert record.spot is True
+
+    def test_spot_false_reaches_terraform_and_record(
+        self, service, git_source, mock_terraform_runner
+    ):
+        record = service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+            spot=False,
+        )
+
+        call_kwargs = mock_terraform_runner.apply.call_args.kwargs
+        variables = call_kwargs.get("variables") or {}
+        assert variables.get("spot") is False
+        assert record.spot is False
+
+    def test_persisted_and_reloaded_record_keeps_spot(
+        self, service, git_source, tmp_path
+    ):
+        import yaml
+
+        service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+            spot=False,
+        )
+
+        loaded = yaml.safe_load((tmp_path / "dev-hosts.yml").read_text())
+        assert loaded["hosts"]["alice"]["spot"] is False
+
+        reloaded = service.get_host("alice")
+        assert reloaded.spot is False
+
+    def test_pre_spot_state_entries_default_to_false(self, service, tmp_path):
+        """Records persisted before this field existed have no 'spot' key at
+        all — every one of them was on-demand, so that must be the read-time
+        fallback (deliberately NOT the create_host default of True, which
+        only applies to newly-created hosts)."""
+        import yaml
+
+        state_path = tmp_path / "dev-hosts.yml"
+        state_path.write_text(
+            yaml.safe_dump(
+                {
+                    "hosts": {
+                        "legacy": {
+                            "name": "legacy",
+                            "source": {},
+                            "instance_type": "t4g.large",
+                            "region": "us-west-1",
+                        }
+                    }
+                }
+            )
+        )
+
+        record = service.get_host("legacy")
+        assert record.spot is False
+
+
 class TestFilesystemKeyStoreOverwritesStaleKeys:
     """destroy_host doesn't remove local key material, so re-provisioning a
     same-named box after a previous one was destroyed hits whatever mode that
@@ -697,3 +834,89 @@ class TestFilesystemKeyStoreOverwritesStaleKeys:
         pub_path = tmp_path / "dev-host-bob-key.pub"
         assert oct(priv_path.stat().st_mode)[-3:] == "600"
         assert oct(pub_path.stat().st_mode)[-3:] == "644"
+
+
+class TestStartHostRetriesTransientSpotState:
+    """start_instances on a just-stopped persistent Spot Instance can fail
+    with IncorrectSpotRequestState for a few seconds after the stop settles.
+
+    Measured live: the same start_instances call that failed immediately
+    after `rc dev stop` succeeded on a bare retry ~10s later, no other
+    change made. Transient, not a real block — retry with a short backoff
+    instead of surfacing a raw ClientError traceback for something that
+    resolves itself if you just try again shortly after.
+    """
+
+    def _client_error(self, code: str):
+        from botocore.exceptions import ClientError
+
+        return ClientError(
+            {"Error": {"Code": code, "Message": "boom"}}, "StartInstances"
+        )
+
+    def test_retries_and_succeeds_after_transient_spot_state(
+        self, service, git_source, mock_aws_factory, monkeypatch
+    ):
+        service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+        ec2 = mock_aws_factory.get_client.return_value
+        ec2.start_instances.side_effect = [
+            self._client_error("IncorrectSpotRequestState"),
+            self._client_error("IncorrectSpotRequestState"),
+            None,  # third attempt succeeds
+        ]
+        monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+        service.start_host("alice")  # must not raise
+
+        assert ec2.start_instances.call_count == 3
+
+    def test_gives_up_after_max_attempts(
+        self, service, git_source, mock_aws_factory, monkeypatch
+    ):
+        service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+        ec2 = mock_aws_factory.get_client.return_value
+        ec2.start_instances.side_effect = self._client_error(
+            "IncorrectSpotRequestState"
+        )
+        monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+        from botocore.exceptions import ClientError
+
+        with pytest.raises(ClientError):
+            service.start_host("alice")
+
+    def test_does_not_retry_unrelated_errors(
+        self, service, git_source, mock_aws_factory, monkeypatch
+    ):
+        """A different failure (e.g. the instance genuinely doesn't exist)
+        must surface immediately, not get masked behind five retries of
+        something that was never going to resolve itself."""
+        service.create_host(
+            name="alice",
+            source=git_source,
+            instance_type="t4g.medium",
+            region="us-west-1",
+        )
+        ec2 = mock_aws_factory.get_client.return_value
+        ec2.start_instances.side_effect = self._client_error(
+            "InvalidInstanceID.NotFound"
+        )
+        sleep_calls = []
+        monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
+
+        from botocore.exceptions import ClientError
+
+        with pytest.raises(ClientError):
+            service.start_host("alice")
+        assert ec2.start_instances.call_count == 1
+        assert sleep_calls == []
