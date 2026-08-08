@@ -101,6 +101,7 @@ class TestDevHostModuleValidates:
             "security_group_ports",
             "user_data_base64",
             "ebs_size_gb",
+            "spot",
             "tags",
         ):
             assert (

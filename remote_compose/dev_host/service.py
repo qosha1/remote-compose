@@ -121,6 +121,10 @@ class DevHostRecord:
     ssh_key_credential_id: Optional[int] = None
     created_at: Optional[str] = None
     status: str = "pending"
+    # False default here (not True, unlike create_host's default) is
+    # deliberately the historically-accurate fallback for records persisted
+    # before this field existed — every one of them was on-demand.
+    spot: bool = False
     # rc-n14: reconciliation marker for `rc dev list` live view.
     #   True  = present in the local .rc/dev-hosts.yml state
     #   False = found in AWS by tag but NOT in local state (untracked leak)
@@ -276,6 +280,7 @@ class DevHostService(BaseService):
             ssh_key_credential_id=d.get("ssh_key_credential_id"),
             created_at=d.get("created_at"),
             status=d.get("status", "unknown"),
+            spot=d.get("spot", False),
         )
 
     # ---------- public API ----------
@@ -296,6 +301,14 @@ class DevHostService(BaseService):
         # + volumes on top of the OS and repo checkouts. Heavy rebuild days
         # (many agent stacks in flight) fill the remaining headroom fast.
         ebs_size_gb: int = 100,
+        # ~50-65% cheaper than on-demand for the t4g family (confirmed via
+        # the Pricing API). persistent + interruption_behavior=stop (set in
+        # the terraform module) keeps `rc dev stop`/`start` working the same
+        # way it does on-demand — a reclaimed Spot instance stops rather than
+        # terminates. The real tradeoff is start-time capacity, not data
+        # loss: `start` on a stopped Spot instance needs AWS to have spare
+        # capacity at or below the current price, which on-demand doesn't.
+        spot: bool = True,
     ) -> DevHostRecord:
         # validate inputs eagerly
         arch = get_arch(instance_type)  # raises ValidationError on unknown
@@ -342,6 +355,7 @@ class DevHostService(BaseService):
             "ssh_public_key": public_openssh,
             "user_data_base64": user_data_b64,
             "ebs_size_gb": ebs_size_gb,
+            "spot": spot,
             "tags": tags,
             "region": region,
         }
@@ -425,6 +439,7 @@ class DevHostService(BaseService):
             ssh_key_credential_id=getattr(credential, "id", None),
             created_at=datetime.now(timezone.utc).isoformat(),
             status="running" if tf_outputs.get("instance_id") else "pending",
+            spot=spot,
         )
 
         with self._locked_state() as locked_hosts:
@@ -494,6 +509,14 @@ class DevHostService(BaseService):
                             ssh_key_credential_id=sd.get("ssh_key_credential_id"),
                             created_at=sd.get("created_at"),
                             status=inst.get("State", {}).get("Name", "unknown"),
+                            # AWS reports this directly (InstanceLifecycle is
+                            # "spot" or absent) — prefer it over local state
+                            # for the same reason instance_type/ami/etc. do:
+                            # it's live truth, local state can be stale.
+                            spot=(
+                                inst.get("InstanceLifecycle") == "spot"
+                                or sd.get("spot", False)
+                            ),
                             tracked=name in state,
                         )
                     )
@@ -526,10 +549,39 @@ class DevHostService(BaseService):
         record = self.get_host(name)
         ec2 = self.aws_client_factory.get_client("ec2", region_name=record.region)
         if record.instance_id:
-            ec2.start_instances(InstanceIds=[record.instance_id])
+            self._start_instance_with_spot_retry(ec2, record.instance_id)
         with self._locked_state() as hosts:
             if name in hosts:
                 hosts[name]["status"] = "running"
+
+    def _start_instance_with_spot_retry(
+        self, ec2, instance_id: str, attempts: int = 15, delay_seconds: float = 15.0
+    ) -> None:
+        """start_instances on a just-stopped persistent Spot Instance can
+        fail with IncorrectSpotRequestState while AWS settles the spot
+        request's internal state after the stop. Transient, not a real
+        block — but the settling window is neither short nor consistent:
+        measured live across two back-to-back stop/start cycles on the same
+        instance, one retry succeeded in well under a minute, the other was
+        still failing after 5 attempts x 8s (40s) and only succeeded when
+        checked again some time after that. 15 attempts x 15s (~3.75min
+        worst case) is sized off that second, slower measurement rather than
+        the faster one — surfacing a raw ClientError traceback for something
+        that resolves itself if you just wait is worse than a slow success.
+        """
+        import time
+
+        from botocore.exceptions import ClientError
+
+        for attempt in range(1, attempts + 1):
+            try:
+                ec2.start_instances(InstanceIds=[instance_id])
+                return
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "IncorrectSpotRequestState" or attempt == attempts:
+                    raise
+                time.sleep(delay_seconds)
 
     def destroy_host(self, name: str, force: bool = False) -> None:
         """Tear the host down. With force=True, proceed even if it is unknown.
@@ -594,6 +646,7 @@ class DevHostService(BaseService):
                 # of variable-driven attribute values; only presence/type
                 # matters for terraform to evaluate the plan).
                 "ebs_size_gb": 100,
+                "spot": stored.get("spot", False),
                 "tags": {"DevHost": name, "ManagedBy": "rc-dev"},
                 "region": stored.get("region") or "",
             }

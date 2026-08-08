@@ -3,7 +3,10 @@
 
 # Testing
 pytest>=7.4.0
-pytest-django>=4.5.0
+# <4.13.0: 4.13.0 (released 2026-08-05) dropped support for Django<5.2 and
+# breaks pytest DB fixtures with `PytestDjangoTestCase has no attribute
+# '_pre_setup_ran_eagerly'` — this repo pins Django>=4.2,<5.0 (base.txt).
+pytest-django>=4.5.0,<4.13.0
 pytest-cov>=4.1.0
 pytest-mock>=3.11.0
 factory-boy>=3.3.0
