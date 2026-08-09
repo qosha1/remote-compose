@@ -77,6 +77,91 @@ EOT
 {%- endif %}
 {%- endif %}
 
+{%- if iam_plan.roles %}
+
+# =============================================================================
+# Declared task roles (rc.yml `iam_roles:`)
+#
+# Opt-in least privilege. aws_iam_role.task above is emitted unchanged and
+# stays the default: a service lands here only by naming `iam_role: <name>`,
+# and every service that doesn't keeps referencing the shared role exactly as
+# it always has (which matters: that ARN is in every deployed task def).
+#
+# A service on a declared role does NOT pick up the provider_config.ecs.iam
+# grants. Those remain attached to the shared role, which is the entire point:
+# a grant written for one service should not be held by the proxy and the
+# scheduler as well.
+#
+# Every declared role carries a copy of the shared role's ssmmessages:* policy.
+# rc sets `enable_execute_command = true` on every service, and `rc exec` /
+# `rc db backup` / `rc db restore` all authenticate the SSM agent with the TASK
+# role. A role without those four actions silently breaks all of them.
+# =============================================================================
+{%- endif %}
+{%- for role in iam_plan.roles %}
+{%- set rw = 11 if role.description else 4 %}
+
+resource "aws_iam_role" "{{ role.tf_name }}" {
+  {{ "name".ljust(rw) }} = "${var.project}-{{ role.name }}"
+{%- if role.description %}
+  {{ "description".ljust(rw) }} = "{{ role.description }}"
+{%- endif %}
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+{%- if role.tags %}
+
+  tags = {
+{%- for k, v in role.tags.items() %}
+    {{ ('"' ~ k ~ '"').ljust(role.tag_key_width) }} = "{{ v }}"
+{%- endfor %}
+  }
+{%- endif %}
+}
+
+resource "aws_iam_role_policy" "{{ role.tf_name }}_execute_command" {
+  name = "${var.project}-{{ role.name }}-exec-cmd"
+  role = aws_iam_role.{{ role.tf_name }}.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+      ]
+      Resource = "*"
+    }]
+  })
+}
+{%- for arn in role.managed_policies %}
+
+resource "aws_iam_role_policy_attachment" "{{ role.tf_name }}_managed_{{ loop.index0 }}" {
+  role       = aws_iam_role.{{ role.tf_name }}.name
+  policy_arn = "{{ arn }}"
+}
+{%- endfor %}
+{%- if role.policy_json %}
+
+resource "aws_iam_role_policy" "{{ role.tf_name }}_app" {
+  name = "${var.project}-{{ role.name }}-app"
+  role = aws_iam_role.{{ role.tf_name }}.id
+
+  policy = <<EOT
+{{ role.policy_json }}
+EOT
+}
+{%- endif %}
+{%- endfor %}
+
 {%- if has_secrets %}
 # Task execution role needs GetSecretValue for every secret referenced.
 resource "aws_iam_role_policy" "task_execution_secrets" {

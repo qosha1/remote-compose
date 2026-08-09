@@ -321,6 +321,9 @@ provider_config:
     ec2_capacity:                      # used when any svc has launch_type: EC2
       instance_type: null              # null → auto-size from summed CPU/mem
       capacity_type: ON_DEMAND         # ON_DEMAND | SPOT | MIXED
+      imdsv2: required                 # required (default) | optional
+      metadata_hop_limit: 2            # 2 = containers keep IMDS; 1 = strict
+      block_task_imds: false           # true = awsvpc tasks can't reach IMDS
 
 terraform:
   output_dir: ./terraform/${provider}
@@ -345,11 +348,57 @@ services:
     type: proxy
     public: true
     port: 80
+  worker:
+    cpu: 512
+    memory: 1024
+    security_groups: [isolated]        # REPLACES the shared ${project}-tasks SG
+    subnets: tasks-private             # placement; assign_public_ip derived
+    iam_role: media-writer             # REPLACES the shared ${project}-task role
 
 secrets:
   - { name: django, source: file, path: .envs/.production/.django }
   - { name: db,     source: aws_sm, arn: "arn:aws:secretsmanager:..." }
+
+# Standalone network primitives — declared, not derived from services. Omit
+# the block entirely and the emitted terraform is unchanged.
+network:
+  security_groups:
+    isolated:                          # no `ingress` key = nothing reaches it
+      egress:                          # allow-list; no implicit 0.0.0.0/0
+        - to: endpoint:ecr             # sg: | service: | endpoint: | cidr: | alb | self
+        - to: endpoint:logs
+        - to: endpoint:s3
+  subnets:
+    tasks-private:
+      public: false
+      egress: endpoints                # endpoints | nat | none (no default route)
+  endpoints:
+    ecr:  { services: [ecr.api, ecr.dkr], subnets: [tasks-private] }
+    logs: { services: [logs],             subnets: [tasks-private] }
+    s3:   { services: [s3],               subnets: [tasks-private] }  # gateway
+
+repositories:
+  db-sidecar:
+    mirror: postgres:16-alpine         # rc creates the repo; you push the image
+
+# Declared task roles — same "declare it, reference it by name" shape as the
+# network block, same vocabulary as provider_config.ecs.iam. Omit the block and
+# every service keeps the shared ${project}-task role, unchanged.
+iam_roles:
+  media-writer:
+    managed_policies: []               # arn:aws:iam::…:policy/…
+    statements:
+      - sid: WriteMedia                # optional; alphanumeric (IAM's rule)
+        actions: [s3:PutObject]
+        resources: ["arn:aws:s3:::myapp-media/*"]
+        condition: {}                  # optional IAM Condition map
 ```
+
+Types live in `config/_network_types.py` / `config/_iam_types.py`;
+cross-resource reference resolution in `validate_network_refs` /
+`validate_iam_role_refs`; terraform view models in
+`provider/ecs/network_plan.py` / `provider/ecs/iam_plan.py`. `rc outputs`
+exports every created id.
 
 v1 configs upgrade cleanly via `rc migrate --in rc.yml --out rc.v2.yml`.
 Unknown keys become warnings; unmigratable keys require `--force`.

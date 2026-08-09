@@ -158,6 +158,12 @@ provider_config:
     #   private_subnet_ids: [subnet-c, subnet-d]  # optional; defaults to public
     #   security_group_ids: [sg-mesh]             # extra SGs attached to every
     #                                             # task (join an existing mesh)
+    #   internet_gateway_id: igw-0abc             # only needed if a declared
+    #                                             # `network.subnets` group sets
+    #                                             # public: true — an adopted
+    #                                             # VPC's IGW isn't rc's to name
+    # In adopt mode, declared `network.subnets` groups must carry explicit
+    # `cidrs: [...]`: rc won't carve a block out of a range it doesn't own.
     # rc pre-flights the VPC + subnets against AWS before deploying. In adopt
     # mode rc creates NO VPC/IGW/subnets/route-tables and does NOT touch the
     # VPC's DHCP options, so cross-service discovery must use FQDNs
@@ -305,6 +311,218 @@ services:
 
 Full schema reference: [ARCHITECTURE.md § rc.yml v2 at a glance](ARCHITECTURE.md#rcyml-v2-at-a-glance).
 
+### Declared network — standalone security groups, private subnets, VPC endpoints
+
+By default rc derives its network from your services: two security groups
+(`alb` and `tasks`), and every service lands on `tasks`, which carries implicit
+ALB ingress and blanket `egress → 0.0.0.0/0`. That is the right default for a
+web app and its workers.
+
+When you need an isolated blast radius — or when something *outside* rc
+launches tasks (a backend calling `run_task`) and has no service for rc to hang
+a group off — declare the network instead. These are standalone resources: a
+declared group can be attached to an rc service, referenced by another declared
+resource, or by nothing at all, in which case it simply exists and its id is
+exported.
+
+```yaml
+network:
+  security_groups:
+    isolated-tasks:
+      # No ingress key at all = nothing reaches this. rc never injects an ALB
+      # rule; a service that wants one says `from: alb`.
+      egress:                     # an allow-list, NOT the implicit ALL → 0.0.0.0/0
+        - to: endpoint:ecr        # …a declared VPC endpoint (defaults to 443)
+        - to: endpoint:logs
+        - to: endpoint:s3
+        - to: sg:api              # …another declared group
+          ports: [5000]
+        - to: cidr:0.0.0.0/0      # …or a literal CIDR
+          ports: [53]
+          protocol: udp
+
+  subnets:
+    tasks-private:
+      public: false
+      egress: endpoints           # endpoints | nat | none
+      # `endpoints` emits NO 0.0.0.0/0 route at all: reachability comes only
+      # from the VPC endpoints below. That is the NAT-free path — no NAT
+      # gateway, no hourly charge, no internet routing.
+
+  endpoints:
+    ecr:  { services: [ecr.api, ecr.dkr], subnets: [tasks-private] }
+    logs: { services: [logs],             subnets: [tasks-private] }
+    sts:  { services: [sts],              subnets: [tasks-private] }
+    s3:   { services: [s3],               subnets: [tasks-private] }   # gateway
+
+repositories:
+  db-sidecar:
+    mirror: postgres:16-alpine    # records intent; rc creates the repo, you push
+
+services:
+  worker:
+    security_groups: [isolated-tasks]   # REPLACES the shared tasks group
+    subnets: tasks-private              # assign_public_ip derived from the group
+```
+
+Rule sources and destinations are `<kind>:<value>` — `sg:`, `service:`,
+`endpoint:`, `cidr:` — plus the bare keywords `alb` and `self`.
+
+What rc enforces so you can't ship a broken segment:
+
+- **Default-deny is real.** Declared groups emit
+  `aws_vpc_security_group_{ingress,egress}_rule` resources rather than inline
+  blocks, so the AWS provider strips the allow-all egress rule AWS attaches at
+  creation. No rule means no access.
+- **Both halves of a two-sided rule.** `to: endpoint:ecr` grants the group
+  egress *and* grants the endpoint's own security group the matching ingress.
+  Writing one half and silently getting no connectivity is not expressible.
+- **Replace, never append.** A service naming `security_groups:` gets exactly
+  those — it is not joined to the shared `tasks` group, so it inherits neither
+  its ALB ingress nor its blanket egress. A `public: true` service that does
+  this must re-admit the ALB, or rc refuses.
+- **NAT-free subnets are checked.** A task placed in an `egress: endpoints`
+  subnet must be able to reach `ecr.api`, `ecr.dkr`, `s3`, and `logs` (plus
+  `secretsmanager` if it has secrets) through endpoints attached to *that same
+  subnet group*. Otherwise rc names the missing ones instead of letting the
+  deploy fail minutes later with `CannotPullContainerError`.
+- **Unreachable endpoints are refused.** An interface endpoint nothing egresses
+  to is a paid ENI per AZ serving no traffic.
+
+- **Address plan is checked, not assumed.** Subnet CIDRs are compared as
+  concrete networks, so an explicit `cidrs:` that overlaps an auto-allocated
+  block, rc's own built-in subnets, or another group is rejected at emit time
+  rather than at apply as `InvalidSubnet.Conflict`. A CIDR outside `vpc_cidr` is
+  rejected too.
+- **Names are checked against rc's own.** A declared group called `tasks`, or a
+  repository called `buildcache` or named after a service, would collide on the
+  AWS name — `terraform validate` passes and *apply* fails. rc catches those,
+  along with declared names that flatten to the same terraform address (`-` and
+  `.` both become `_`).
+
+Auto-allocated subnet CIDRs are derived from the group's **name**, not its
+position, so adding a group never moves an existing one's block. That matters
+because `cidr_block` is ForceNew on `aws_subnet`: renumbering a live group means
+terraform destroys and recreates subnets that have running task ENIs attached.
+Pin a block explicitly with `cidr_offset:` (or full `cidrs:`) if you want it
+independent of the name entirely.
+
+Omit both blocks and the emitted terraform is byte-identical to a stack that
+predates them.
+
+Every created id comes back out via `rc outputs`:
+
+```console
+$ rc outputs --env
+RC_CLUSTER_NAME=my-app-prod
+RC_VPC_ID=vpc-0a1b2c
+RC_SECURITY_GROUPS_ISOLATED_TASKS=sg-0d4e5f
+RC_SUBNETS_TASKS_PRIVATE=subnet-0aa,subnet-0bb
+RC_SUBNET_EGRESS_MODES_TASKS_PRIVATE=endpoints
+RC_VPC_ENDPOINTS_ECR_ECR_API=vpce-01
+RC_REPOSITORIES_DB_SIDECAR=1234.dkr.ecr.us-west-2.amazonaws.com/my-app/db-sidecar
+```
+
+`rc outputs --json` for machine consumption, `rc outputs <name>` for one value.
+
+### Declared task roles — per-service IAM instead of one shared role
+
+rc emits one task role, `${project}-task`, and every task definition points at
+it. `provider_config.ecs.iam` bolts grants onto *that* role, so a permission
+written for one service is silently held by every other service in the stack.
+
+Declare a role and name it on the services that need it:
+
+```yaml
+iam_roles:
+  media-writer:
+    description: S3 media write for the web tier
+    managed_policies:
+      - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+    statements:                        # same shape as provider_config.ecs.iam
+      - sid: WriteMedia                # optional; IAM requires alphanumeric
+        actions: [s3:PutObject, s3:GetObject]
+        resources: ["arn:aws:s3:::my-app-media/*"]
+        condition:                     # optional
+          Bool: { "aws:SecureTransport": "true" }
+    tags: { tier: web }                # surfaces as aws:PrincipalTag
+
+  locked-down: {}                      # no grants at all, deliberately
+
+services:
+  web:
+    iam_role: media-writer             # REPLACES the shared ${project}-task role
+  worker:
+    iam_role: locked-down
+  nginx: {}                            # no iam_role -> shared role, as before
+```
+
+Why a top-level block rather than `services.<name>.iam:` — grants cluster by
+tier, not by service, so inlining them means copy-pasting a list that then
+drifts; two services sharing `iam_role: media-writer` provably share one AWS
+role; and it matches the "declare it, reference it by name" shape the network
+block already uses.
+
+What holds regardless:
+
+- **The shared role is never removed or renamed.** `aws_iam_role.task` is still
+  emitted, still carries the `provider_config.ecs.iam` grants, and is still the
+  `task_role_arn` of every service that does not name an `iam_role:`. This is an
+  opt-in override, not a migration — a config that ignores it emits
+  byte-identical terraform.
+- **A declared role does *not* inherit `provider_config.ecs.iam`.** That is the
+  point: those grants stay on the shared role.
+- **ECS Exec keeps working.** Every declared role gets the same `ssmmessages:*`
+  policy the shared role has, because `rc exec` / `rc db backup` / `rc db
+  restore` authenticate the in-container SSM agent with the *task* role.
+- **A role nobody references is fine** — its ARN is exported for an out-of-band
+  consumer (`RC_IAM_ROLES_MEDIA_WRITER=arn:aws:iam::…:role/my-app-media-writer`).
+
+The task *execution* role (`${project}-task-exec`, the one ECS itself uses to
+pull images and read secrets) is untouched by any of this.
+
+### IMDS hardening on EC2 container instances
+
+Only relevant when a service sets `launch_type: EC2`. Fargate tasks take their
+credentials from the task metadata endpoint (169.254.170.2), not EC2 IMDS, and
+`aws_ecs_task_definition` has no metadata options to set — the exposure is the
+*instance* role, and it lives on `aws_launch_template.ec2`.
+
+rc now emits, by default:
+
+```hcl
+metadata_options {
+  http_endpoint               = "enabled"
+  http_tokens                 = "required"   # IMDSv2 only
+  http_put_response_hop_limit = 2
+}
+```
+
+`http_tokens = "required"` is the mitigation that matters: a forged `GET` from
+inside a container cannot mint the session token IMDSv2 demands, so an SSRF bug
+no longer yields the instance role. Tune it under `ec2_capacity`:
+
+```yaml
+provider_config:
+  ecs:
+    ec2_capacity:
+      imdsv2: required          # required (default) | optional
+      metadata_hop_limit: 2     # default 2; 1 is the strict setting
+      block_task_imds: false    # default false
+```
+
+The hop limit is 2 rather than 1 on purpose. It is the IP TTL of the token
+response, and each container network hop decrements it: 1 admits only the
+instance's own network namespace and cuts off every bridge-mode container,
+which is a silent, instance-wide change to make to a stack that already runs.
+And 1 is *not* the awsvpc cut-off it looks like — an awsvpc task reaches IMDS
+over its own ENI. To deny rc's tasks the instance role, set
+`block_task_imds: true`, which writes `ECS_AWSVPC_BLOCK_IMDS=true` into the ECS
+agent config. Tasks keep their own task role either way.
+
+`http_endpoint` is deliberately not configurable: disabling IMDS entirely stops
+the ECS agent registering the instance, so the stack would never run a task.
+
 ---
 
 ## Feature index
@@ -320,6 +538,10 @@ What's built and live-verified on the `portable-deploy` branch:
 ### ECS provider — what terraform we generate
 
 - VPC + 2 public + 2 private subnets, IGW, security groups, default routing
+- **Declared network** (`network:`) — standalone, nameable security groups with default-deny ingress/egress, subnet groups with an explicit egress mode (`endpoints` / `nat` / `none`), and VPC endpoints; per-service `security_groups:` / `subnets:` that *replace* rc's defaults ([details](#declared-network--standalone-security-groups-private-subnets-vpc-endpoints))
+- **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
+- **Declared task roles** (`iam_roles:`) — opt-in per-service IAM instead of one shared task role every service inherits; the shared `${project}-task` role stays exactly as it was for anything that doesn't opt in ([details](#declared-task-roles--per-service-iam-instead-of-one-shared-role))
+- **IMDS hardening on EC2 capacity** — IMDSv2 required on `aws_launch_template.ec2` by default, container-compatible hop limit, opt-in `ECS_AWSVPC_BLOCK_IMDS` ([details](#imds-hardening-on-ec2-container-instances))
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
@@ -342,6 +564,7 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc deploy [--no-build]` | build, push, terraform apply, force-roll, run auto_on_deploy hooks |
 | `rc destroy --yes` | terraform destroy |
 | `rc status` | ECS service health table |
+| `rc outputs [--json\|--env] [<name>]` | resource ids from the deployed stack — cluster, ALB, ECR repos, plus every declared security group / subnet / VPC endpoint / repository. `--env` emits `KEY=value` for piping into a `.env` |
 | `rc exec <service> -- <cmd...>` | run a one-off command inside a live task; reliable stdout via sentinels; full TTY when stdin is a tty |
 | `rc lifecycle <hook> [<service>]` | run a named hook from rc.yml (resolves declarer; handles `run_once` probes) |
 | `rc secrets push [--rollout/--no-rollout]` | parse each `.env` file → upload as JSON to its SM secret → force-rolls every service |
@@ -536,7 +759,7 @@ remote_compose/
 │           ├── cluster.tf.j2        # ECS cluster (Container Insights opt-in)
 │           ├── domain.tf.j2         # ACM cert (with SANs) + R53 records
 │           ├── efs.tf.j2            # EFS + access points (uid/gid/mode)
-│           ├── iam.tf.j2            # task-execution + task roles + ssmmessages policy
+│           ├── iam.tf.j2            # task-execution + shared/declared task roles + ssmmessages policy
 │           ├── network.tf.j2        # VPC, subnets, IGW, route tables
 │           ├── outputs.tf.j2        # ECR repo URLs, ALB DNS
 │           ├── providers.tf.j2      # AWS provider block

@@ -39,12 +39,194 @@ from ..base import (
     StatusReport,
 )
 from .autosize import EC2TaskDemand, auto_size
+from .iam_plan import IamPlan, build_iam_plan
+from .network_plan import (
+    NetworkPlan,
+    build_network_plan,
+    check_endpoint_reachability,
+    check_reserved_names,
+    tf_ident,
+)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 RunnerFactory = Callable[[Path], TerraformRunner]
 SessionFactory = Callable[[DeployContext], Any]
+
+
+def _parse_declared_network(ctx: DeployContext) -> tuple[Any, dict[str, Any]]:
+    """Re-read the ``network:`` / ``repositories:`` blocks off the raw rc.yml.
+
+    ``DeployContext`` carries the raw document rather than the parsed
+    ``RcConfigV2``, so the provider re-parses these two blocks rather than
+    threading a new field through every context construction site. The parse
+    is pure and cheap, and ``parse()`` has already validated the document once
+    by the time we get here — this cannot surface an error the user has not
+    already seen.
+    """
+    from ...config._schema_parser import _parse_network, _parse_repositories
+
+    raw = ctx.rc_yml_v2 or {}
+    network = _parse_network(raw.get("network"))
+    repositories = _parse_repositories(raw.get("repositories"))
+    network.validate()
+    for repo in repositories.values():
+        repo.validate()
+    return network, repositories
+
+
+def _parse_declared_iam_roles(ctx: DeployContext) -> dict[str, Any]:
+    """Re-read the ``iam_roles:`` block off the raw rc.yml.
+
+    Same rationale as :func:`_parse_declared_network`: ``DeployContext``
+    carries the raw document, and re-parsing one pure block is cheaper than
+    threading a new field through every context construction site.
+    """
+    from ...config._schema_parser import _parse_iam_roles
+
+    roles = _parse_iam_roles((ctx.rc_yml_v2 or {}).get("iam_roles"))
+    for role in roles.values():
+        role.validate()
+    return roles
+
+
+def _service_role_view(spec: Any, *, iam_plan: IamPlan) -> dict[str, Any]:
+    """Resolve which task role this service's task definition points at.
+
+    Defaults to ``aws_iam_role.task`` — the shared role every task definition
+    has referenced since rc emitted its first ECS stack. Naming an
+    ``iam_role:`` swaps the reference for that service only; nothing about the
+    shared role's own emission changes, so a stack where nobody opts in is
+    byte-identical to one that predates this feature.
+    """
+    role_name = getattr(spec, "iam_role", None)
+    if not role_name:
+        return {
+            "task_role_ref": "aws_iam_role.task.arn",
+            "declared_iam_role": None,
+        }
+    return {
+        "task_role_ref": iam_plan.role_arn_ref(role_name),
+        "declared_iam_role": role_name,
+    }
+
+
+def _service_placement_view(
+    spec: Any,
+    *,
+    net_plan: NetworkPlan,
+    default_subnets_ref: str,
+    extra_security_group_ids: list[str],
+) -> dict[str, Any]:
+    """Resolve a service's subnets / security groups / public-IP for the task ENI.
+
+    Both declared knobs REPLACE rather than append — naming a security group
+    and still being joined to the shared ``tasks`` group would defeat the
+    point, since that group carries ALB ingress and blanket egress.
+
+    ``assign_public_ip`` is derived, never declared: it follows the placement
+    subnet's routing. A private subnet with a public IP is a broken
+    configuration AWS will happily accept and then silently fail to route, so
+    there is no switch here to get it wrong with.
+    """
+    declared_sgs = list(getattr(spec, "security_groups", None) or [])
+    subnet_group_name = getattr(spec, "subnet_group", None)
+
+    if declared_sgs:
+        refs = [f"aws_security_group.{net_plan.sg_tf_name(n)}.id" for n in declared_sgs]
+        # provider_config.ecs.security_group_ids is an environment-wide
+        # adopt-an-existing-SG knob; a service that names its own groups has
+        # opted out of environment-wide defaults entirely.
+        security_groups_ref = "[" + ", ".join(refs) + "]"
+    else:
+        extras = "".join(f', "{sg}"' for sg in extra_security_group_ids)
+        security_groups_ref = f"[aws_security_group.tasks.id{extras}]"
+
+    if subnet_group_name:
+        group = net_plan.subnet_group(subnet_group_name)
+        subnets_ref = f"aws_subnet.{group.tf_name}[*].id"
+        assign_public_ip = group.public
+    else:
+        subnets_ref = default_subnets_ref
+        assign_public_ip = True
+
+    return {
+        "subnets_ref": subnets_ref,
+        "security_groups_ref": security_groups_ref,
+        "assign_public_ip": assign_public_ip,
+        "declared_subnet_group": subnet_group_name,
+        "declared_security_groups": declared_sgs,
+    }
+
+
+# IMDS defaults for the ECS container instances in aws_launch_template.ec2.
+#
+# http_tokens = "required" is IMDSv2-only, and it is the setting that actually
+# matters: without it, any SSRF or request-forgery bug reachable from a
+# container can read the *instance* role's credentials with a plain
+# `GET http://169.254.169.254/...`. IMDSv2 requires a PUT to mint a session
+# token first, which neither a forged GET nor a naive proxy can do. Safe as a
+# default here because rc pins the ECS-optimized AL2 AMI (see the ssm_parameter
+# data source in capacity.tf.j2), whose ECS agent, SSM agent and CloudWatch
+# agent have all spoken IMDSv2 since 2019 — and rc's tasks take their
+# credentials from the ECS task metadata endpoint (169.254.170.2), not IMDS,
+# so nothing rc runs in a container is affected either way.
+#
+# The hop limit is 2, NOT 1, and that is the interesting half:
+#
+#   * The value is the IP TTL of the token response, and each container
+#     network hop decrements it. 1 reaches only processes in the instance's
+#     own network namespace; anything on the docker bridge (every bridge-mode
+#     container, including tooling baked into the ECS-optimized AMI) is cut
+#     off. That breakage is silent and instance-wide, so 1 is not a safe
+#     default for stacks that already exist.
+#   * awsvpc — the network mode rc uses for every task — does NOT make hop
+#     limit 1 the container cut-off it looks like. An awsvpc task owns its
+#     ENI and reaches 169.254.169.254 over it directly, so the TTL budget is
+#     not spent the way a bridge-mode container's is. The knob that reliably
+#     denies awsvpc tasks the instance role is the ECS agent's
+#     ECS_AWSVPC_BLOCK_IMDS, which rc exposes separately as `block_task_imds`.
+#
+# So: IMDSv2 on by default (real mitigation, no known breakage), hop limit at
+# the container-compatible value, and the two settings that CAN break a
+# running stack left opt-in.
+IMDS_DEFAULT_TOKENS = "required"
+IMDS_DEFAULT_HOP_LIMIT = 2
+VALID_IMDS_TOKEN_MODES = {"required", "optional"}
+
+
+def _resolve_imds_options(user_cfg: dict) -> dict:
+    """Validate the IMDS knobs under ``provider_config.ecs.ec2_capacity``.
+
+    Instance-level, so it lives beside ``instance_type`` / ``capacity_type``
+    rather than on a service: ``aws_ecs_task_definition`` has no
+    ``metadata_options`` argument, and a Fargate task has no IMDS to harden in
+    the first place (its credentials come from 169.254.170.2). The exposure is
+    entirely EC2-backed ECS, and the resource that owns it is
+    ``aws_launch_template.ec2``.
+    """
+    tokens = str(user_cfg.get("imdsv2", IMDS_DEFAULT_TOKENS)).strip().lower()
+    if tokens not in VALID_IMDS_TOKEN_MODES:
+        raise ProviderConfigError(
+            f"ec2_capacity.imdsv2 must be 'required' or 'optional', got "
+            f"{user_cfg.get('imdsv2')!r}"
+        )
+    hop_limit = user_cfg.get("metadata_hop_limit", IMDS_DEFAULT_HOP_LIMIT)
+    if isinstance(hop_limit, bool) or not isinstance(hop_limit, int):
+        raise ProviderConfigError(
+            f"ec2_capacity.metadata_hop_limit must be an integer, got {hop_limit!r}"
+        )
+    if not 1 <= hop_limit <= 64:
+        raise ProviderConfigError(
+            f"ec2_capacity.metadata_hop_limit must be between 1 and 64, got "
+            f"{hop_limit}"
+        )
+    return {
+        "imds_tokens": tokens,
+        "imds_hop_limit": hop_limit,
+        "block_task_imds": bool(user_cfg.get("block_task_imds", False)),
+    }
 
 
 def _tf_name(svc_name: str) -> str:
@@ -477,12 +659,131 @@ class ECSProvider(Provider):
             vpc_id_ref = "data.aws_vpc.main.id"
             public_subnet_ids_ref = "local.rc_public_subnet_ids"
             public_subnet_idx_ref = "local.rc_public_subnet_ids[count.index]"
+            public_subnet_first_ref = "local.rc_public_subnet_ids[0]"
             private_subnet_ids_ref = "local.rc_private_subnet_ids"
+            # An adopted VPC's internet gateway is not rc's to name. A declared
+            # public subnet group there would need a route to it, so require
+            # the caller to say which one.
+            igw_id_ref = (
+                f'"{ecs_cfg["internet_gateway_id"]}"'
+                if ecs_cfg.get("internet_gateway_id")
+                else "null"
+            )
         else:
             vpc_id_ref = "aws_vpc.main.id"
             public_subnet_ids_ref = "aws_subnet.public[*].id"
             public_subnet_idx_ref = "aws_subnet.public[count.index].id"
+            public_subnet_first_ref = "aws_subnet.public[0].id"
             private_subnet_ids_ref = "aws_subnet.private[*].id"
+            igw_id_ref = "aws_internet_gateway.main.id"
+
+        # --- Declared network (rc.yml `network:` / `repositories:`) ---------
+        #
+        # Standalone, nameable primitives that are NOT derived from a service:
+        # security groups, subnet groups with an explicit egress mode, VPC
+        # endpoints, and ECR repositories. Their ids land in outputs.tf so an
+        # out-of-band consumer (a backend calling run_task, say) can attach to
+        # them without rc managing that consumer.
+        #
+        # Wholly additive: with no `network:` / `repositories:` block the plan
+        # is empty, every template below renders nothing, and the emitted
+        # terraform is byte-identical to before this existed.
+        network_cfg, repositories_cfg = _parse_declared_network(ctx)
+        service_sg_refs = {
+            name: [
+                f"aws_security_group.rc_{tf_ident(sg)}.id"
+                for sg in spec.security_groups
+            ]
+            for name, spec in ctx.services.items()
+            if getattr(spec, "security_groups", None)
+        }
+        # Second validation pass. parse() could not resolve 'service:<name>'
+        # refs or the bare 'alb' ref because a service may live only in
+        # docker-compose.yml; here the merged set is finally known.
+        from ...config._network_types import validate_network_refs
+
+        validate_network_refs(
+            network_cfg,
+            service_names=set(ctx.services),
+            service_sg_overrides={
+                n: list(s.security_groups)
+                for n, s in ctx.services.items()
+                if getattr(s, "security_groups", None)
+            },
+            service_subnet_placements={
+                n: s.subnet_group
+                for n, s in ctx.services.items()
+                if getattr(s, "subnet_group", None)
+            },
+            public_services={n: s.port for n, s in ctx.services.items() if s.public},
+            has_alb=any(s.public for s in ctx.services.values()) or existing_alb,
+        )
+        # Names that collide with resources rc already creates fail at apply,
+        # not at validate, so catch them here where the service set is known.
+        check_reserved_names(
+            network_cfg, repositories_cfg, service_names=set(ctx.services)
+        )
+        net_plan = build_network_plan(
+            network_cfg,
+            repositories_cfg,
+            existing_vpc=existing_vpc,
+            existing_alb=existing_alb,
+            vpc_cidr=vpc_cidr,
+            service_sg_refs=service_sg_refs,
+        )
+        # A task in a NAT-free subnet that cannot reach ECR does not fail at
+        # apply time — it fails minutes into the rollout with an opaque
+        # CannotPullContainerError. Check it while we can still name the
+        # missing endpoint.
+        check_endpoint_reachability(
+            network_cfg,
+            placements=[
+                {
+                    "service": name,
+                    "subnet_group": getattr(spec, "subnet_group", None),
+                    "security_groups": list(
+                        getattr(spec, "security_groups", None) or []
+                    ),
+                    # Secrets are attached to every service's task def (see the
+                    # secrets fan-out below), so any stack-level secret means
+                    # every task needs to reach Secrets Manager.
+                    "needs_secrets": bool(ctx.secrets)
+                    or bool(getattr(spec, "env_from_secret", None)),
+                }
+                for name, spec in ctx.services.items()
+            ],
+        )
+        # --- Declared task roles (rc.yml `iam_roles:`) -----------------------
+        #
+        # Opt-in per-service least privilege. The shared aws_iam_role.task is
+        # emitted exactly as before and stays the default; an empty block means
+        # every service still points at it and iam.tf is byte-identical.
+        #
+        # The reference check runs at parse() time (iam_role can only be
+        # written on an rc.yml service, so compose adds no referrers), but a
+        # DeployContext can be built in code — the ECS e2e helpers and every
+        # provider test do exactly that — so re-check against the merged set
+        # rather than trusting that parse() ran.
+        iam_roles_cfg = _parse_declared_iam_roles(ctx)
+        from ...config._iam_types import validate_iam_role_refs
+
+        validate_iam_role_refs(
+            iam_roles_cfg,
+            service_roles={
+                n: getattr(s, "iam_role", None) for n, s in ctx.services.items()
+            },
+        )
+        iam_plan = build_iam_plan(iam_roles_cfg)
+        if existing_vpc and igw_id_ref == "null":
+            needs_igw = [s.name for s in net_plan.subnet_groups if s.egress == "igw"]
+            if needs_igw:
+                raise ProviderConfigError(
+                    f"network.subnets {needs_igw} declare public: true, but this "
+                    f"stack adopts an existing VPC and rc does not know its "
+                    f"internet gateway. Set "
+                    f"provider_config.ecs.internet_gateway_id, or make the "
+                    f"group private."
+                )
 
         # ALB rendering aliases — like the vpc refs, templates read these so
         # they don't branch on existing_alb. In create mode they're the
@@ -793,6 +1094,15 @@ class ECSProvider(Provider):
                 # Explicit ALB catch-all selection (see ServiceSpec.default_target).
                 "default_target": bool(spec.default_target) if spec.public else False,
             }
+            svc_view.update(
+                _service_placement_view(
+                    spec,
+                    net_plan=net_plan,
+                    default_subnets_ref=public_subnet_ids_ref,
+                    extra_security_group_ids=extra_security_group_ids,
+                )
+            )
+            svc_view.update(_service_role_view(spec, iam_plan=iam_plan))
             services_view.append(svc_view)
             if launch_type == "EC2":
                 ec2_demands.append(
@@ -1163,6 +1473,16 @@ class ECSProvider(Provider):
             "task_iam_statements": task_iam_statements,
             "task_iam_policy_json": task_iam_policy_json,
             "task_role_tags": task_role_tags,
+            # Declared network (rc.yml `network:` / `repositories:`). Empty
+            # plan => network_declared.tf / repositories.tf render to nothing
+            # and outputs.tf emits only its historical entries.
+            "net_plan": net_plan,
+            # Declared task roles (rc.yml `iam_roles:`). Empty plan => iam.tf
+            # emits only the shared task role it always has, and every service
+            # keeps task_role_arn = aws_iam_role.task.arn.
+            "iam_plan": iam_plan,
+            "igw_id_ref": igw_id_ref,
+            "public_subnet_first_ref": public_subnet_first_ref,
             "alb_dns_ref": alb_dns_ref,
             "alb_zone_ref": alb_zone_ref,
             "https_listener_ref": https_listener_ref,
@@ -3425,6 +3745,7 @@ class ECSProvider(Provider):
             "max_size": max_size,
             "capacity_type": capacity_type,
             "spot_weight": user_cfg.get("spot_weight", 3),
+            **_resolve_imds_options(user_cfg),
         }
 
 

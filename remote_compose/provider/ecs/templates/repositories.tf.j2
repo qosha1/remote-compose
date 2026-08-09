@@ -1,0 +1,46 @@
+{%- if net_plan.repositories %}
+# =============================================================================
+# Declared ECR repositories (rc.yml `repositories:`)
+#
+# Standalone — not tied to any service's build. The use case is a mirror:
+# push an upstream image here once so private-subnet tasks can pull it
+# through the ECR endpoint with no internet route and no Docker Hub rate
+# limit. rc creates the repository and reports its URI in `rc outputs`;
+# pushing the image is the caller's job.
+# =============================================================================
+{%- endif %}
+{%- for repo in net_plan.repositories %}
+
+{%- if repo.mirror %}
+# mirror of: {{ repo.mirror }}
+{%- endif %}
+resource "aws_ecr_repository" "{{ repo.tf_name }}" {
+  name                 = "${var.project}/{{ repo.repo_suffix }}"
+  image_tag_mutability = "{{ 'MUTABLE' if repo.mutable else 'IMMUTABLE' }}"
+  force_delete         = {{ 'true' if repo.force_delete else 'false' }}
+
+  image_scanning_configuration {
+    scan_on_push = {{ 'true' if repo.scan_on_push else 'false' }}
+  }
+}
+{%- if repo.expire_untagged_days %}
+
+resource "aws_ecr_lifecycle_policy" "{{ repo.tf_name }}" {
+  repository = aws_ecr_repository.{{ repo.tf_name }}.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Expire untagged images after {{ repo.expire_untagged_days }} days"
+      selection = {
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = {{ repo.expire_untagged_days }}
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+{%- endif %}
+{%- endfor %}

@@ -31,3 +31,99 @@ output "buildcache_repository" {
   value = aws_ecr_repository.buildcache.repository_url
 }
 {%- endif %}
+
+# The VPC every resource below lives in. Always emitted so an out-of-band
+# consumer never has to hardcode it.
+output "vpc_id" {
+  value = {{ vpc_id_ref }}
+}
+{%- if net_plan.declared_security_groups %}
+
+# Declared security group ids, keyed by their rc.yml name. Feed straight into
+# whatever launches out-of-band tasks.
+output "security_groups" {
+  value = {
+{%- set kw = net_plan.declared_security_groups | map(attribute='name') | map('length') | max %}
+{%- for sg in net_plan.declared_security_groups %}
+    {{ ('"' ~ sg.name ~ '"').ljust(kw + 2) }} = aws_security_group.{{ sg.tf_name }}.id
+{%- endfor %}
+  }
+}
+{%- endif %}
+{%- if net_plan.endpoint_security_groups %}
+
+# Security groups rc synthesized for the interface endpoints — reported
+# separately from the declared ones so `security_groups` stays exactly what
+# rc.yml asked for. Useful for debugging endpoint reachability.
+output "vpc_endpoint_security_groups" {
+  value = {
+{%- set kw = net_plan.endpoint_security_groups | map(attribute='name') | map('length') | max %}
+{%- for sg in net_plan.endpoint_security_groups %}
+    {{ ('"' ~ sg.name ~ '"').ljust(kw + 2) }} = aws_security_group.{{ sg.tf_name }}.id
+{%- endfor %}
+  }
+}
+{%- endif %}
+{%- if net_plan.subnet_groups %}
+
+# Declared subnet groups, keyed by rc.yml name -> list of subnet ids (one per AZ).
+output "subnets" {
+  value = {
+{%- set kw = net_plan.subnet_groups | map(attribute='name') | map('length') | max %}
+{%- for sn in net_plan.subnet_groups %}
+    {{ ('"' ~ sn.name ~ '"').ljust(kw + 2) }} = aws_subnet.{{ sn.tf_name }}[*].id
+{%- endfor %}
+  }
+}
+
+# Routing posture per declared subnet group, so a consumer can assert it is
+# placing tasks somewhere with the egress it expects rather than inferring it.
+output "subnet_egress_modes" {
+  value = {
+{%- set kw = net_plan.subnet_groups | map(attribute='name') | map('length') | max %}
+{%- for sn in net_plan.subnet_groups %}
+    {{ ('"' ~ sn.name ~ '"').ljust(kw + 2) }} = "{{ sn.egress }}"
+{%- endfor %}
+  }
+}
+{%- endif %}
+{%- if net_plan.endpoints %}
+
+# Declared VPC endpoints, keyed by "<name>.<aws service suffix>".
+output "vpc_endpoints" {
+  value = {
+{%- set kw = net_plan.endpoint_output_key_width %}
+{%- for ep in net_plan.endpoints %}
+{%- for svc in ep.services %}
+    {{ ('"' ~ ep.name ~ '.' ~ svc.service_suffix ~ '"').ljust(kw) }} = aws_vpc_endpoint.{{ svc.tf_name }}.id
+{%- endfor %}
+{%- endfor %}
+  }
+}
+{%- endif %}
+{%- if iam_plan.roles %}
+
+# Declared task roles, keyed by rc.yml name -> role ARN. Exported so something
+# outside rc (a Lambda, a hand-run `run_task`) can pass the same role rc gives
+# the service, rather than minting a second one that drifts.
+output "iam_roles" {
+  value = {
+{%- set kw = iam_plan.output_key_width %}
+{%- for role in iam_plan.roles %}
+    {{ ('"' ~ role.name ~ '"').ljust(kw) }} = {{ role.arn_ref }}
+{%- endfor %}
+  }
+}
+{%- endif %}
+{%- if net_plan.repositories %}
+
+# Declared standalone ECR repositories, keyed by rc.yml name -> repository URI.
+output "repositories" {
+  value = {
+{%- set kw = net_plan.repositories | map(attribute='name') | map('length') | max %}
+{%- for repo in net_plan.repositories %}
+    {{ ('"' ~ repo.name ~ '"').ljust(kw + 2) }} = aws_ecr_repository.{{ repo.tf_name }}.repository_url
+{%- endfor %}
+  }
+}
+{%- endif %}

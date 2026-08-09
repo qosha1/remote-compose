@@ -53,6 +53,7 @@ from .cli_commands.init import init_cmd as _init_cmd
 from .cli_commands.lifecycle import lifecycle_cmd as _lifecycle_cmd
 from .cli_commands.list_stacks import list_cmd as _list_cmd
 from .cli_commands.migrate import migrate_cmd as _migrate_cmd
+from .cli_commands.outputs import outputs_cmd as _outputs_cmd
 from .cli_commands.plan import plan_cmd as _plan_cmd
 from .cli_commands.provision import provision_cmd as _provision_cmd
 from .cli_commands.run import run_cmd as _run_cmd
@@ -123,6 +124,7 @@ cli.add_command(_lifecycle_cmd)
 cli.add_command(_list_cmd)
 cli.add_command(_logs_cmd)
 cli.add_command(_migrate_cmd)
+cli.add_command(_outputs_cmd)
 cli.add_command(_plan_cmd)
 cli.add_command(_provision_cmd)
 cli.add_command(_run_cmd)

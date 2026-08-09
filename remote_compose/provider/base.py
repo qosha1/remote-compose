@@ -135,6 +135,24 @@ class ServiceSpec:
     # effect as an EFS mount or a `-beat`/`-scheduler` name, made explicit.
     # Default False = current behavior (rolling deploy for stateless services).
     stateful: bool = False
+    # Declared-network placement (rc.yml `network:`). Both REPLACE rc's
+    # defaults rather than adding to them.
+    #
+    # security_groups: names from network.security_groups. When non-empty the
+    #   task's ENI carries exactly these, so it is NOT joined to the shared
+    #   ${project}-tasks group and inherits neither its ALB ingress nor its
+    #   blanket egress to 0.0.0.0/0. Empty = the historical shared-SG default.
+    # subnet_group: a name from network.subnets. Placement follows the group,
+    #   and assign_public_ip is derived from whether that group is public —
+    #   there is no separate switch to drift out of sync with the routing.
+    security_groups: list[str] = field(default_factory=list)
+    subnet_group: Optional[str] = None
+    # Declared task role (rc.yml `iam_roles:`). A name here makes this
+    # service's task definition carry that role instead of the shared
+    # ${project}-task role — and therefore none of the grants
+    # provider_config.ecs.iam attaches to the shared one. None = the shared
+    # role, which is what every already-deployed task definition references.
+    iam_role: Optional[str] = None
 
 
 @dataclass
