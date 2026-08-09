@@ -340,3 +340,85 @@ class TestRepositories:
     def test_bad_name_is_rejected(self):
         with pytest.raises(ConfigError, match="is invalid"):
             parse(_cfg(repositories={"Not_Valid": {}}))
+
+
+class TestHclInjectionRegressions:
+    """Free text that rc interpolates into generated HCL.
+
+    Validated at parse time rather than escaped downstream: every rejected
+    character is one AWS refuses anyway, so nothing legitimate is lost.
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            'ev"il',  # closes the HCL string -> unparseable .tf
+            "back\\slash",  # escape sequence
+            "two\nlines",  # escapes the line entirely
+            "x" * 256,  # over AWS's 255-char limit
+        ],
+    )
+    def test_unsafe_group_descriptions_are_rejected(self, bad):
+        with pytest.raises(ConfigError, match="description"):
+            _net({"security_groups": {"a": {"description": bad}}})
+
+    def test_unsafe_rule_descriptions_are_rejected(self):
+        with pytest.raises(ConfigError, match="description"):
+            _net(
+                {
+                    "security_groups": {
+                        "a": {
+                            "ingress": [
+                                {"from": "cidr:10.0.0.0/16", "description": 'ev"il'}
+                            ]
+                        }
+                    }
+                }
+            )
+
+    def test_ordinary_descriptions_are_accepted(self):
+        cfg = _net(
+            {
+                "security_groups": {
+                    "a": {"description": "Ephemeral runners (tier: web) - no ingress."}
+                }
+            }
+        )
+        assert cfg.network.security_groups["a"].description.startswith("Ephemeral")
+
+    def test_mirror_cannot_inject_terraform_resources(self):
+        """`mirror` renders into a comment; a newline would close it and let
+        the remainder parse as HCL -- from a file that travels in the repo."""
+        payload = 'postgres:16"\nresource "aws_iam_user" "pwn" {\n  name = "pwn"\n}\n#'
+        with pytest.raises(ConfigError, match="not a valid image reference"):
+            parse(_cfg(repositories={"r": {"mirror": payload}}))
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "postgres:16-alpine",
+            "docker.io/library/postgres:16",
+            "registry.example.com/team/img@sha256:" + "a" * 64,
+        ],
+    )
+    def test_real_image_references_are_accepted(self, ref):
+        cfg = parse(_cfg(repositories={"r": {"mirror": ref}}))
+        assert cfg.repositories["r"].mirror == ref
+
+
+class TestProtocolRegressions:
+    def test_icmpv6_is_rejected(self):
+        """rc rejects IPv6 CIDRs outright, so an icmpv6 rule could only pair
+        with an IPv4 source -- which AWS refuses at apply."""
+        with pytest.raises(ConfigError, match="protocol"):
+            _net(
+                {
+                    "security_groups": {
+                        "a": {
+                            "ingress": [
+                                {"from": "cidr:10.0.0.0/16", "protocol": "icmpv6"}
+                            ]
+                        }
+                    }
+                }
+            )

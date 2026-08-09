@@ -125,7 +125,7 @@ resource "aws_vpc_endpoint" "{{ svc.tf_name }}" {
 
 resource "aws_security_group" "{{ sg.tf_name }}" {
   name        = "${var.project}-{{ sg.name }}"
-  description = "{{ sg.description }}"
+  description = "{{ sg.hcl_description }}"
   vpc_id      = {{ vpc_id_ref }}
 
   tags = { Name = "${var.project}-{{ sg.name }}" }
@@ -137,6 +137,12 @@ resource "aws_security_group" "{{ sg.tf_name }}" {
 {%- set w = rule.align_width %}
 
 resource "aws_vpc_security_group_{{ rule.direction }}_rule" "{{ rule.tf_name }}" {
+{%- if rule.for_each_expr %}
+  # One rule per security group on the adopted ALB. That attribute is a set,
+  # so for_each rather than count: a set cannot be indexed, and forcing one
+  # through tolist() would reorder between plans and churn state.
+  {{ "for_each".ljust(w) }} = {{ rule.for_each_expr }}
+{%- endif %}
   {{ "security_group_id".ljust(w) }} = {{ rule.sg_ref }}
   {{ "ip_protocol".ljust(w) }} = "{{ rule.ip_protocol }}"
 {%- if rule.from_port is not none %}
@@ -144,7 +150,7 @@ resource "aws_vpc_security_group_{{ rule.direction }}_rule" "{{ rule.tf_name }}"
   {{ "to_port".ljust(w) }} = {{ rule.to_port }}
 {%- endif %}
   {{ rule.source_attr.ljust(w) }} = {{ rule.source_value }}
-  {{ "description".ljust(w) }} = "{{ rule.description }}"
+  {{ "description".ljust(w) }} = "{{ rule.hcl_description }}"
 }
 {%- endfor %}
 {%- endfor %}

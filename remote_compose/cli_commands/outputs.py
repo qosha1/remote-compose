@@ -63,6 +63,31 @@ def _flatten(value: Any, prefix: str, *parts: str) -> list[tuple[str, str]]:
     return [(_env_key(prefix, *parts), str(value))]
 
 
+def _warn_on_aliased_keys(pairs: list[tuple[str, str]]) -> None:
+    """Surface two different resources flattening to one variable name.
+
+    ``_env_key`` collapses every non-alphanumeric run to ``_``, and some output
+    maps have composite keys — ``vpc_endpoints`` is keyed
+    ``"<name>.<service suffix>"``, so endpoint ``ecr`` serving ``ecr.api`` and
+    endpoint ``ecr-ecr`` serving ``api`` both land on
+    ``RC_VPC_ENDPOINTS_ECR_ECR_API``. Last one wins. That is rare enough not to
+    be worth mangling every name to avoid, but far too quiet to leave unsaid —
+    the whole point of this command is that something downstream trusts the
+    value.
+    """
+    seen: dict[str, str] = {}
+    for key, value in pairs:
+        prior = seen.get(key)
+        if prior is not None and prior != value:
+            click.echo(
+                f"warning: {key} is produced by two different outputs "
+                f"({prior!r} and {value!r}); only the last is emitted. "
+                f"Rename one of the declared resources to disambiguate.",
+                err=True,
+            )
+        seen[key] = value
+
+
 def _render_table(outputs: dict[str, Any]) -> str:
     lines: list[str] = []
     for name in sorted(outputs):
@@ -169,7 +194,9 @@ def outputs_cmd(ctx, name, as_json, as_env, prefix):
             raise click.exceptions.Exit(1)
         value = resolved[name]
         if as_env:
-            for key, val in _flatten(value, prefix, name):
+            pairs = _flatten(value, prefix, name)
+            _warn_on_aliased_keys(pairs)
+            for key, val in pairs:
                 click.echo(f"{key}={val}")
         elif as_json or isinstance(value, (dict, list)):
             click.echo(json.dumps(value, indent=2, sort_keys=True))
@@ -184,8 +211,13 @@ def outputs_cmd(ctx, name, as_json, as_env, prefix):
     if as_json:
         click.echo(json.dumps(resolved, indent=2, sort_keys=True))
     elif as_env:
-        for out_name in sorted(resolved):
-            for key, val in _flatten(resolved[out_name], prefix, out_name):
-                click.echo(f"{key}={val}")
+        pairs = [
+            pair
+            for out_name in sorted(resolved)
+            for pair in _flatten(resolved[out_name], prefix, out_name)
+        ]
+        _warn_on_aliased_keys(pairs)
+        for key, val in pairs:
+            click.echo(f"{key}={val}")
     else:
         click.echo(_render_table(resolved))

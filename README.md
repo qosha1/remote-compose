@@ -389,6 +389,24 @@ What rc enforces so you can't ship a broken segment:
 - **Unreachable endpoints are refused.** An interface endpoint nothing egresses
   to is a paid ENI per AZ serving no traffic.
 
+- **Address plan is checked, not assumed.** Subnet CIDRs are compared as
+  concrete networks, so an explicit `cidrs:` that overlaps an auto-allocated
+  block, rc's own built-in subnets, or another group is rejected at emit time
+  rather than at apply as `InvalidSubnet.Conflict`. A CIDR outside `vpc_cidr` is
+  rejected too.
+- **Names are checked against rc's own.** A declared group called `tasks`, or a
+  repository called `buildcache` or named after a service, would collide on the
+  AWS name — `terraform validate` passes and *apply* fails. rc catches those,
+  along with declared names that flatten to the same terraform address (`-` and
+  `.` both become `_`).
+
+Auto-allocated subnet CIDRs are derived from the group's **name**, not its
+position, so adding a group never moves an existing one's block. That matters
+because `cidr_block` is ForceNew on `aws_subnet`: renumbering a live group means
+terraform destroys and recreates subnets that have running task ENIs attached.
+Pin a block explicitly with `cidr_offset:` (or full `cidrs:`) if you want it
+independent of the name entirely.
+
 Omit both blocks and the emitted terraform is byte-identical to a stack that
 predates them.
 

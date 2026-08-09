@@ -89,11 +89,55 @@ VALID_REF_KINDS = {"sg", "service", "endpoint", "cidr"}
 BARE_REFS = {"alb", "self"}
 
 _PROTOCOL_ALIASES = {"all": "-1", "any": "-1", "-1": "-1"}
-VALID_PROTOCOLS = {"tcp", "udp", "icmp", "icmpv6", "-1"}
+# No icmpv6: rc rejects IPv6 CIDRs outright (see ResourceRef.parse), so an
+# icmpv6 rule could only ever pair with an IPv4 source, which AWS rejects.
+# Accepting it here would emit `ip_protocol = "icmpv6"` next to `cidr_ipv4`
+# and fail at apply.
+VALID_PROTOCOLS = {"tcp", "udp", "icmp", "-1"}
 
 # Declared resource names become terraform identifiers, AWS Name tags, and
 # environment-variable suffixes in `rc outputs --env`. Keep them boring.
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$")
+
+# Free-text that rc interpolates into generated HCL. Restricted to what AWS
+# actually accepts for a security-group / rule description, which conveniently
+# excludes the quote and backslash that would break the emitted string, and
+# the newline that would let a value escape its line. `$` IS permitted by AWS,
+# so the emitter still has to escape `${` -- see _hcl_safe below.
+_DESCRIPTION_RE = re.compile(r"^[A-Za-z0-9 ._\-:/()#,@\[\]+=&;{}!$*]{1,255}$")
+
+# An OCI image reference. Constrained here rather than escaped downstream:
+# `mirror` is rendered into a comment in the generated terraform, and a value
+# containing a newline would close that comment and let the rest of the string
+# be parsed as HCL -- i.e. arbitrary resources, from a file that travels in the
+# repo being deployed.
+_IMAGE_REF_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,199}"  # registry/namespace/name
+    r"(:[A-Za-z0-9][A-Za-z0-9._\-]{0,127})?"  # :tag
+    r"(@sha256:[a-f0-9]{64})?$"  # @digest
+)
+
+
+def _validate_description(value: Any, where: str) -> None:
+    """Reject free text that cannot be safely rendered into HCL.
+
+    Validating beats escaping here: every rejected character is one AWS would
+    refuse anyway, so nothing legitimate is lost, and the failure lands at
+    parse time with a pointer to the offending field instead of as an
+    unparseable .tf file.
+    """
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise ConfigError(f"{where}: description must be a string")
+    if not _DESCRIPTION_RE.match(value):
+        raise ConfigError(
+            f"{where}: description {value!r} contains characters AWS does not "
+            f"accept for a security-group description (allowed: letters, "
+            f"digits, spaces and ._-:/()#,@[]+=&;{{}}!$* — no quotes, "
+            f"backslashes or newlines), or exceeds 255 characters"
+        )
+
 
 # CIDR indices 0..1 (public) and 10..11 (private) are taken by the built-in
 # subnets in network.tf.j2. Declared groups allocate from here up so a new
@@ -265,8 +309,7 @@ class NetworkRuleV2:
             )
 
         desc = raw.get("description")
-        if desc is not None and not isinstance(desc, str):
-            raise ConfigError(f"{where}: description must be a string")
+        _validate_description(desc, where)
 
         return cls(
             direction=direction,
@@ -307,6 +350,7 @@ class SecurityGroupV2:
     def validate(self) -> None:
         _validate_name("network.security_groups", self.name)
         where = f"network.security_groups.{self.name}"
+        _validate_description(self.description, where)
         for rule in self.ingress:
             rule.validate(where=f"{where}.ingress")
         for rule in self.egress:
@@ -498,13 +542,16 @@ class RepositoryV2:
     def validate(self) -> None:
         _validate_name("repositories", self.name)
         where = f"repositories.{self.name}"
-        if self.mirror is not None and (
-            not isinstance(self.mirror, str) or not self.mirror.strip()
-        ):
-            raise ConfigError(
-                f"{where}: mirror must be an image reference like "
-                f"'postgres:16-alpine'"
-            )
+        if self.mirror is not None:
+            if not isinstance(self.mirror, str) or not _IMAGE_REF_RE.match(
+                self.mirror.strip()
+            ):
+                raise ConfigError(
+                    f"{where}: mirror {self.mirror!r} is not a valid image "
+                    f"reference (expected something like "
+                    f"'postgres:16-alpine' or "
+                    f"'registry/name@sha256:<64 hex>')"
+                )
         if self.expire_untagged_days is not None:
             if isinstance(self.expire_untagged_days, bool) or not isinstance(
                 self.expire_untagged_days, int

@@ -44,6 +44,7 @@ from .network_plan import (
     NetworkPlan,
     build_network_plan,
     check_endpoint_reachability,
+    check_reserved_names,
     tf_ident,
 )
 
@@ -717,10 +718,17 @@ class ECSProvider(Provider):
             public_services={n: s.port for n, s in ctx.services.items() if s.public},
             has_alb=any(s.public for s in ctx.services.values()) or existing_alb,
         )
+        # Names that collide with resources rc already creates fail at apply,
+        # not at validate, so catch them here where the service set is known.
+        check_reserved_names(
+            network_cfg, repositories_cfg, service_names=set(ctx.services)
+        )
         net_plan = build_network_plan(
             network_cfg,
             repositories_cfg,
             existing_vpc=existing_vpc,
+            existing_alb=existing_alb,
+            vpc_cidr=vpc_cidr,
             service_sg_refs=service_sg_refs,
         )
         # A task in a NAT-free subnet that cannot reach ECR does not fail at

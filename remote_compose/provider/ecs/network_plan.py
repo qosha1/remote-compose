@@ -26,6 +26,7 @@ connectivity is the classic VPC-endpoint failure; here it is not expressible.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -48,6 +49,11 @@ ENDPOINT_DEFAULT_PORT = 443
 # built-in public (n=0,1) and private (n=10,11) subnets in network.tf.j2.
 _CIDR_NEWBITS = 8
 
+# Highest cidrsubnet index a declared group may occupy. A /16 VPC carved into
+# /24s has 256; leaving the top few unused costs nothing and keeps room for
+# future built-ins.
+_MAX_DECLARED_CIDR_INDEX = 250
+
 
 def tf_ident(name: str) -> str:
     """Sanitize a declared name into a terraform identifier fragment."""
@@ -55,6 +61,18 @@ def tf_ident(name: str) -> str:
     if ident and ident[0].isdigit():
         ident = f"_{ident}"
     return ident or "unnamed"
+
+
+def hcl_escape(text: str) -> str:
+    """Make a validated free-text value inert inside an HCL string literal.
+
+    Quotes, backslashes and newlines are already rejected at parse time (see
+    ``_validate_description``), but ``$`` is legal in an AWS description and
+    ``${...}`` is terraform's interpolation syntax — a description of
+    "costs ${var.region}" would silently expand instead of being stored. HCL
+    escapes a literal ``$`` as ``$$``; same for ``%%`` and its directive form.
+    """
+    return text.replace("$", "$$").replace("%", "%%")
 
 
 def _rule_hash(*parts: Any) -> str:
@@ -87,6 +105,17 @@ class RuleView:
     source_attr: str  # cidr_ipv4 | referenced_security_group_id | prefix_list_id
     source_value: str  # already-quoted literal or bare HCL expression
     description: str
+    # Set only when one declared rule must fan out over a plan-time-known
+    # collection (today: the adopted ALB's security groups). for_each rather
+    # than count because the attribute is a SET -- it cannot be indexed, and a
+    # tolist() index would reorder between plans and churn state. None emits no
+    # iteration argument at all, so the common case is unchanged.
+    for_each_expr: Optional[str] = None
+
+    @property
+    def hcl_description(self) -> str:
+        """``description``, safe to drop into an HCL string literal."""
+        return hcl_escape(self.description)
 
     @property
     def align_width(self) -> int:
@@ -101,6 +130,8 @@ class RuleView:
         names = ["security_group_id", "ip_protocol", "description", self.source_attr]
         if self.from_port is not None:
             names += ["from_port", "to_port"]
+        if self.for_each_expr is not None:
+            names.append("for_each")
         return max(len(n) for n in names)
 
 
@@ -113,6 +144,11 @@ class SecurityGroupView:
     # True for the group rc synthesizes for an interface endpoint. Those are
     # emitted alongside their endpoint rather than in the declared-group loop.
     is_endpoint_sg: bool = False
+
+    @property
+    def hcl_description(self) -> str:
+        """``description``, safe to drop into an HCL string literal."""
+        return hcl_escape(self.description)
 
 
 @dataclass
@@ -265,6 +301,8 @@ def build_network_plan(
     repositories: dict[str, RepositoryV2],
     *,
     existing_vpc: bool = False,
+    existing_alb: bool = False,
+    vpc_cidr: str = "10.0.0.0/16",
     service_sg_refs: Optional[dict[str, list[str]]] = None,
 ) -> NetworkPlan:
     """Resolve a validated network block into terraform view models.
@@ -277,7 +315,7 @@ def build_network_plan(
     service_sg_refs = service_sg_refs or {}
     plan = NetworkPlan()
 
-    subnet_views = _plan_subnets(network, existing_vpc=existing_vpc)
+    subnet_views = _plan_subnets(network, existing_vpc=existing_vpc, vpc_cidr=vpc_cidr)
     plan.subnet_groups = subnet_views
     plan.needs_nat = any(sn.needs_nat for sn in subnet_views)
 
@@ -288,39 +326,184 @@ def build_network_plan(
         network,
         endpoint_views=endpoint_views,
         service_sg_refs=service_sg_refs,
+        existing_alb=existing_alb,
     )
     plan.repositories = _plan_repositories(repositories)
+    _reject_terraform_address_collisions(plan)
     return plan
 
 
-def _plan_subnets(network: NetworkV2, *, existing_vpc: bool) -> list[SubnetGroupView]:
+# rc's own security groups (security_groups.tf.j2, efs.tf.j2). A declared group
+# reusing one of these names emits a duplicate AWS Name and fails at apply with
+# InvalidGroup.Duplicate, long after terraform validate said it was fine.
+RESERVED_SG_NAMES = {"alb", "tasks", "efs"}
+# services.tf.j2 emits ${project}/buildcache plus ${project}/<service> per
+# image-owning service.
+RESERVED_REPO_NAMES = {"buildcache"}
+
+
+def _reject_terraform_address_collisions(plan: NetworkPlan) -> None:
+    """Reject two resources that would land on one terraform address.
+
+    Declared names are validated to a tight charset individually, but they live
+    in several namespaces that ``tf_ident`` then flattens into one identifier
+    space: a security group named ``ecr-vpce`` and rc's synthesized group for an
+    interface endpoint named ``ecr`` both become ``rc_ecr_vpce``. Likewise an
+    endpoint ``a`` serving ``b.c`` and an endpoint ``a-b`` serving ``c`` both
+    become ``rc_a_b_c``. Terraform rejects the duplicate outright, so the only
+    question is whether the user finds out from rc or from a stack trace.
+    """
+    seen: dict[tuple[str, str], str] = {}
+
+    def claim(resource_type: str, tf_name: str, owner: str) -> None:
+        key = (resource_type, tf_name)
+        prior = seen.get(key)
+        if prior is not None and prior != owner:
+            raise ProviderConfigError(
+                f"{owner} and {prior} both resolve to the terraform address "
+                f"{resource_type}.{tf_name}. Declared names are flattened to "
+                f"terraform identifiers ('-' and '.' both become '_'), so "
+                f"rename one of them."
+            )
+        seen[key] = owner
+
+    for sg in plan.security_groups:
+        owner = (
+            f"the security group rc synthesizes for endpoint "
+            f"{sg.name[: -len('-vpce')]!r}"
+            if sg.is_endpoint_sg
+            else f"network.security_groups.{sg.name}"
+        )
+        claim("aws_security_group", sg.tf_name, owner)
+        for rule in sg.rules:
+            claim(
+                f"aws_vpc_security_group_{rule.direction}_rule",
+                rule.tf_name,
+                f"a rule on {owner}",
+            )
+    for sn in plan.subnet_groups:
+        claim("aws_subnet", sn.tf_name, f"network.subnets.{sn.name}")
+        claim("aws_route_table", sn.tf_name, f"network.subnets.{sn.name}")
+    for ep in plan.endpoints:
+        for svc in ep.services:
+            claim(
+                "aws_vpc_endpoint",
+                svc.tf_name,
+                f"network.endpoints.{ep.name} service {svc.service_suffix!r}",
+            )
+    for repo in plan.repositories:
+        claim("aws_ecr_repository", repo.tf_name, f"repositories.{repo.name}")
+
+
+def _cidrsubnet(vpc_cidr: str, newbits: int, index: int) -> "ipaddress.IPv4Network":
+    """Python equivalent of terraform's ``cidrsubnet``.
+
+    Needed so overlap detection can compare the *networks* two groups actually
+    land on, rather than the HCL strings that produce them.
+    """
+    net = ipaddress.ip_network(vpc_cidr, strict=False)
+    new_prefix = net.prefixlen + newbits
+    if new_prefix > 32:
+        raise ProviderConfigError(
+            f"vpc_cidr {vpc_cidr} is too small to carve /{new_prefix} subnets"
+        )
+    block = 1 << (32 - new_prefix)
+    return ipaddress.ip_network((int(net.network_address) + index * block, new_prefix))
+
+
+def _preferred_base(name: str, count: int) -> int:
+    """Stable starting index for a subnet group, derived from its NAME.
+
+    Allocating by position in the sorted name list means adding a group whose
+    name sorts earlier shifts every later group's CIDR -- and ``cidr_block`` is
+    ForceNew on ``aws_subnet``, so on a live stack that is a destroy/recreate of
+    subnets with running task ENIs attached (the destroy then fails with
+    DependencyViolation half-way through the apply). Hashing the name instead
+    means a group keeps its block no matter what else is declared, unless two
+    names genuinely collide.
+    """
+    span = _MAX_DECLARED_CIDR_INDEX - DECLARED_SUBNET_CIDR_BASE + 1 - count + 1
+    if span < 1:
+        raise ProviderConfigError(
+            f"network.subnets.{name}: count {count} does not fit in the "
+            f"declared-subnet index range"
+        )
+    digest = int(hashlib.sha256(name.encode()).hexdigest()[:8], 16)
+    return DECLARED_SUBNET_CIDR_BASE + (digest % span)
+
+
+def _plan_subnets(
+    network: NetworkV2, *, existing_vpc: bool, vpc_cidr: str
+) -> list[SubnetGroupView]:
     """Allocate CIDRs and emit one view per declared subnet group.
 
-    Automatic allocation walks the declared groups in sorted-name order from
-    :data:`DECLARED_SUBNET_CIDR_BASE`, so a group's block depends only on the
-    set of names — adding a group later never renumbers an existing one unless
-    its name sorts earlier, and even then the explicit ``cidr_offset`` escape
-    hatch pins it.
+    Explicit ``cidrs:`` and ``cidr_offset`` are honoured first and never move.
+    Everything else is placed at a name-derived index (see
+    :func:`_preferred_base`), probing forward only on a genuine collision, so a
+    group's block does not depend on which other groups happen to be declared.
     """
     views: list[SubnetGroupView] = []
-    next_index = DECLARED_SUBNET_CIDR_BASE
+
+    # rc's built-in subnets own these indices (network.tf.j2).
+    taken: set[int] = {0, 1, 10, 11}
+    assigned: dict[str, int] = {}
+
+    pinned = [
+        n for n in sorted(network.subnets) if network.subnets[n].cidr_offset is not None
+    ]
+    floating = [
+        n
+        for n in sorted(network.subnets)
+        if network.subnets[n].cidr_offset is None and not network.subnets[n].cidrs
+    ]
+
+    # Pinned groups claim their range before anything floats, so an explicit
+    # offset is never displaced by a hashed one.
+    for name in pinned:
+        group = network.subnets[name]
+        base = group.cidr_offset
+        assigned[name] = base
+        taken.update(range(base, base + group.count))
+
+    for name in floating:
+        group = network.subnets[name]
+        if existing_vpc:
+            raise ProviderConfigError(
+                f"network.subnets.{name}: deploying into an existing VPC "
+                f"(provider_config.ecs.vpc_id), so rc cannot carve a CIDR "
+                f"block out of a range it does not own. Give explicit "
+                f"'cidrs: [...]' — one per subnet — inside the existing "
+                f"VPC's range."
+            )
+        span = _MAX_DECLARED_CIDR_INDEX - DECLARED_SUBNET_CIDR_BASE + 1
+        base = _preferred_base(name, group.count)
+        for probe in range(span):
+            candidate = DECLARED_SUBNET_CIDR_BASE + (
+                (base - DECLARED_SUBNET_CIDR_BASE + probe) % span
+            )
+            span_indices = range(candidate, candidate + group.count)
+            if candidate + group.count - 1 > _MAX_DECLARED_CIDR_INDEX:
+                continue
+            if taken.isdisjoint(span_indices):
+                base = candidate
+                break
+        else:
+            raise ProviderConfigError(
+                f"network.subnets.{name}: no free /{{}} block left in the "
+                f"declared-subnet range".format(
+                    ipaddress.ip_network(vpc_cidr, strict=False).prefixlen
+                    + _CIDR_NEWBITS
+                )
+            )
+        assigned[name] = base
+        taken.update(range(base, base + group.count))
 
     for name in sorted(network.subnets):
         group = network.subnets[name]
         if group.cidrs:
             cidr_exprs = [f'"{c}"' for c in group.cidrs]
         else:
-            if existing_vpc:
-                raise ProviderConfigError(
-                    f"network.subnets.{name}: deploying into an existing VPC "
-                    f"(provider_config.ecs.vpc_id), so rc cannot carve a CIDR "
-                    f"block out of a range it does not own. Give explicit "
-                    f"'cidrs: [...]' — one per subnet — inside the existing "
-                    f"VPC's range."
-                )
-            base = group.cidr_offset if group.cidr_offset is not None else next_index
-            if group.cidr_offset is None:
-                next_index = base + group.count
+            base = assigned[name]
             cidr_exprs = [
                 f"cidrsubnet(var.vpc_cidr, {_CIDR_NEWBITS}, {base + i})"
                 for i in range(group.count)
@@ -336,31 +519,74 @@ def _plan_subnets(network: NetworkV2, *, existing_vpc: bool) -> list[SubnetGroup
             )
         )
 
-    _reject_overlapping_auto_cidrs(network, views)
+    _reject_overlapping_cidrs(
+        network, views, assigned=assigned, existing_vpc=existing_vpc, vpc_cidr=vpc_cidr
+    )
     return views
 
 
-def _reject_overlapping_auto_cidrs(
-    network: NetworkV2, views: list[SubnetGroupView]
+def _reject_overlapping_cidrs(
+    network: NetworkV2,
+    views: list[SubnetGroupView],
+    *,
+    assigned: dict[str, int],
+    existing_vpc: bool,
+    vpc_cidr: str,
 ) -> None:
-    """Catch an explicit cidr_offset colliding with an auto-allocated block.
+    """Reject two subnet groups that land on overlapping address space.
 
-    Per-instance validation already rejects an offset that overlaps rc's
-    built-in 0-1 / 10-11 indices, but it cannot see sibling groups. Two groups
-    landing on the same /24 produces a terraform apply error deep in AWS
-    ("CIDR conflicts with another subnet"); saying so here is cheaper.
+    Compares the CONCRETE networks, not the HCL expressions that produce them:
+    ``cidrsubnet(var.vpc_cidr, 8, 20)`` and the literal ``"10.0.20.0/24"`` are
+    the same /24 for a 10.0.0.0/16 VPC, and a string comparison never sees it.
+    The result is `InvalidSubnet.Conflict` at apply -- exactly the error this
+    is here to pre-empt.
+
+    Skipped entirely in adopted-VPC mode, where every group carries explicit
+    CIDRs, rc does not know the real VPC range, and the operator owns the
+    address plan.
     """
-    seen: dict[str, str] = {}
-    for view in views:
-        for expr in view.cidr_exprs:
-            prior = seen.get(expr)
-            if prior is not None:
+    if existing_vpc:
+        return
+
+    try:
+        vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
+    except ValueError:  # pragma: no cover - vpc_cidr is validated upstream
+        return
+
+    concrete: list[tuple[str, "ipaddress.IPv4Network"]] = []
+    for name in sorted(network.subnets):
+        group = network.subnets[name]
+        if group.cidrs:
+            nets = [ipaddress.ip_network(c, strict=True) for c in group.cidrs]
+            for net in nets:
+                if not net.subnet_of(vpc_net):
+                    raise ProviderConfigError(
+                        f"network.subnets.{name}: cidr {net} is outside the VPC "
+                        f"range {vpc_net} (provider_config.ecs.vpc_cidr) — AWS "
+                        f"rejects a subnet outside its VPC"
+                    )
+        else:
+            base = assigned[name]
+            nets = [
+                _cidrsubnet(vpc_cidr, _CIDR_NEWBITS, base + i)
+                for i in range(group.count)
+            ]
+        concrete.extend((name, n) for n in nets)
+
+    # Built-in subnets from network.tf.j2 are part of the address plan too.
+    for idx in (0, 1, 10, 11):
+        concrete.append(("<rc built-in>", _cidrsubnet(vpc_cidr, _CIDR_NEWBITS, idx)))
+
+    for i, (name_a, net_a) in enumerate(concrete):
+        for name_b, net_b in concrete[i + 1 :]:
+            if name_a == name_b:
+                continue
+            if net_a.overlaps(net_b):
                 raise ProviderConfigError(
-                    f"network.subnets.{view.name} and network.subnets.{prior} "
-                    f"both resolve to {expr} — give one of them a distinct "
+                    f"network.subnets.{name_a} ({net_a}) overlaps "
+                    f"{name_b} ({net_b}) — give one of them a distinct "
                     f"'cidr_offset' or explicit 'cidrs'"
                 )
-            seen[expr] = view.name
 
 
 def _plan_endpoints(network: NetworkV2) -> list[EndpointView]:
@@ -394,6 +620,7 @@ def _plan_security_groups(
     *,
     endpoint_views: list[EndpointView],
     service_sg_refs: dict[str, list[str]],
+    existing_alb: bool = False,
 ) -> list[SecurityGroupView]:
     by_name = {ep.name: ep for ep in endpoint_views}
 
@@ -434,6 +661,7 @@ def _plan_security_groups(
                     self_ref=self_ref,
                     endpoints=by_name,
                     service_sg_refs=service_sg_refs,
+                    existing_alb=existing_alb,
                 )
             )
         for rule in sg.egress:
@@ -445,6 +673,7 @@ def _plan_security_groups(
                     self_ref=self_ref,
                     endpoints=by_name,
                     service_sg_refs=service_sg_refs,
+                    existing_alb=existing_alb,
                 )
             )
             # The reverse half: let the endpoint admit this group.
@@ -473,6 +702,7 @@ def _expand_rule(
     self_ref: str,
     endpoints: dict[str, EndpointView],
     service_sg_refs: dict[str, list[str]],
+    existing_alb: bool = False,
 ) -> list[RuleView]:
     """Fan one declared rule out to concrete per-source, per-port resources.
 
@@ -485,11 +715,12 @@ def _expand_rule(
         self_ref=self_ref,
         endpoints=endpoints,
         service_sg_refs=service_sg_refs,
+        existing_alb=existing_alb,
     )
     port_specs = _resolve_ports(rule, endpoints=endpoints)
 
     out: list[RuleView] = []
-    for attr, value, source_label in sources:
+    for attr, value, source_label, for_each_expr in sources:
         for from_port, to_port in port_specs:
             digest = _rule_hash(
                 sg_tf_name,
@@ -512,6 +743,7 @@ def _expand_rule(
                     source_value=value,
                     description=rule.description
                     or _default_description(rule, source_label),
+                    for_each_expr=for_each_expr,
                 )
             )
     return out
@@ -528,15 +760,41 @@ def _resolve_sources(
     self_ref: str,
     endpoints: dict[str, EndpointView],
     service_sg_refs: dict[str, list[str]],
-) -> list[tuple[str, str, str]]:
-    """Map a reference to (argument_name, HCL value, human label) tuples."""
+    existing_alb: bool = False,
+) -> list[tuple[str, str, str, Optional[str]]]:
+    """Map a reference to (argument_name, HCL value, label, count_expr) tuples.
+
+    ``for_each_expr`` is non-None only when one declared rule must fan out over
+    a collection that is not known until plan time -- today just the adopted
+    ALB's security-group set.
+    """
     if ref.kind == "cidr":
-        return [("cidr_ipv4", f'"{ref.value}"', ref.value)]
+        return [("cidr_ipv4", f'"{ref.value}"', ref.value, None)]
     if ref.kind == "self":
-        return [("referenced_security_group_id", self_ref, "self")]
+        return [("referenced_security_group_id", self_ref, "self", None)]
     if ref.kind == "alb":
+        if existing_alb:
+            # Adopt-an-ALB mode: rc creates no aws_security_group.alb (see the
+            # `{% if not existing_alb %}` guard in security_groups.tf.j2), so
+            # pointing at it would emit a dangling reference. The live ALB's
+            # groups come off the data source instead — a list, and a rule
+            # resource takes exactly one source, so the rule fans out with
+            # count. The data source is read during plan, so length() is known.
+            return [
+                (
+                    "referenced_security_group_id",
+                    "each.value",
+                    "the existing ALB",
+                    "data.aws_lb.main.security_groups",
+                )
+            ]
         return [
-            ("referenced_security_group_id", "aws_security_group.alb.id", "the ALB")
+            (
+                "referenced_security_group_id",
+                "aws_security_group.alb.id",
+                "the ALB",
+                None,
+            )
         ]
     if ref.kind == "sg":
         return [
@@ -544,6 +802,7 @@ def _resolve_sources(
                 "referenced_security_group_id",
                 f"aws_security_group.rc_{tf_ident(ref.value)}.id",
                 f"sg {ref.value}",
+                None,
             )
         ]
     if ref.kind == "service":
@@ -552,7 +811,8 @@ def _resolve_sources(
             # No declared override: the service sits on the shared group.
             refs = ["aws_security_group.tasks.id"]
         return [
-            ("referenced_security_group_id", r, f"service {ref.value}") for r in refs
+            ("referenced_security_group_id", r, f"service {ref.value}", None)
+            for r in refs
         ]
     if ref.kind == "endpoint":
         ep = endpoints.get(ref.value)
@@ -560,19 +820,26 @@ def _resolve_sources(
             raise ProviderConfigError(f"unknown VPC endpoint reference {ref.raw!r}")
         if ep.type == "Gateway":
             # A gateway endpoint has no ENI and therefore no security group;
-            # egress to it is expressed against its managed prefix list.
+            # egress to it is expressed against its managed prefix list. One
+            # prefix list PER SERVICE -- a group declared as [s3, dynamodb] is
+            # two endpoints with two lists, and granting only the first would
+            # leave the second unreachable while the reachability check
+            # reported it fine.
             return [
                 (
                     "prefix_list_id",
-                    f"aws_vpc_endpoint.{ep.services[0].tf_name}.prefix_list_id",
-                    f"endpoint {ep.name} (gateway)",
+                    f"aws_vpc_endpoint.{svc.tf_name}.prefix_list_id",
+                    f"endpoint {ep.name}.{svc.service_suffix} (gateway)",
+                    None,
                 )
+                for svc in ep.services
             ]
         return [
             (
                 "referenced_security_group_id",
                 f"aws_security_group.{ep.sg_tf_name}.id",
                 f"endpoint {ep.name}",
+                None,
             )
         ]
     raise ProviderConfigError(f"unhandled reference kind {ref.kind!r}")
@@ -586,6 +853,13 @@ def _resolve_ports(
     if rule.protocol == "-1":
         # ip_protocol = "-1" means every protocol; AWS rejects a port range.
         return [(None, None)]
+    if rule.protocol in ("icmp", "icmpv6"):
+        # For ICMP, AWS reads from_port/to_port as TYPE and CODE, not ports --
+        # valid range -1..255, where -1/-1 means "every type, every code". The
+        # 0/65535 that means "all ports" for tcp/udp is simply out of range and
+        # the API rejects it (terraform does not range-check this at plan
+        # time, so it would surface only at apply).
+        return [(-1, -1)]
     if rule.ref.kind == "endpoint":
         # An interface endpoint serves 443 and nothing else, and a gateway
         # endpoint's prefix list is only useful for HTTPS to the service.
@@ -675,7 +949,11 @@ def check_endpoint_reachability(
         if not group_name:
             continue
         group = network.subnets.get(group_name)
-        if group is None or group.egress != "endpoints":
+        # `none` and `endpoints` emit an identical route table -- neither gets a
+        # 0.0.0.0/0 route -- so a task in either has exactly the same "cannot
+        # pull, cannot log" failure. Checking only `endpoints` let the isolated
+        # case through, which is the stricter of the two.
+        if group is None or group.egress not in ("endpoints", "none"):
             continue
 
         svc = placement["service"]
@@ -683,7 +961,7 @@ def check_endpoint_reachability(
         if not sg_names:
             raise ProviderConfigError(
                 f"service {svc!r} is placed in network.subnets.{group_name} "
-                f"(egress: endpoints, so no default route), but it has no "
+                f"(egress: {group.egress}, so no default route), but it has no "
                 f"'security_groups:' of its own — it would sit on the shared "
                 f"${{project}}-tasks group, which no VPC endpoint admits. "
                 f"Declare a group in network.security_groups with the egress "
@@ -704,12 +982,47 @@ def check_endpoint_reachability(
             )
             raise ProviderConfigError(
                 f"service {svc!r} is placed in network.subnets.{group_name} "
-                f"(egress: endpoints, so no default route), but cannot reach "
-                f"the AWS services a Fargate task needs to start:\n{lines}\n"
+                f"(egress: {group.egress}, so no default route), but cannot "
+                f"reach the AWS services a Fargate task needs to start:\n"
+                f"{lines}\n"
                 f"  Each one needs a network.endpoints entry that is attached "
                 f"to subnet group {group_name!r} AND is named in an "
                 f"'to: endpoint:<name>' egress rule on {sg_names}.\n"
                 f"  Reachable today: {sorted(reachable) or 'nothing'}."
+            )
+
+
+def check_reserved_names(
+    network: NetworkV2,
+    repositories: dict[str, RepositoryV2],
+    *,
+    service_names: set[str],
+) -> None:
+    """Reject declared names that collide with resources rc already creates.
+
+    These collide on the AWS-level ``name``, not the terraform address, so
+    ``terraform validate`` passes and the failure lands at apply as
+    ``InvalidGroup.Duplicate`` / ``RepositoryAlreadyExistsException`` — after
+    everything before it in the graph has already been created.
+    """
+    for name in sorted(network.security_groups):
+        if name in RESERVED_SG_NAMES:
+            raise ProviderConfigError(
+                f"network.security_groups.{name}: {name!r} is the name of a "
+                f"security group rc already creates (it would emit a second "
+                f"${{project}}-{name}). Pick another name."
+            )
+    for name in sorted(repositories):
+        if name in RESERVED_REPO_NAMES:
+            raise ProviderConfigError(
+                f"repositories.{name}: {name!r} is the name of an ECR "
+                f"repository rc already creates. Pick another name."
+            )
+        if name in service_names:
+            raise ProviderConfigError(
+                f"repositories.{name}: a service named {name!r} already gets "
+                f"the ECR repository ${{project}}/{name}. Pick another name, "
+                f"or drop the declaration and use the service's own repo."
             )
 
 

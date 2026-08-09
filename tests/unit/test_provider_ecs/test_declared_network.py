@@ -212,9 +212,18 @@ class TestDerivedEndpointIngress:
 
 class TestSubnetEmission:
     def test_allocates_cidrs_above_the_builtin_range(self, tmp_path):
+        import re
+
         tf = _emit(tmp_path, network=NETWORK)["network_declared.tf"]
-        assert "cidrsubnet(var.vpc_cidr, 8, 20)" in tf
-        assert "cidrsubnet(var.vpc_cidr, 8, 21)" in tf
+        indices = [
+            int(m) for m in re.findall(r"cidrsubnet\(var\.vpc_cidr, 8, (\d+)\)", tf)
+        ]
+        assert indices, "no auto-allocated CIDRs emitted"
+        # 0-1 (built-in public) and 10-11 (built-in private) are rc's.
+        assert all(i >= 20 for i in indices)
+        assert not ({0, 1, 10, 11} & set(indices))
+        # Contiguous within the group.
+        assert indices == list(range(min(indices), min(indices) + len(indices)))
 
     def test_endpoints_mode_emits_no_default_route(self, tmp_path):
         tf = _emit(tmp_path, network=NETWORK)["network_declared.tf"]
@@ -243,7 +252,7 @@ class TestSubnetEmission:
                 "y": {"cidr_offset": 31, "count": 2},
             },
         }
-        with pytest.raises(ProviderConfigError, match="both resolve to"):
+        with pytest.raises(ProviderConfigError, match="overlaps"):
             _emit(
                 tmp_path,
                 network=net,
@@ -506,3 +515,248 @@ class TestBlockIndependence:
         files = _emit(tmp_path, network=NETWORK)
         assert files["repositories.tf"].strip() == ""
         assert "aws_security_group" in files["network_declared.tf"]
+
+
+class TestReviewRegressions:
+    """One test per defect found reviewing this change before it merged.
+
+    Each of these emitted terraform that failed at `terraform validate`, at
+    `terraform apply`, or silently did the wrong thing.
+    """
+
+    def test_alb_ref_resolves_to_the_data_source_when_adopting_an_alb(self, tmp_path):
+        """`aws_security_group.alb` does not exist in adopt-ALB mode, so a bare
+        `alb` ref emitted a dangling reference -- while the public-service
+        validator simultaneously insisted the rule be written."""
+        out = tmp_path / "tf"
+        ctx = _ctx(
+            tmp_path,
+            network={
+                "security_groups": {"g": {"ingress": [{"from": "alb", "ports": [80]}]}}
+            },
+            services={
+                "api": ServiceSpec(
+                    name="api",
+                    cpu=256,
+                    memory=512,
+                    image="x",
+                    public=True,
+                    port=80,
+                    health_check_path="/",
+                    domain="api.example.com",
+                    security_groups=["g"],
+                )
+            },
+        )
+        ctx.provider_config = {
+            "ecs": {
+                "region": "us-west-2",
+                "vpc_id": "vpc-1",
+                "public_subnet_ids": ["subnet-a", "subnet-b"],
+                "existing_alb": {
+                    "arn": "arn:aws:elasticloadbalancing:us-west-2:111122223333"
+                    ":loadbalancer/app/x/1",
+                    "https_listener_arn": "arn:aws:elasticloadbalancing:us-west-2"
+                    ":111122223333:listener/app/x/1/2",
+                },
+            }
+        }
+        ECSProvider().emit_terraform(ctx, out)
+        tf = (out / "network_declared.tf").read_text()
+        assert "aws_security_group.alb.id" not in tf
+        # A set, so for_each -- not count with an index.
+        assert "for_each                     = data.aws_lb.main.security_groups" in tf
+        assert "referenced_security_group_id = each.value" in tf
+
+    def test_alb_ref_still_uses_the_managed_group_normally(self, tmp_path):
+        tf = _emit(tmp_path, network=NETWORK)["network_declared.tf"]
+        assert "referenced_security_group_id = aws_security_group.alb.id" in tf
+        assert "for_each" not in tf
+
+    def test_explicit_cidrs_overlapping_an_auto_block_are_rejected(self, tmp_path):
+        """The old check compared HCL expression STRINGS, so
+        `cidrsubnet(var.vpc_cidr, 8, N)` never matched the literal it produces."""
+        import re
+
+        from remote_compose.provider.ecs.network_plan import (
+            _cidrsubnet,
+            build_network_plan,
+        )
+
+        from remote_compose.config._schema_parser import _parse_network
+
+        net = _parse_network({"subnets": {"aaa": {"egress": "none"}}})
+        net.validate()
+        expr = (
+            build_network_plan(net, {}, vpc_cidr="10.0.0.0/16")
+            .subnet_groups[0]
+            .cidr_exprs[0]
+        )
+        idx = int(re.search(r", (\d+)\)", expr).group(1))
+        collide = [str(_cidrsubnet("10.0.0.0/16", 8, idx + i)) for i in range(2)]
+
+        clash = _parse_network(
+            {
+                "subnets": {
+                    "aaa": {"egress": "none"},
+                    "bbb": {"egress": "none", "cidrs": collide},
+                }
+            }
+        )
+        clash.validate()
+        with pytest.raises(ProviderConfigError, match="overlaps"):
+            build_network_plan(clash, {}, vpc_cidr="10.0.0.0/16")
+
+    def test_explicit_cidr_outside_the_vpc_is_rejected(self, tmp_path):
+        net = {
+            "security_groups": {"g": {}},
+            "subnets": {
+                "x": {"egress": "none", "count": 1, "cidrs": ["192.168.5.0/24"]}
+            },
+        }
+        with pytest.raises(ProviderConfigError, match="outside the VPC range"):
+            _emit(tmp_path, network=net, services=_plain())
+
+    def test_explicit_cidr_colliding_with_a_builtin_subnet_is_rejected(self, tmp_path):
+        # 10.0.10.0/24 is rc's built-in private subnet 0.
+        net = {
+            "security_groups": {"g": {}},
+            "subnets": {"x": {"egress": "none", "count": 1, "cidrs": ["10.0.10.0/24"]}},
+        }
+        with pytest.raises(ProviderConfigError, match="rc built-in"):
+            _emit(tmp_path, network=net, services=_plain())
+
+    def test_subnet_cidrs_do_not_move_when_an_earlier_name_is_added(self):
+        """cidr_block is ForceNew: renumbering a live group destroys and
+        recreates subnets that have running task ENIs attached."""
+        from remote_compose.config._schema_parser import _parse_network
+        from remote_compose.provider.ecs.network_plan import build_network_plan
+
+        def allocate(names):
+            net = _parse_network({"subnets": {n: {"egress": "none"} for n in names}})
+            net.validate()
+            plan = build_network_plan(net, {}, vpc_cidr="10.0.0.0/16")
+            return {v.name: v.cidr_exprs for v in plan.subnet_groups}
+
+        before = allocate(["workers"])
+        after = allocate(["analytics", "workers"])
+        assert before["workers"] == after["workers"]
+
+    def test_gateway_endpoint_grants_every_service_prefix_list(self, tmp_path):
+        """A [s3, dynamodb] endpoint only granted services[0]'s prefix list,
+        while the reachability check reported both as reachable."""
+        net = {
+            "security_groups": {
+                "g": {"egress": [{"to": "endpoint:gw"}, {"to": "endpoint:i"}]}
+            },
+            "subnets": {"p": {"egress": "endpoints"}},
+            "endpoints": {
+                "gw": {"services": ["s3", "dynamodb"], "subnets": ["p"]},
+                "i": {"services": ["ecr.api", "ecr.dkr", "logs"], "subnets": ["p"]},
+            },
+        }
+        tf = _emit(
+            tmp_path,
+            network=net,
+            services={
+                "w": ServiceSpec(
+                    name="w",
+                    cpu=256,
+                    memory=512,
+                    image="x",
+                    security_groups=["g"],
+                    subnet_group="p",
+                )
+            },
+        )["network_declared.tf"]
+        assert "prefix_list_id    = aws_vpc_endpoint.rc_gw_s3.prefix_list_id" in tf
+        assert (
+            "prefix_list_id    = aws_vpc_endpoint.rc_gw_dynamodb.prefix_list_id" in tf
+        )
+
+    def test_egress_none_is_guarded_like_egress_endpoints(self, tmp_path):
+        """Both emit an identical route table -- no default route -- so both
+        have the same CannotPullContainerError failure."""
+        net = {
+            "security_groups": {"g": {}},
+            "subnets": {"iso": {"egress": "none"}},
+        }
+        with pytest.raises(ProviderConfigError, match="egress: none"):
+            _emit(
+                tmp_path,
+                network=net,
+                services={
+                    "w": ServiceSpec(
+                        name="w",
+                        cpu=256,
+                        memory=512,
+                        image="x",
+                        security_groups=["g"],
+                        subnet_group="iso",
+                    )
+                },
+            )
+
+    def test_endpoint_sg_colliding_with_a_declared_group_is_rejected(self, tmp_path):
+        """A group named `<X>-vpce` and an interface endpoint named `<X>` both
+        become the terraform address rc_X_vpce."""
+        net = {
+            "security_groups": {
+                "g": {"egress": [{"to": "endpoint:ecr"}]},
+                "ecr-vpce": {},
+            },
+            "subnets": {"p": {"egress": "none"}},
+            "endpoints": {"ecr": {"services": ["ecr.api"], "subnets": ["p"]}},
+        }
+        with pytest.raises(ProviderConfigError, match="terraform address"):
+            _emit(tmp_path, network=net, services=_plain())
+
+    def test_endpoint_service_name_flattening_collision_is_rejected(self, tmp_path):
+        """endpoint `a` serving `b.c` and endpoint `a-b` serving `c` both
+        become aws_vpc_endpoint.rc_a_b_c."""
+        net = {
+            "security_groups": {
+                "g": {"egress": [{"to": "endpoint:a"}, {"to": "endpoint:a-b"}]}
+            },
+            "subnets": {"p": {"egress": "none"}},
+            "endpoints": {
+                "a": {"services": ["b.c"], "subnets": ["p"]},
+                "a-b": {"services": ["c"], "subnets": ["p"]},
+            },
+        }
+        with pytest.raises(ProviderConfigError, match="terraform address"):
+            _emit(tmp_path, network=net, services=_plain())
+
+    @pytest.mark.parametrize("reserved", ["tasks", "alb", "efs"])
+    def test_security_group_reusing_an_rc_name_is_rejected(self, tmp_path, reserved):
+        """Collides on the AWS Name, not the terraform address, so validate
+        passes and apply fails with InvalidGroup.Duplicate."""
+        with pytest.raises(ProviderConfigError, match="rc already creates"):
+            _emit(
+                tmp_path,
+                network={"security_groups": {reserved: {}}},
+                services=_plain(),
+            )
+
+    def test_repository_reusing_the_buildcache_name_is_rejected(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="rc already creates"):
+            _emit(tmp_path, repositories={"buildcache": {}}, services=_plain())
+
+    def test_repository_colliding_with_a_service_repo_is_rejected(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="already gets the ECR"):
+            _emit(tmp_path, repositories={"w": {}}, services=_plain())
+
+    def test_icmp_emits_type_and_code_not_a_port_range(self, tmp_path):
+        """AWS reads from_port/to_port as ICMP type/code, valid -1..255. The
+        0/65535 that means 'all ports' for tcp is out of range, and terraform
+        does not catch it at plan time."""
+        net = {
+            "security_groups": {
+                "g": {"ingress": [{"from": "cidr:10.0.0.0/16", "protocol": "icmp"}]}
+            }
+        }
+        tf = _emit(tmp_path, network=net, services=_plain())["network_declared.tf"]
+        assert 'ip_protocol       = "icmp"' in tf
+        assert "from_port         = -1" in tf
+        assert "to_port           = -1" in tf
+        assert "65535" not in tf
