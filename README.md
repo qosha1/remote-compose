@@ -158,6 +158,12 @@ provider_config:
     #   private_subnet_ids: [subnet-c, subnet-d]  # optional; defaults to public
     #   security_group_ids: [sg-mesh]             # extra SGs attached to every
     #                                             # task (join an existing mesh)
+    #   internet_gateway_id: igw-0abc             # only needed if a declared
+    #                                             # `network.subnets` group sets
+    #                                             # public: true — an adopted
+    #                                             # VPC's IGW isn't rc's to name
+    # In adopt mode, declared `network.subnets` groups must carry explicit
+    # `cidrs: [...]`: rc won't carve a block out of a range it doesn't own.
     # rc pre-flights the VPC + subnets against AWS before deploying. In adopt
     # mode rc creates NO VPC/IGW/subnets/route-tables and does NOT touch the
     # VPC's DHCP options, so cross-service discovery must use FQDNs
@@ -305,6 +311,102 @@ services:
 
 Full schema reference: [ARCHITECTURE.md § rc.yml v2 at a glance](ARCHITECTURE.md#rcyml-v2-at-a-glance).
 
+### Declared network — standalone security groups, private subnets, VPC endpoints
+
+By default rc derives its network from your services: two security groups
+(`alb` and `tasks`), and every service lands on `tasks`, which carries implicit
+ALB ingress and blanket `egress → 0.0.0.0/0`. That is the right default for a
+web app and its workers.
+
+When you need an isolated blast radius — or when something *outside* rc
+launches tasks (a backend calling `run_task`) and has no service for rc to hang
+a group off — declare the network instead. These are standalone resources: a
+declared group can be attached to an rc service, referenced by another declared
+resource, or by nothing at all, in which case it simply exists and its id is
+exported.
+
+```yaml
+network:
+  security_groups:
+    isolated-tasks:
+      # No ingress key at all = nothing reaches this. rc never injects an ALB
+      # rule; a service that wants one says `from: alb`.
+      egress:                     # an allow-list, NOT the implicit ALL → 0.0.0.0/0
+        - to: endpoint:ecr        # …a declared VPC endpoint (defaults to 443)
+        - to: endpoint:logs
+        - to: endpoint:s3
+        - to: sg:api              # …another declared group
+          ports: [5000]
+        - to: cidr:0.0.0.0/0      # …or a literal CIDR
+          ports: [53]
+          protocol: udp
+
+  subnets:
+    tasks-private:
+      public: false
+      egress: endpoints           # endpoints | nat | none
+      # `endpoints` emits NO 0.0.0.0/0 route at all: reachability comes only
+      # from the VPC endpoints below. That is the NAT-free path — no NAT
+      # gateway, no hourly charge, no internet routing.
+
+  endpoints:
+    ecr:  { services: [ecr.api, ecr.dkr], subnets: [tasks-private] }
+    logs: { services: [logs],             subnets: [tasks-private] }
+    sts:  { services: [sts],              subnets: [tasks-private] }
+    s3:   { services: [s3],               subnets: [tasks-private] }   # gateway
+
+repositories:
+  db-sidecar:
+    mirror: postgres:16-alpine    # records intent; rc creates the repo, you push
+
+services:
+  worker:
+    security_groups: [isolated-tasks]   # REPLACES the shared tasks group
+    subnets: tasks-private              # assign_public_ip derived from the group
+```
+
+Rule sources and destinations are `<kind>:<value>` — `sg:`, `service:`,
+`endpoint:`, `cidr:` — plus the bare keywords `alb` and `self`.
+
+What rc enforces so you can't ship a broken segment:
+
+- **Default-deny is real.** Declared groups emit
+  `aws_vpc_security_group_{ingress,egress}_rule` resources rather than inline
+  blocks, so the AWS provider strips the allow-all egress rule AWS attaches at
+  creation. No rule means no access.
+- **Both halves of a two-sided rule.** `to: endpoint:ecr` grants the group
+  egress *and* grants the endpoint's own security group the matching ingress.
+  Writing one half and silently getting no connectivity is not expressible.
+- **Replace, never append.** A service naming `security_groups:` gets exactly
+  those — it is not joined to the shared `tasks` group, so it inherits neither
+  its ALB ingress nor its blanket egress. A `public: true` service that does
+  this must re-admit the ALB, or rc refuses.
+- **NAT-free subnets are checked.** A task placed in an `egress: endpoints`
+  subnet must be able to reach `ecr.api`, `ecr.dkr`, `s3`, and `logs` (plus
+  `secretsmanager` if it has secrets) through endpoints attached to *that same
+  subnet group*. Otherwise rc names the missing ones instead of letting the
+  deploy fail minutes later with `CannotPullContainerError`.
+- **Unreachable endpoints are refused.** An interface endpoint nothing egresses
+  to is a paid ENI per AZ serving no traffic.
+
+Omit both blocks and the emitted terraform is byte-identical to a stack that
+predates them.
+
+Every created id comes back out via `rc outputs`:
+
+```console
+$ rc outputs --env
+RC_CLUSTER_NAME=my-app-prod
+RC_VPC_ID=vpc-0a1b2c
+RC_SECURITY_GROUPS_ISOLATED_TASKS=sg-0d4e5f
+RC_SUBNETS_TASKS_PRIVATE=subnet-0aa,subnet-0bb
+RC_SUBNET_EGRESS_MODES_TASKS_PRIVATE=endpoints
+RC_VPC_ENDPOINTS_ECR_ECR_API=vpce-01
+RC_REPOSITORIES_DB_SIDECAR=1234.dkr.ecr.us-west-2.amazonaws.com/my-app/db-sidecar
+```
+
+`rc outputs --json` for machine consumption, `rc outputs <name>` for one value.
+
 ---
 
 ## Feature index
@@ -320,6 +422,8 @@ What's built and live-verified on the `portable-deploy` branch:
 ### ECS provider — what terraform we generate
 
 - VPC + 2 public + 2 private subnets, IGW, security groups, default routing
+- **Declared network** (`network:`) — standalone, nameable security groups with default-deny ingress/egress, subnet groups with an explicit egress mode (`endpoints` / `nat` / `none`), and VPC endpoints; per-service `security_groups:` / `subnets:` that *replace* rc's defaults ([details](#declared-network--standalone-security-groups-private-subnets-vpc-endpoints))
+- **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
@@ -342,6 +446,7 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc deploy [--no-build]` | build, push, terraform apply, force-roll, run auto_on_deploy hooks |
 | `rc destroy --yes` | terraform destroy |
 | `rc status` | ECS service health table |
+| `rc outputs [--json\|--env] [<name>]` | resource ids from the deployed stack — cluster, ALB, ECR repos, plus every declared security group / subnet / VPC endpoint / repository. `--env` emits `KEY=value` for piping into a `.env` |
 | `rc exec <service> -- <cmd...>` | run a one-off command inside a live task; reliable stdout via sentinels; full TTY when stdin is a tty |
 | `rc lifecycle <hook> [<service>]` | run a named hook from rc.yml (resolves declarer; handles `run_once` probes) |
 | `rc secrets push [--rollout/--no-rollout]` | parse each `.env` file → upload as JSON to its SM secret → force-rolls every service |

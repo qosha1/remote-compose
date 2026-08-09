@@ -345,11 +345,42 @@ services:
     type: proxy
     public: true
     port: 80
+  worker:
+    cpu: 512
+    memory: 1024
+    security_groups: [isolated]        # REPLACES the shared ${project}-tasks SG
+    subnets: tasks-private             # placement; assign_public_ip derived
 
 secrets:
   - { name: django, source: file, path: .envs/.production/.django }
   - { name: db,     source: aws_sm, arn: "arn:aws:secretsmanager:..." }
+
+# Standalone network primitives — declared, not derived from services. Omit
+# the block entirely and the emitted terraform is unchanged.
+network:
+  security_groups:
+    isolated:                          # no `ingress` key = nothing reaches it
+      egress:                          # allow-list; no implicit 0.0.0.0/0
+        - to: endpoint:ecr             # sg: | service: | endpoint: | cidr: | alb | self
+        - to: endpoint:logs
+        - to: endpoint:s3
+  subnets:
+    tasks-private:
+      public: false
+      egress: endpoints                # endpoints | nat | none (no default route)
+  endpoints:
+    ecr:  { services: [ecr.api, ecr.dkr], subnets: [tasks-private] }
+    logs: { services: [logs],             subnets: [tasks-private] }
+    s3:   { services: [s3],               subnets: [tasks-private] }  # gateway
+
+repositories:
+  db-sidecar:
+    mirror: postgres:16-alpine         # rc creates the repo; you push the image
 ```
+
+Types live in `config/_network_types.py`; cross-resource reference resolution
+in `validate_network_refs`; terraform view models in
+`provider/ecs/network_plan.py`. `rc outputs` exports every created id.
 
 v1 configs upgrade cleanly via `rc migrate --in rc.yml --out rc.v2.yml`.
 Unknown keys become warnings; unmigratable keys require `--force`.
