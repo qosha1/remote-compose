@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ._errors import ConfigError  # noqa: F401  (re-export: historical import path)
+from ._iam_types import IamRoleV2
 from ._network_types import NetworkV2, RepositoryV2
 
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
@@ -244,6 +245,12 @@ class ServiceV2:
     #   there is no separate switch to get out of sync with the routing.
     security_groups: Optional[list[str]] = None
     subnets: Optional[str] = None
+    # A name from the top-level ``iam_roles:`` block. When set, this service's
+    # task definition carries THAT role instead of the shared
+    # ${project}-task role — so it inherits none of the grants
+    # provider_config.ecs.iam attaches to the shared one. None (the default)
+    # keeps the shared role, which is what every already-deployed stack uses.
+    iam_role: Optional[str] = None
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -291,6 +298,13 @@ class ServiceV2:
             raise ConfigError(
                 f"service {self.name!r}: subnets must be a single name from "
                 f"network.subnets, got {self.subnets!r}"
+            )
+        if self.iam_role is not None and (
+            not isinstance(self.iam_role, str) or not self.iam_role
+        ):
+            raise ConfigError(
+                f"service {self.name!r}: iam_role must be a single name from the "
+                f"top-level iam_roles block, got {self.iam_role!r}"
             )
         for entry in self.env_from_secret:
             if (
@@ -635,6 +649,10 @@ class RcConfigV2:
     # byte-identical to before they existed.
     network: NetworkV2 = field(default_factory=NetworkV2)
     repositories: dict[str, RepositoryV2] = field(default_factory=dict)
+    # Declared per-service task roles (see _iam_types). Empty by default —
+    # every service keeps the shared ${project}-task role, which is what
+    # already-deployed stacks reference.
+    iam_roles: dict[str, IamRoleV2] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.version != 2:
@@ -658,3 +676,5 @@ class RcConfigV2:
         self.network.validate()
         for repo in self.repositories.values():
             repo.validate()
+        for role in self.iam_roles.values():
+            role.validate()

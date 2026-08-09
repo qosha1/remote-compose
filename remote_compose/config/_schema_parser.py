@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from ._iam_types import IamRoleV2, IamStatementV2, validate_iam_role_refs
 from ._network_types import (
     NetworkRuleV2,
     NetworkV2,
@@ -168,6 +169,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
                 raw["security_groups"] if "security_groups" in raw else None
             ),
             subnets=raw["subnets"] if "subnets" in raw else None,
+            # Declared task role. Same treatment: keep the raw shape so
+            # validate() can flag a non-string; None means the shared role.
+            iam_role=raw["iam_role"] if "iam_role" in raw else None,
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -317,6 +321,59 @@ def _parse_repositories(raw: Any) -> dict[str, RepositoryV2]:
     return repos
 
 
+def _parse_iam_roles(raw: Any) -> dict[str, IamRoleV2]:
+    raw = _require_mapping(raw or {}, "iam_roles")
+    roles: dict[str, IamRoleV2] = {}
+    for name, body in raw.items():
+        where = f"iam_roles.{name}"
+        body = _require_mapping(body or {}, where)
+        _reject_unknown(
+            body,
+            {"description", "managed_policies", "statements", "tags"},
+            where,
+        )
+        managed = body.get("managed_policies")
+        if isinstance(managed, str):
+            managed = [managed]
+        elif managed is None:
+            managed = []
+        elif not isinstance(managed, list):
+            raise ConfigError(
+                f"{where}.managed_policies must be a list of IAM policy ARNs, "
+                f"got {type(managed).__name__}"
+            )
+        statements_raw = body.get("statements")
+        if statements_raw is None:
+            statements_raw = []
+        elif not isinstance(statements_raw, list):
+            raise ConfigError(
+                f"{where}.statements must be a list, got "
+                f"{type(statements_raw).__name__}"
+            )
+        tags = body.get("tags")
+        if tags is not None and not isinstance(tags, dict):
+            raise ConfigError(
+                f"{where}.tags must be a mapping, got {type(tags).__name__}"
+            )
+        roles[name] = IamRoleV2(
+            name=name,
+            description=body.get("description"),
+            managed_policies=[str(p) for p in managed],
+            statements=[
+                IamStatementV2.parse(s, where=f"{where}.statements[{i}]")
+                for i, s in enumerate(statements_raw)
+            ],
+            # Coerce scalars to str the same way service env does: a YAML
+            # `team: 42` is a perfectly reasonable tag value and AWS wants a
+            # string. Non-scalars are left alone for validate() to reject.
+            tags={
+                str(k): (v if isinstance(v, (dict, list)) else str(v))
+                for k, v in (tags or {}).items()
+            },
+        )
+    return roles
+
+
 def _parse_bootstrap(raw: dict[str, Any]) -> BootstrapConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"bootstrap must be a mapping, got {type(raw).__name__}")
@@ -433,9 +490,20 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
 
     network = _parse_network(raw.get("network"))
     repositories = _parse_repositories(raw.get("repositories"))
+    iam_roles = _parse_iam_roles(raw.get("iam_roles"))
     network.validate()
     for repo in repositories.values():
         repo.validate()
+    for role in iam_roles.values():
+        role.validate()
+
+    # Unlike the network refs below, this needs no second pass in the
+    # provider: `iam_role:` can only be written on an rc.yml service, so the
+    # rc.yml-only service set is already the complete set of referrers.
+    validate_iam_role_refs(
+        iam_roles,
+        service_roles={n: s.iam_role for n, s in services.items()},
+    )
 
     # Cross-resource reference resolution. service_names / has_alb are left
     # unknown here: a service referenced by 'service:<name>' may live only in
@@ -471,6 +539,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
         bootstrap=bootstrap,
         network=network,
         repositories=repositories,
+        iam_roles=iam_roles,
     )
     cfg.validate()
     return cfg

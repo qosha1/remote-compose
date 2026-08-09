@@ -39,6 +39,7 @@ from ..base import (
     StatusReport,
 )
 from .autosize import EC2TaskDemand, auto_size
+from .iam_plan import IamPlan, build_iam_plan
 from .network_plan import (
     NetworkPlan,
     build_network_plan,
@@ -72,6 +73,42 @@ def _parse_declared_network(ctx: DeployContext) -> tuple[Any, dict[str, Any]]:
     for repo in repositories.values():
         repo.validate()
     return network, repositories
+
+
+def _parse_declared_iam_roles(ctx: DeployContext) -> dict[str, Any]:
+    """Re-read the ``iam_roles:`` block off the raw rc.yml.
+
+    Same rationale as :func:`_parse_declared_network`: ``DeployContext``
+    carries the raw document, and re-parsing one pure block is cheaper than
+    threading a new field through every context construction site.
+    """
+    from ...config._schema_parser import _parse_iam_roles
+
+    roles = _parse_iam_roles((ctx.rc_yml_v2 or {}).get("iam_roles"))
+    for role in roles.values():
+        role.validate()
+    return roles
+
+
+def _service_role_view(spec: Any, *, iam_plan: IamPlan) -> dict[str, Any]:
+    """Resolve which task role this service's task definition points at.
+
+    Defaults to ``aws_iam_role.task`` — the shared role every task definition
+    has referenced since rc emitted its first ECS stack. Naming an
+    ``iam_role:`` swaps the reference for that service only; nothing about the
+    shared role's own emission changes, so a stack where nobody opts in is
+    byte-identical to one that predates this feature.
+    """
+    role_name = getattr(spec, "iam_role", None)
+    if not role_name:
+        return {
+            "task_role_ref": "aws_iam_role.task.arn",
+            "declared_iam_role": None,
+        }
+    return {
+        "task_role_ref": iam_plan.role_arn_ref(role_name),
+        "declared_iam_role": role_name,
+    }
 
 
 def _service_placement_view(
@@ -119,6 +156,75 @@ def _service_placement_view(
         "assign_public_ip": assign_public_ip,
         "declared_subnet_group": subnet_group_name,
         "declared_security_groups": declared_sgs,
+    }
+
+
+# IMDS defaults for the ECS container instances in aws_launch_template.ec2.
+#
+# http_tokens = "required" is IMDSv2-only, and it is the setting that actually
+# matters: without it, any SSRF or request-forgery bug reachable from a
+# container can read the *instance* role's credentials with a plain
+# `GET http://169.254.169.254/...`. IMDSv2 requires a PUT to mint a session
+# token first, which neither a forged GET nor a naive proxy can do. Safe as a
+# default here because rc pins the ECS-optimized AL2 AMI (see the ssm_parameter
+# data source in capacity.tf.j2), whose ECS agent, SSM agent and CloudWatch
+# agent have all spoken IMDSv2 since 2019 — and rc's tasks take their
+# credentials from the ECS task metadata endpoint (169.254.170.2), not IMDS,
+# so nothing rc runs in a container is affected either way.
+#
+# The hop limit is 2, NOT 1, and that is the interesting half:
+#
+#   * The value is the IP TTL of the token response, and each container
+#     network hop decrements it. 1 reaches only processes in the instance's
+#     own network namespace; anything on the docker bridge (every bridge-mode
+#     container, including tooling baked into the ECS-optimized AMI) is cut
+#     off. That breakage is silent and instance-wide, so 1 is not a safe
+#     default for stacks that already exist.
+#   * awsvpc — the network mode rc uses for every task — does NOT make hop
+#     limit 1 the container cut-off it looks like. An awsvpc task owns its
+#     ENI and reaches 169.254.169.254 over it directly, so the TTL budget is
+#     not spent the way a bridge-mode container's is. The knob that reliably
+#     denies awsvpc tasks the instance role is the ECS agent's
+#     ECS_AWSVPC_BLOCK_IMDS, which rc exposes separately as `block_task_imds`.
+#
+# So: IMDSv2 on by default (real mitigation, no known breakage), hop limit at
+# the container-compatible value, and the two settings that CAN break a
+# running stack left opt-in.
+IMDS_DEFAULT_TOKENS = "required"
+IMDS_DEFAULT_HOP_LIMIT = 2
+VALID_IMDS_TOKEN_MODES = {"required", "optional"}
+
+
+def _resolve_imds_options(user_cfg: dict) -> dict:
+    """Validate the IMDS knobs under ``provider_config.ecs.ec2_capacity``.
+
+    Instance-level, so it lives beside ``instance_type`` / ``capacity_type``
+    rather than on a service: ``aws_ecs_task_definition`` has no
+    ``metadata_options`` argument, and a Fargate task has no IMDS to harden in
+    the first place (its credentials come from 169.254.170.2). The exposure is
+    entirely EC2-backed ECS, and the resource that owns it is
+    ``aws_launch_template.ec2``.
+    """
+    tokens = str(user_cfg.get("imdsv2", IMDS_DEFAULT_TOKENS)).strip().lower()
+    if tokens not in VALID_IMDS_TOKEN_MODES:
+        raise ProviderConfigError(
+            f"ec2_capacity.imdsv2 must be 'required' or 'optional', got "
+            f"{user_cfg.get('imdsv2')!r}"
+        )
+    hop_limit = user_cfg.get("metadata_hop_limit", IMDS_DEFAULT_HOP_LIMIT)
+    if isinstance(hop_limit, bool) or not isinstance(hop_limit, int):
+        raise ProviderConfigError(
+            f"ec2_capacity.metadata_hop_limit must be an integer, got {hop_limit!r}"
+        )
+    if not 1 <= hop_limit <= 64:
+        raise ProviderConfigError(
+            f"ec2_capacity.metadata_hop_limit must be between 1 and 64, got "
+            f"{hop_limit}"
+        )
+    return {
+        "imds_tokens": tokens,
+        "imds_hop_limit": hop_limit,
+        "block_task_imds": bool(user_cfg.get("block_task_imds", False)),
     }
 
 
@@ -639,6 +745,27 @@ class ECSProvider(Provider):
                 for name, spec in ctx.services.items()
             ],
         )
+        # --- Declared task roles (rc.yml `iam_roles:`) -----------------------
+        #
+        # Opt-in per-service least privilege. The shared aws_iam_role.task is
+        # emitted exactly as before and stays the default; an empty block means
+        # every service still points at it and iam.tf is byte-identical.
+        #
+        # The reference check runs at parse() time (iam_role can only be
+        # written on an rc.yml service, so compose adds no referrers), but a
+        # DeployContext can be built in code — the ECS e2e helpers and every
+        # provider test do exactly that — so re-check against the merged set
+        # rather than trusting that parse() ran.
+        iam_roles_cfg = _parse_declared_iam_roles(ctx)
+        from ...config._iam_types import validate_iam_role_refs
+
+        validate_iam_role_refs(
+            iam_roles_cfg,
+            service_roles={
+                n: getattr(s, "iam_role", None) for n, s in ctx.services.items()
+            },
+        )
+        iam_plan = build_iam_plan(iam_roles_cfg)
         if existing_vpc and igw_id_ref == "null":
             needs_igw = [s.name for s in net_plan.subnet_groups if s.egress == "igw"]
             if needs_igw:
@@ -967,6 +1094,7 @@ class ECSProvider(Provider):
                     extra_security_group_ids=extra_security_group_ids,
                 )
             )
+            svc_view.update(_service_role_view(spec, iam_plan=iam_plan))
             services_view.append(svc_view)
             if launch_type == "EC2":
                 ec2_demands.append(
@@ -1341,6 +1469,10 @@ class ECSProvider(Provider):
             # plan => network_declared.tf / repositories.tf render to nothing
             # and outputs.tf emits only its historical entries.
             "net_plan": net_plan,
+            # Declared task roles (rc.yml `iam_roles:`). Empty plan => iam.tf
+            # emits only the shared task role it always has, and every service
+            # keeps task_role_arn = aws_iam_role.task.arn.
+            "iam_plan": iam_plan,
             "igw_id_ref": igw_id_ref,
             "public_subnet_first_ref": public_subnet_first_ref,
             "alb_dns_ref": alb_dns_ref,
@@ -3605,6 +3737,7 @@ class ECSProvider(Provider):
             "max_size": max_size,
             "capacity_type": capacity_type,
             "spot_weight": user_cfg.get("spot_weight", 3),
+            **_resolve_imds_options(user_cfg),
         }
 
 

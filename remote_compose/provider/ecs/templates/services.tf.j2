@@ -54,7 +54,16 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   cpu                      = "{{ svc.cpu }}"
   memory                   = "{{ svc.memory }}"
   execution_role_arn       = aws_iam_role.task_execution.arn
+{%- if svc.declared_iam_role %}
+  # Declared task role from rc.yml (`iam_roles.{{ svc.declared_iam_role }}`) instead of the
+  # shared ${var.project}-task role, so this service holds only the grants
+  # that role names, and none of the provider_config.ecs.iam ones. The comment
+  # ends the aligned run above, so this line is unpadded on purpose: terraform
+  # fmt aligns within a run, and a padded `=` here would be reformatted away.
+  task_role_arn = {{ svc.task_role_ref }}
+{%- else %}
   task_role_arn            = aws_iam_role.task.arn
+{%- endif %}
 
   container_definitions = jsonencode([{
     name      = "{{ svc.name }}"

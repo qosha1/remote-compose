@@ -751,6 +751,7 @@ def build_deploy_context(
                 stateful=getattr(svc, "stateful", False),
                 security_groups=list(getattr(svc, "security_groups", None) or []),
                 subnet_group=getattr(svc, "subnets", None),
+                iam_role=getattr(svc, "iam_role", None),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker

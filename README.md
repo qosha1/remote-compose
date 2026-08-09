@@ -407,6 +407,104 @@ RC_REPOSITORIES_DB_SIDECAR=1234.dkr.ecr.us-west-2.amazonaws.com/my-app/db-sideca
 
 `rc outputs --json` for machine consumption, `rc outputs <name>` for one value.
 
+### Declared task roles — per-service IAM instead of one shared role
+
+rc emits one task role, `${project}-task`, and every task definition points at
+it. `provider_config.ecs.iam` bolts grants onto *that* role, so a permission
+written for one service is silently held by every other service in the stack.
+
+Declare a role and name it on the services that need it:
+
+```yaml
+iam_roles:
+  media-writer:
+    description: S3 media write for the web tier
+    managed_policies:
+      - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+    statements:                        # same shape as provider_config.ecs.iam
+      - sid: WriteMedia                # optional; IAM requires alphanumeric
+        actions: [s3:PutObject, s3:GetObject]
+        resources: ["arn:aws:s3:::my-app-media/*"]
+        condition:                     # optional
+          Bool: { "aws:SecureTransport": "true" }
+    tags: { tier: web }                # surfaces as aws:PrincipalTag
+
+  locked-down: {}                      # no grants at all, deliberately
+
+services:
+  web:
+    iam_role: media-writer             # REPLACES the shared ${project}-task role
+  worker:
+    iam_role: locked-down
+  nginx: {}                            # no iam_role -> shared role, as before
+```
+
+Why a top-level block rather than `services.<name>.iam:` — grants cluster by
+tier, not by service, so inlining them means copy-pasting a list that then
+drifts; two services sharing `iam_role: media-writer` provably share one AWS
+role; and it matches the "declare it, reference it by name" shape the network
+block already uses.
+
+What holds regardless:
+
+- **The shared role is never removed or renamed.** `aws_iam_role.task` is still
+  emitted, still carries the `provider_config.ecs.iam` grants, and is still the
+  `task_role_arn` of every service that does not name an `iam_role:`. This is an
+  opt-in override, not a migration — a config that ignores it emits
+  byte-identical terraform.
+- **A declared role does *not* inherit `provider_config.ecs.iam`.** That is the
+  point: those grants stay on the shared role.
+- **ECS Exec keeps working.** Every declared role gets the same `ssmmessages:*`
+  policy the shared role has, because `rc exec` / `rc db backup` / `rc db
+  restore` authenticate the in-container SSM agent with the *task* role.
+- **A role nobody references is fine** — its ARN is exported for an out-of-band
+  consumer (`RC_IAM_ROLES_MEDIA_WRITER=arn:aws:iam::…:role/my-app-media-writer`).
+
+The task *execution* role (`${project}-task-exec`, the one ECS itself uses to
+pull images and read secrets) is untouched by any of this.
+
+### IMDS hardening on EC2 container instances
+
+Only relevant when a service sets `launch_type: EC2`. Fargate tasks take their
+credentials from the task metadata endpoint (169.254.170.2), not EC2 IMDS, and
+`aws_ecs_task_definition` has no metadata options to set — the exposure is the
+*instance* role, and it lives on `aws_launch_template.ec2`.
+
+rc now emits, by default:
+
+```hcl
+metadata_options {
+  http_endpoint               = "enabled"
+  http_tokens                 = "required"   # IMDSv2 only
+  http_put_response_hop_limit = 2
+}
+```
+
+`http_tokens = "required"` is the mitigation that matters: a forged `GET` from
+inside a container cannot mint the session token IMDSv2 demands, so an SSRF bug
+no longer yields the instance role. Tune it under `ec2_capacity`:
+
+```yaml
+provider_config:
+  ecs:
+    ec2_capacity:
+      imdsv2: required          # required (default) | optional
+      metadata_hop_limit: 2     # default 2; 1 is the strict setting
+      block_task_imds: false    # default false
+```
+
+The hop limit is 2 rather than 1 on purpose. It is the IP TTL of the token
+response, and each container network hop decrements it: 1 admits only the
+instance's own network namespace and cuts off every bridge-mode container,
+which is a silent, instance-wide change to make to a stack that already runs.
+And 1 is *not* the awsvpc cut-off it looks like — an awsvpc task reaches IMDS
+over its own ENI. To deny rc's tasks the instance role, set
+`block_task_imds: true`, which writes `ECS_AWSVPC_BLOCK_IMDS=true` into the ECS
+agent config. Tasks keep their own task role either way.
+
+`http_endpoint` is deliberately not configurable: disabling IMDS entirely stops
+the ECS agent registering the instance, so the stack would never run a task.
+
 ---
 
 ## Feature index
@@ -424,6 +522,8 @@ What's built and live-verified on the `portable-deploy` branch:
 - VPC + 2 public + 2 private subnets, IGW, security groups, default routing
 - **Declared network** (`network:`) — standalone, nameable security groups with default-deny ingress/egress, subnet groups with an explicit egress mode (`endpoints` / `nat` / `none`), and VPC endpoints; per-service `security_groups:` / `subnets:` that *replace* rc's defaults ([details](#declared-network--standalone-security-groups-private-subnets-vpc-endpoints))
 - **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
+- **Declared task roles** (`iam_roles:`) — opt-in per-service IAM instead of one shared task role every service inherits; the shared `${project}-task` role stays exactly as it was for anything that doesn't opt in ([details](#declared-task-roles--per-service-iam-instead-of-one-shared-role))
+- **IMDS hardening on EC2 capacity** — IMDSv2 required on `aws_launch_template.ec2` by default, container-compatible hop limit, opt-in `ECS_AWSVPC_BLOCK_IMDS` ([details](#imds-hardening-on-ec2-container-instances))
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
@@ -641,7 +741,7 @@ remote_compose/
 │           ├── cluster.tf.j2        # ECS cluster (Container Insights opt-in)
 │           ├── domain.tf.j2         # ACM cert (with SANs) + R53 records
 │           ├── efs.tf.j2            # EFS + access points (uid/gid/mode)
-│           ├── iam.tf.j2            # task-execution + task roles + ssmmessages policy
+│           ├── iam.tf.j2            # task-execution + shared/declared task roles + ssmmessages policy
 │           ├── network.tf.j2        # VPC, subnets, IGW, route tables
 │           ├── outputs.tf.j2        # ECR repo URLs, ALB DNS
 │           ├── providers.tf.j2      # AWS provider block

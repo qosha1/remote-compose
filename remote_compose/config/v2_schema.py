@@ -19,6 +19,12 @@ sense (provider_config sub-keys), strict on everything else.
 
 from __future__ import annotations
 
+from ._iam_types import (
+    MAX_MANAGED_POLICIES,
+    IamRoleV2,
+    IamStatementV2,
+    validate_iam_role_refs,
+)
 from ._network_types import (
     GATEWAY_ENDPOINT_SERVICES,
     VALID_ENDPOINT_TYPES,
@@ -37,6 +43,7 @@ from ._network_types import (
 from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-compat)
     _parse_backend,
     _parse_bootstrap,
+    _parse_iam_roles,
     _parse_lifecycle,
     _parse_network,
     _parse_repositories,
@@ -90,12 +97,17 @@ __all__ = [
     "SecurityGroupV2",
     "SubnetGroupV2",
     "VpcEndpointV2",
+    # Declared IAM task roles
+    "IamRoleV2",
+    "IamStatementV2",
     # Public functions
     "load",
     "parse",
+    "validate_iam_role_refs",
     "validate_network_refs",
     # Public constants
     "GATEWAY_ENDPOINT_SERVICES",
+    "MAX_MANAGED_POLICIES",
     "VALID_ENDPOINT_TYPES",
     "VALID_PROTOCOLS",
     "VALID_SUBNET_EGRESS",

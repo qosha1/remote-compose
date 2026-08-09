@@ -101,6 +101,20 @@ output "vpc_endpoints" {
   }
 }
 {%- endif %}
+{%- if iam_plan.roles %}
+
+# Declared task roles, keyed by rc.yml name -> role ARN. Exported so something
+# outside rc (a Lambda, a hand-run `run_task`) can pass the same role rc gives
+# the service, rather than minting a second one that drifts.
+output "iam_roles" {
+  value = {
+{%- set kw = iam_plan.output_key_width %}
+{%- for role in iam_plan.roles %}
+    {{ ('"' ~ role.name ~ '"').ljust(kw) }} = {{ role.arn_ref }}
+{%- endfor %}
+  }
+}
+{%- endif %}
 {%- if net_plan.repositories %}
 
 # Declared standalone ECR repositories, keyed by rc.yml name -> repository URI.

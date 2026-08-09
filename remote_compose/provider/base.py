@@ -147,6 +147,12 @@ class ServiceSpec:
     #   there is no separate switch to drift out of sync with the routing.
     security_groups: list[str] = field(default_factory=list)
     subnet_group: Optional[str] = None
+    # Declared task role (rc.yml `iam_roles:`). A name here makes this
+    # service's task definition carry that role instead of the shared
+    # ${project}-task role — and therefore none of the grants
+    # provider_config.ecs.iam attaches to the shared one. None = the shared
+    # role, which is what every already-deployed task definition references.
+    iam_role: Optional[str] = None
 
 
 @dataclass
