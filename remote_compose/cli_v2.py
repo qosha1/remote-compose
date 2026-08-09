@@ -749,6 +749,8 @@ def build_deploy_context(
                 env_from_secret=list(svc.env_from_secret or []),
                 auto_roll=getattr(svc, "auto_roll", True),
                 stateful=getattr(svc, "stateful", False),
+                security_groups=list(getattr(svc, "security_groups", None) or []),
+                subnet_group=getattr(svc, "subnets", None),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker

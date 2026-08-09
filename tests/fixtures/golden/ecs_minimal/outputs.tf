@@ -17,3 +17,9 @@ output "ecr_repositories" {
     "worker" = aws_ecr_repository.worker.repository_url
   }
 }
+
+# The VPC every resource below lives in. Always emitted so an out-of-band
+# consumer never has to hardcode it.
+output "vpc_id" {
+  value = aws_vpc.main.id
+}

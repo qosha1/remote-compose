@@ -39,12 +39,87 @@ from ..base import (
     StatusReport,
 )
 from .autosize import EC2TaskDemand, auto_size
+from .network_plan import (
+    NetworkPlan,
+    build_network_plan,
+    check_endpoint_reachability,
+    tf_ident,
+)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 RunnerFactory = Callable[[Path], TerraformRunner]
 SessionFactory = Callable[[DeployContext], Any]
+
+
+def _parse_declared_network(ctx: DeployContext) -> tuple[Any, dict[str, Any]]:
+    """Re-read the ``network:`` / ``repositories:`` blocks off the raw rc.yml.
+
+    ``DeployContext`` carries the raw document rather than the parsed
+    ``RcConfigV2``, so the provider re-parses these two blocks rather than
+    threading a new field through every context construction site. The parse
+    is pure and cheap, and ``parse()`` has already validated the document once
+    by the time we get here — this cannot surface an error the user has not
+    already seen.
+    """
+    from ...config._schema_parser import _parse_network, _parse_repositories
+
+    raw = ctx.rc_yml_v2 or {}
+    network = _parse_network(raw.get("network"))
+    repositories = _parse_repositories(raw.get("repositories"))
+    network.validate()
+    for repo in repositories.values():
+        repo.validate()
+    return network, repositories
+
+
+def _service_placement_view(
+    spec: Any,
+    *,
+    net_plan: NetworkPlan,
+    default_subnets_ref: str,
+    extra_security_group_ids: list[str],
+) -> dict[str, Any]:
+    """Resolve a service's subnets / security groups / public-IP for the task ENI.
+
+    Both declared knobs REPLACE rather than append — naming a security group
+    and still being joined to the shared ``tasks`` group would defeat the
+    point, since that group carries ALB ingress and blanket egress.
+
+    ``assign_public_ip`` is derived, never declared: it follows the placement
+    subnet's routing. A private subnet with a public IP is a broken
+    configuration AWS will happily accept and then silently fail to route, so
+    there is no switch here to get it wrong with.
+    """
+    declared_sgs = list(getattr(spec, "security_groups", None) or [])
+    subnet_group_name = getattr(spec, "subnet_group", None)
+
+    if declared_sgs:
+        refs = [f"aws_security_group.{net_plan.sg_tf_name(n)}.id" for n in declared_sgs]
+        # provider_config.ecs.security_group_ids is an environment-wide
+        # adopt-an-existing-SG knob; a service that names its own groups has
+        # opted out of environment-wide defaults entirely.
+        security_groups_ref = "[" + ", ".join(refs) + "]"
+    else:
+        extras = "".join(f', "{sg}"' for sg in extra_security_group_ids)
+        security_groups_ref = f"[aws_security_group.tasks.id{extras}]"
+
+    if subnet_group_name:
+        group = net_plan.subnet_group(subnet_group_name)
+        subnets_ref = f"aws_subnet.{group.tf_name}[*].id"
+        assign_public_ip = group.public
+    else:
+        subnets_ref = default_subnets_ref
+        assign_public_ip = True
+
+    return {
+        "subnets_ref": subnets_ref,
+        "security_groups_ref": security_groups_ref,
+        "assign_public_ip": assign_public_ip,
+        "declared_subnet_group": subnet_group_name,
+        "declared_security_groups": declared_sgs,
+    }
 
 
 def _tf_name(svc_name: str) -> str:
@@ -477,12 +552,103 @@ class ECSProvider(Provider):
             vpc_id_ref = "data.aws_vpc.main.id"
             public_subnet_ids_ref = "local.rc_public_subnet_ids"
             public_subnet_idx_ref = "local.rc_public_subnet_ids[count.index]"
+            public_subnet_first_ref = "local.rc_public_subnet_ids[0]"
             private_subnet_ids_ref = "local.rc_private_subnet_ids"
+            # An adopted VPC's internet gateway is not rc's to name. A declared
+            # public subnet group there would need a route to it, so require
+            # the caller to say which one.
+            igw_id_ref = (
+                f'"{ecs_cfg["internet_gateway_id"]}"'
+                if ecs_cfg.get("internet_gateway_id")
+                else "null"
+            )
         else:
             vpc_id_ref = "aws_vpc.main.id"
             public_subnet_ids_ref = "aws_subnet.public[*].id"
             public_subnet_idx_ref = "aws_subnet.public[count.index].id"
+            public_subnet_first_ref = "aws_subnet.public[0].id"
             private_subnet_ids_ref = "aws_subnet.private[*].id"
+            igw_id_ref = "aws_internet_gateway.main.id"
+
+        # --- Declared network (rc.yml `network:` / `repositories:`) ---------
+        #
+        # Standalone, nameable primitives that are NOT derived from a service:
+        # security groups, subnet groups with an explicit egress mode, VPC
+        # endpoints, and ECR repositories. Their ids land in outputs.tf so an
+        # out-of-band consumer (a backend calling run_task, say) can attach to
+        # them without rc managing that consumer.
+        #
+        # Wholly additive: with no `network:` / `repositories:` block the plan
+        # is empty, every template below renders nothing, and the emitted
+        # terraform is byte-identical to before this existed.
+        network_cfg, repositories_cfg = _parse_declared_network(ctx)
+        service_sg_refs = {
+            name: [
+                f"aws_security_group.rc_{tf_ident(sg)}.id"
+                for sg in spec.security_groups
+            ]
+            for name, spec in ctx.services.items()
+            if getattr(spec, "security_groups", None)
+        }
+        # Second validation pass. parse() could not resolve 'service:<name>'
+        # refs or the bare 'alb' ref because a service may live only in
+        # docker-compose.yml; here the merged set is finally known.
+        from ...config._network_types import validate_network_refs
+
+        validate_network_refs(
+            network_cfg,
+            service_names=set(ctx.services),
+            service_sg_overrides={
+                n: list(s.security_groups)
+                for n, s in ctx.services.items()
+                if getattr(s, "security_groups", None)
+            },
+            service_subnet_placements={
+                n: s.subnet_group
+                for n, s in ctx.services.items()
+                if getattr(s, "subnet_group", None)
+            },
+            public_services={n: s.port for n, s in ctx.services.items() if s.public},
+            has_alb=any(s.public for s in ctx.services.values()) or existing_alb,
+        )
+        net_plan = build_network_plan(
+            network_cfg,
+            repositories_cfg,
+            existing_vpc=existing_vpc,
+            service_sg_refs=service_sg_refs,
+        )
+        # A task in a NAT-free subnet that cannot reach ECR does not fail at
+        # apply time — it fails minutes into the rollout with an opaque
+        # CannotPullContainerError. Check it while we can still name the
+        # missing endpoint.
+        check_endpoint_reachability(
+            network_cfg,
+            placements=[
+                {
+                    "service": name,
+                    "subnet_group": getattr(spec, "subnet_group", None),
+                    "security_groups": list(
+                        getattr(spec, "security_groups", None) or []
+                    ),
+                    # Secrets are attached to every service's task def (see the
+                    # secrets fan-out below), so any stack-level secret means
+                    # every task needs to reach Secrets Manager.
+                    "needs_secrets": bool(ctx.secrets)
+                    or bool(getattr(spec, "env_from_secret", None)),
+                }
+                for name, spec in ctx.services.items()
+            ],
+        )
+        if existing_vpc and igw_id_ref == "null":
+            needs_igw = [s.name for s in net_plan.subnet_groups if s.egress == "igw"]
+            if needs_igw:
+                raise ProviderConfigError(
+                    f"network.subnets {needs_igw} declare public: true, but this "
+                    f"stack adopts an existing VPC and rc does not know its "
+                    f"internet gateway. Set "
+                    f"provider_config.ecs.internet_gateway_id, or make the "
+                    f"group private."
+                )
 
         # ALB rendering aliases — like the vpc refs, templates read these so
         # they don't branch on existing_alb. In create mode they're the
@@ -793,6 +959,14 @@ class ECSProvider(Provider):
                 # Explicit ALB catch-all selection (see ServiceSpec.default_target).
                 "default_target": bool(spec.default_target) if spec.public else False,
             }
+            svc_view.update(
+                _service_placement_view(
+                    spec,
+                    net_plan=net_plan,
+                    default_subnets_ref=public_subnet_ids_ref,
+                    extra_security_group_ids=extra_security_group_ids,
+                )
+            )
             services_view.append(svc_view)
             if launch_type == "EC2":
                 ec2_demands.append(
@@ -1163,6 +1337,12 @@ class ECSProvider(Provider):
             "task_iam_statements": task_iam_statements,
             "task_iam_policy_json": task_iam_policy_json,
             "task_role_tags": task_role_tags,
+            # Declared network (rc.yml `network:` / `repositories:`). Empty
+            # plan => network_declared.tf / repositories.tf render to nothing
+            # and outputs.tf emits only its historical entries.
+            "net_plan": net_plan,
+            "igw_id_ref": igw_id_ref,
+            "public_subnet_first_ref": public_subnet_first_ref,
             "alb_dns_ref": alb_dns_ref,
             "alb_zone_ref": alb_zone_ref,
             "https_listener_ref": https_listener_ref,

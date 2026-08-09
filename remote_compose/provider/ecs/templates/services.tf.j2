@@ -210,14 +210,28 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
 
   network_configuration {
+{%- if svc.declared_subnet_group or svc.declared_security_groups %}
+    # Declared-network placement from rc.yml. Both knobs REPLACE rc's
+    # defaults rather than adding to them.
+{%- if svc.declared_subnet_group %}
+    #   subnets: {{ svc.declared_subnet_group }} — assign_public_ip follows that group's
+    #     routing, so it cannot drift out of sync with it.
+{%- endif %}
+{%- if svc.declared_security_groups %}
+    #   security_groups: {{ svc.declared_security_groups | join(', ') }} — NOT joined to the shared
+    #     ${var.project}-tasks group, so this task inherits neither its ALB
+    #     ingress nor its blanket egress to 0.0.0.0/0.
+{%- endif %}
+{%- else %}
     # Fargate in public subnets with public IPs so tasks can pull images from
     # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
     # only permits inbound from the ALB SG + self, so the public IP is not
-    # an exposure - it is just an egress path. Private-subnet + NAT variant
-    # is tracked in rc-e5u.25.
-    subnets          = {{ public_subnet_ids_ref }}
-    security_groups  = [aws_security_group.tasks.id{% for sg in extra_security_group_ids %}, "{{ sg }}"{% endfor %}]
-    assign_public_ip = true
+    # an exposure - it is just an egress path. Declare `network.subnets` +
+    # per-service `subnets:` for the private-subnet variant.
+{%- endif %}
+    subnets          = {{ svc.subnets_ref }}
+    security_groups  = {{ svc.security_groups_ref }}
+    assign_public_ip = {{ 'true' if svc.assign_public_ip else 'false' }}
   }
 
 {%- if has_service_discovery %}

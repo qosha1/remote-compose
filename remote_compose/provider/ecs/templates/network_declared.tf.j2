@@ -1,0 +1,150 @@
+{%- if net_plan.has_network %}
+# =============================================================================
+# Declared network (rc.yml `network:`)
+#
+# Standalone, nameable resources — not derived from any service. Everything
+# here is default-deny: a security group emits no rule it was not told to,
+# and a private subnet group gets no 0.0.0.0/0 route unless its egress mode
+# asks for one. Resource ids are exported in outputs.tf for out-of-band
+# consumers (see `rc outputs`).
+#
+# NOTE: declared groups use aws_vpc_security_group_{ingress,egress}_rule
+# rather than inline blocks. An aws_security_group with no inline egress
+# block has its AWS-created allow-all egress rule REMOVED by the provider,
+# which is what makes "no egress rule" mean "no egress". The built-in alb /
+# tasks groups in security_groups.tf keep their inline blocks and are
+# untouched by any of this.
+# =============================================================================
+{%- endif %}
+{%- for sn in net_plan.subnet_groups %}
+{%- set sw = 23 if sn.public else 17 %}
+
+resource "aws_subnet" "{{ sn.tf_name }}" {
+  {{ "count".ljust(sw) }} = {{ sn.count }}
+  {{ "vpc_id".ljust(sw) }} = {{ vpc_id_ref }}
+  {{ "cidr_block".ljust(sw) }} = {{ sn.cidr_block_expr }}
+  {{ "availability_zone".ljust(sw) }} = data.aws_availability_zones.available.names[count.index]
+{%- if sn.public %}
+  {{ "map_public_ip_on_launch".ljust(sw) }} = true
+{%- endif %}
+
+  tags = {
+    Name = "${var.project}-{{ sn.name }}-${count.index}"
+    Tier = "{{ 'public' if sn.public else 'private' }}"
+  }
+}
+
+resource "aws_route_table" "{{ sn.tf_name }}" {
+  vpc_id = {{ vpc_id_ref }}
+  tags = {
+    Name = "${var.project}-{{ sn.name }}-rt"
+  }
+}
+
+resource "aws_route_table_association" "{{ sn.tf_name }}" {
+  count          = {{ sn.count }}
+  subnet_id      = aws_subnet.{{ sn.tf_name }}[count.index].id
+  route_table_id = aws_route_table.{{ sn.tf_name }}.id
+}
+{%- if sn.egress == 'igw' %}
+
+resource "aws_route" "{{ sn.tf_name }}_default" {
+  route_table_id         = aws_route_table.{{ sn.tf_name }}.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = {{ igw_id_ref }}
+}
+{%- elif sn.egress == 'nat' %}
+
+resource "aws_route" "{{ sn.tf_name }}_default" {
+  route_table_id         = aws_route_table.{{ sn.tf_name }}.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.rc_nat.id
+}
+{%- else %}
+
+# egress = "{{ sn.egress }}": no default route. Reachability comes only from
+# the local VPC route and any gateway-endpoint entries attached below.
+{%- endif %}
+{%- endfor %}
+{%- if net_plan.needs_nat %}
+
+# One project-shared NAT gateway, in the first public subnet. Created only
+# because a declared subnet group asked for `egress: nat` — the `endpoints`
+# mode needs none of this and costs nothing per hour.
+resource "aws_eip" "rc_nat" {
+  domain = "vpc"
+  tags   = { Name = "${var.project}-nat" }
+}
+
+resource "aws_nat_gateway" "rc_nat" {
+  allocation_id = aws_eip.rc_nat.id
+  subnet_id     = {{ public_subnet_first_ref }}
+  tags          = { Name = "${var.project}-nat" }
+{%- if not existing_vpc %}
+
+  depends_on = [aws_internet_gateway.main]
+{%- endif %}
+}
+{%- endif %}
+{%- for ep in net_plan.endpoints %}
+{%- if ep.sg_tf_name %}
+
+# Interface endpoint {{ ep.name }}: ENIs in the named subnet group(s), reached
+# over 443. Its ingress rules are DERIVED from every declared group that has
+# an `to: endpoint:{{ ep.name }}` egress rule — declaring one side of the
+# rule and silently getting no connectivity is not expressible.
+resource "aws_security_group" "{{ ep.sg_tf_name }}" {
+  name        = "${var.project}-vpce-{{ ep.name }}"
+  description = "rc: interface endpoint {{ ep.name }}"
+  vpc_id      = {{ vpc_id_ref }}
+
+  tags = { Name = "${var.project}-vpce-{{ ep.name }}" }
+}
+{%- endif %}
+{%- for svc in ep.services %}
+{%- set ew = 19 if ep.type == 'Interface' else 17 %}
+
+resource "aws_vpc_endpoint" "{{ svc.tf_name }}" {
+  {{ "vpc_id".ljust(ew) }} = {{ vpc_id_ref }}
+  {{ "service_name".ljust(ew) }} = "com.amazonaws.${var.region}.{{ svc.service_suffix }}"
+  {{ "vpc_endpoint_type".ljust(ew) }} = "{{ ep.type }}"
+{%- if ep.type == 'Interface' %}
+  {{ "subnet_ids".ljust(ew) }} = {{ ep.subnet_ids_expr }}
+  {{ "security_group_ids".ljust(ew) }} = [aws_security_group.{{ ep.sg_tf_name }}.id]
+  {{ "private_dns_enabled".ljust(ew) }} = {{ 'true' if ep.private_dns else 'false' }}
+{%- else %}
+  {{ "route_table_ids".ljust(ew) }} = {{ ep.route_table_ids_expr }}
+{%- endif %}
+
+  tags = { Name = "${var.project}-vpce-{{ ep.name }}-{{ svc.service_suffix }}" }
+}
+{%- endfor %}
+{%- endfor %}
+{%- for sg in net_plan.security_groups %}
+{%- if not sg.is_endpoint_sg %}
+
+resource "aws_security_group" "{{ sg.tf_name }}" {
+  name        = "${var.project}-{{ sg.name }}"
+  description = "{{ sg.description }}"
+  vpc_id      = {{ vpc_id_ref }}
+
+  tags = { Name = "${var.project}-{{ sg.name }}" }
+}
+{%- endif %}
+{%- endfor %}
+{%- for sg in net_plan.security_groups %}
+{%- for rule in sg.rules %}
+{%- set w = rule.align_width %}
+
+resource "aws_vpc_security_group_{{ rule.direction }}_rule" "{{ rule.tf_name }}" {
+  {{ "security_group_id".ljust(w) }} = {{ rule.sg_ref }}
+  {{ "ip_protocol".ljust(w) }} = "{{ rule.ip_protocol }}"
+{%- if rule.from_port is not none %}
+  {{ "from_port".ljust(w) }} = {{ rule.from_port }}
+  {{ "to_port".ljust(w) }} = {{ rule.to_port }}
+{%- endif %}
+  {{ rule.source_attr.ljust(w) }} = {{ rule.source_value }}
+  {{ "description".ljust(w) }} = "{{ rule.description }}"
+}
+{%- endfor %}
+{%- endfor %}
