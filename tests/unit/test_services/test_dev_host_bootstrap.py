@@ -77,7 +77,10 @@ class TestGitSource:
 
         assert "path: /tmp/rc-dev-env-staging" in rendered
 
-    def test_render_user_data_with_gh_token_writes_env_staging(self):
+    def test_gh_token_never_reaches_user_data(self):
+        """rc-bd7. user-data is readable from the box's own IMDS, off the box
+        with ec2:DescribeInstanceAttribute, and terraform serializes it into
+        tfvars.json and tfstate. The PAT goes over SSH instead."""
         from remote_compose.dev_host.bootstrap import GitSource
 
         src = GitSource(
@@ -85,12 +88,15 @@ class TestGitSource:
         )
         rendered = src.render_user_data()
 
-        # gh_token must surface in the staged env file (so bootstrap can use it)
-        assert "/tmp/rc-dev-env-staging" in rendered
-        assert "GH_TOKEN" in rendered
-        assert "ghp_secrettoken" in rendered
+        assert "ghp_secrettoken" not in rendered
+        # ...but the box is told to wait for it, otherwise a private clone
+        # would race the delivery.
+        assert "/tmp/rc-dev-secrets" in rendered
+        # ...and it IS in the payload the CLI hands over SSH.
+        assert "ghp_secrettoken" in src.secret_env_content()
+        assert "GH_TOKEN" in src.secret_env_content()
 
-    def test_render_user_data_with_extra_env_includes_each_key(self):
+    def test_secret_extra_env_goes_over_ssh_and_plain_env_stays_inline(self):
         from remote_compose.dev_host.bootstrap import GitSource
 
         src = GitSource(
@@ -98,11 +104,21 @@ class TestGitSource:
             extra_env={"ANTHROPIC_API_KEY": "sk-ant-test", "OTHER_VAR": "hello"},
         )
         rendered = src.render_user_data()
+        secrets = src.secret_env_content()
 
-        assert "ANTHROPIC_API_KEY" in rendered
-        assert "sk-ant-test" in rendered
-        assert "OTHER_VAR" in rendered
-        assert "hello" in rendered
+        # Credential-shaped key: value must not be in user-data at all.
+        assert "sk-ant-test" not in rendered
+        assert "sk-ant-test" in secrets
+        # Ordinary config: no reason to delay it, stays in user-data.
+        assert "OTHER_VAR" in rendered and "hello" in rendered
+        assert "OTHER_VAR" not in secrets
+
+    def test_no_secrets_means_no_boot_time_wait(self):
+        """A token-less box must not sit through the secrets wait."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+        assert "/tmp/rc-dev-secrets" not in rendered
 
     def test_claude_tmux_starter_in_runcmd(self):
         from remote_compose.dev_host.bootstrap import GitSource
@@ -274,8 +290,10 @@ class TestMultiGitSource:
         )
         rendered = src.render_user_data()
 
-        assert "path: /tmp/rc-dev-env-staging" in rendered
-        assert "ghp_secret" in rendered
+        # rc-bd7: same guarantee as the single-repo source.
+        assert "ghp_secret" not in rendered
+        assert "/tmp/rc-dev-secrets" in rendered
+        assert "ghp_secret" in src.secret_env_content()
 
     def test_skip_permissions_propagates_to_claude_command(self):
         from remote_compose.dev_host.bootstrap import MultiGitSource

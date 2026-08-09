@@ -26,6 +26,34 @@ write_files:
       if [ -f /home/ec2-user/.rc-dev-env ]; then
         set -a && source /home/ec2-user/.rc-dev-env && set +a
       fi
+{%- if expects_secrets %}
+      # Secrets (GH_TOKEN, ANTHROPIC_API_KEY, ...) are deliberately NOT in
+      # user-data. That blob is readable from this box's own IMDS by any
+      # process on it, readable off the box with ec2:DescribeInstanceAttribute,
+      # and terraform serializes it verbatim into terraform.tfvars.json and
+      # terraform.tfstate. The CLI delivers them over SSH once sshd answers
+      # (rc dev up -> _deliver_secret_env), so block here until they land --
+      # the clone below is the first thing that needs the PAT.
+      #
+      # Bounded wait: if delivery never happens we fall through and attempt an
+      # unauthenticated clone, which fails loudly on a private repo rather than
+      # hanging the boot forever.
+      for _ in $(seq 1 60); do
+        [ -f /tmp/rc-dev-secrets ] && break
+        sleep 5
+      done
+      if [ -f /tmp/rc-dev-secrets ]; then
+        cat /tmp/rc-dev-secrets >> /home/ec2-user/.rc-dev-env
+        chown ec2-user:ec2-user /home/ec2-user/.rc-dev-env
+        chmod 0600 /home/ec2-user/.rc-dev-env
+        # The staged copy has served its purpose; the 0600 file in $HOME is
+        # the single on-box home for it.
+        shred -u /tmp/rc-dev-secrets 2>/dev/null || rm -f /tmp/rc-dev-secrets
+        set -a && source /home/ec2-user/.rc-dev-env && set +a
+      else
+        echo "rc-dev: WARNING - secrets never arrived over SSH; private clones will fail" >&2
+      fi
+{%- endif %}
       # Never persist the PAT. Cloning with the token in the URL leaves it in
       # .git/config on every repo, world-readable to anything on the box, and
       # tools copy it onward — beads lifts the remote URL verbatim into its own
