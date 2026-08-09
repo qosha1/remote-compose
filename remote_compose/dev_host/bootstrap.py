@@ -44,6 +44,42 @@ def _render(template_name: str, **context) -> str:
         ) from exc
 
 
+# Env keys whose VALUES must never reach EC2 user-data (rc-bd7).
+#
+# user-data is not a private channel. It is readable from the instance's own
+# IMDS by any process on the box, readable off the box by anyone holding
+# ec2:DescribeInstanceAttribute, and terraform serializes it verbatim into
+# terraform.tfvars.json and terraform.tfstate — where it then survives in the
+# local .rc/terraform-state/ directory long after the host is destroyed.
+#
+# Anything matching goes over the post-boot SSH channel instead (see
+# cli_commands/dev.py::_deliver_secret_env). Over-matching is deliberately
+# harmless: a non-secret classified as secret simply arrives a few seconds
+# later by a different route and ends up in exactly the same place on the box,
+# so this list errs wide on purpose.
+SECRET_ENV_MARKERS = ("token", "secret", "password", "key", "credential", "auth")
+
+
+def is_secret_env_key(key: str) -> bool:
+    """True when an env var name suggests it carries a credential."""
+    return any(marker in key.lower() for marker in SECRET_ENV_MARKERS)
+
+
+def split_env_lines(gh_token: str, extra_env: dict) -> tuple[list[str], list[str]]:
+    """Split env exports into (safe_for_user_data, must_go_over_ssh).
+
+    ``gh_token`` is always a secret. ``extra_env`` is classified per key.
+    """
+    public: list[str] = []
+    secret: list[str] = []
+    if gh_token:
+        secret.append(f"export GH_TOKEN={gh_token!r}")
+    for k, v in (extra_env or {}).items():
+        line = f"export {k}={v!r}"
+        (secret if is_secret_env_key(k) else public).append(line)
+    return public, secret
+
+
 def _repo_name_from_url(url: str) -> str:
     """Extract repo name from a git URL — used as the clone target dir."""
     # handles both https://github.com/owner/repo.git and git@github.com:owner/repo.git
@@ -56,10 +92,11 @@ class GitSource:
     url: str = ""
     ref: str = "main"
     type: Literal["git"] = "git"
-    # Optional secrets to inject into the EC2 instance via cloud-init.
-    # SECURITY: These values land in EC2 user-data, visible to anyone with
-    # ec2:DescribeInstanceAttribute on the instance. Acceptable for v1
-    # ephemeral dev hosts; not for production.
+    # Optional secrets for the box. These are NOT rendered into user-data —
+    # see SECRET_ENV_MARKERS for why that channel is not private. They are
+    # delivered over SSH after boot, and cloud-init blocks on them before
+    # cloning (the first step that needs the PAT). They are also redacted
+    # before the source is written to .rc/dev-hosts.yml.
     gh_token: str = ""
     extra_env: dict = field(default_factory=dict)
     # When True, the in-box claude tmux session boots with
@@ -68,22 +105,26 @@ class GitSource:
     # within the container/VM sandbox.
     skip_permissions: bool = False
 
+    def secret_env_content(self) -> str:
+        """Env exports that must travel over SSH rather than user-data."""
+        _, secret = split_env_lines(self.gh_token, self.extra_env)
+        return "\n".join(secret)
+
     def render_user_data(self, *, docker_arch: str = "aarch64") -> str:
         repo_name = _repo_name_from_url(self.url)
-        env_lines = []
-        if self.gh_token:
-            env_lines.append(f"export GH_TOKEN={self.gh_token!r}")
-        for k, v in (self.extra_env or {}).items():
-            env_lines.append(f"export {k}={v!r}")
-        rc_dev_env_content = "\n".join(env_lines)
+        public_lines, secret_lines = split_env_lines(self.gh_token, self.extra_env)
         return _render(
             "git.yaml.j2",
             url=self.url,
             ref=self.ref,
             repo_name=repo_name,
             docker_arch=docker_arch,
-            rc_dev_env_content=rc_dev_env_content,
-            has_env=bool(env_lines),
+            rc_dev_env_content="\n".join(public_lines),
+            has_env=bool(public_lines),
+            # Tells cloud-init whether to block on the SSH-delivered secrets
+            # file before cloning. False means no secrets are coming, so a
+            # token-less box must not sit through the wait.
+            expects_secrets=bool(secret_lines),
             claude_flags=(
                 "--dangerously-skip-permissions" if self.skip_permissions else ""
             ),
@@ -147,6 +188,11 @@ class MultiGitSource:
         if self.compose_filename and not self.compose_filenames:
             self.compose_filenames = [self.compose_filename]
 
+    def secret_env_content(self) -> str:
+        """Env exports that must travel over SSH rather than user-data."""
+        _, secret = split_env_lines(self.gh_token, self.extra_env)
+        return "\n".join(secret)
+
     def render_user_data(self, *, docker_arch: str = "aarch64") -> str:
         normalized = []
         for r in self.repos:
@@ -158,18 +204,15 @@ class MultiGitSource:
                     "target": r.get("target") or _repo_name_from_url(url),
                 }
             )
-        env_lines = []
-        if self.gh_token:
-            env_lines.append(f"export GH_TOKEN={self.gh_token!r}")
-        for k, v in (self.extra_env or {}).items():
-            env_lines.append(f"export {k}={v!r}")
+        public_lines, secret_lines = split_env_lines(self.gh_token, self.extra_env)
         return _render(
             "multi-git.yaml.j2",
             repos=normalized,
             compose_filenames=self.compose_filenames,
             docker_arch=docker_arch,
-            rc_dev_env_content="\n".join(env_lines),
-            has_env=bool(env_lines),
+            rc_dev_env_content="\n".join(public_lines),
+            has_env=bool(public_lines),
+            expects_secrets=bool(secret_lines),
             claude_flags=(
                 "--dangerously-skip-permissions" if self.skip_permissions else ""
             ),

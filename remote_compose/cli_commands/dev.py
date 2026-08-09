@@ -391,6 +391,33 @@ def dev_up_cmd(
     click.echo(f"  ssh:         rc dev ssh {name}")
     click.echo(f"  attach claude: rc dev attach {name}")
 
+    # rc-bd7: secrets never go into user-data, so the box's bootstrap is
+    # sitting in a bounded wait for them right now — it cannot clone a private
+    # repo until they land. Deliver FIRST, before ports/env files/claude
+    # config, so the clone unblocks as early as possible.
+    secret_env = (
+        source.secret_env_content() if hasattr(source, "secret_env_content") else ""
+    )
+    if secret_env and record.public_ip:
+        click.echo("\n  Delivering secrets over SSH (never via user-data)...")
+        keypair = service.credential_service.get_credential(
+            record.ssh_key_credential_id
+        )
+        priv_pem, _ = service.credential_service.get_ssh_keypair(keypair)
+        try:
+            _deliver_secret_env(record.public_ip, priv_pem, secret_env)
+            click.echo("  ✓ secrets delivered — bootstrap can clone private repos")
+        except Exception as exc:
+            # Non-fatal on purpose: the box is up and billing either way, and
+            # `rc dev ssh` still works. Say plainly what will be broken.
+            click.echo(
+                f"  ! secret delivery failed ({exc}). The box is running, but "
+                f"private clones and `gh` will not work on it. Re-run "
+                f"`rc dev up` or place the values in /home/ec2-user/.rc-dev-env "
+                f"by hand.",
+                err=True,
+            )
+
     # rc-5c0: when user didn't pass --port, default to whatever host ports
     # the compose file(s) actually publish. Avoids silent SG/compose drift
     # (deploy works, curl fails because port mapped to 8012 but SG opens 8002).
@@ -1273,7 +1300,10 @@ def dev_status_cmd(name):
     click.echo(f"public_ip:     {record.public_ip}")
     click.echo(f"public_dns:    {record.public_dns}")
     click.echo(f"created_at:    {record.created_at}")
-    click.echo(f"source:        {record.source}")
+    # rc-bd7: record.source is redacted on load, but print it through the
+    # sanitizer anyway — this line is one keystroke from a terminal scrollback
+    # or a screen share, and defence in depth costs nothing here.
+    click.echo(f"source:        {_sanitized_source_dict(record.source)}")
 
 
 # ---------- helpers shared with existing rc dev push ----------
@@ -1521,6 +1551,33 @@ _SECRET_FIELDS = (
 )
 
 
+def _sanitized_source_dict(source) -> dict:
+    """Redact a serialized source dict for display. rc-bd7.
+
+    Companion to _sanitized_source_repr, which takes a dataclass. This takes
+    the plain dict form held on DevHostRecord.source (read from the state
+    file), where an older rc may have persisted a real token.
+    """
+    if not isinstance(source, dict):
+        return source
+    out = {}
+    for k, v in source.items():
+        if any(s in k.lower() for s in _SECRET_FIELDS):
+            out[k] = "<redacted>" if v else ""
+        elif k == "extra_env" and isinstance(v, dict):
+            out[k] = {
+                kk: (
+                    ("<redacted>" if vv else "")
+                    if any(s in kk.lower() for s in _SECRET_FIELDS)
+                    else vv
+                )
+                for kk, vv in v.items()
+            }
+        else:
+            out[k] = v
+    return out
+
+
 def _sanitized_source_repr(source) -> str:
     """Render a source dataclass for stdout WITHOUT leaking secret-bearing
     fields (gh_token, ANTHROPIC_API_KEY in extra_env, etc.). rc-h40."""
@@ -1638,6 +1695,51 @@ def _scp_compose_file(public_ip: str, private_pem: str, compose_path: str) -> No
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _deliver_secret_env(public_ip: str, private_pem: str, secret_env: str) -> None:
+    """Hand the box its credentials over SSH instead of baking them into user-data.
+
+    rc-bd7. The payload is piped over stdin to a shell that writes it with a
+    0600 umask — never passed as an argv element, which would expose it in
+    `ps` output on both ends, and never written to a local temp file.
+
+    Cloud-init's bootstrap blocks on /tmp/rc-dev-secrets before cloning, so
+    this landing is what unblocks a private-repo clone.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as kf:
+        kf.write(private_pem.encode("utf-8"))
+        keypath = kf.name
+    os.chmod(keypath, 0o600)
+    try:
+        if not _wait_for_ssh_ready(public_ip, private_pem):
+            raise click.ClickException("SSH never came up within the timeout")
+        # `cat > file` under a 0600 umask: the secret travels on stdin, so it
+        # appears in no process table and no shell history.
+        proc = subprocess.run(
+            ["ssh"]
+            + _ssh_opts(keypath)
+            + [
+                f"ec2-user@{public_ip}",
+                "umask 077 && cat > /tmp/rc-dev-secrets",
+            ],
+            input=secret_env.encode("utf-8") + b"\n",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            raise click.ClickException(
+                f"writing secrets to the box failed: "
+                f"{proc.stderr.decode('utf-8', 'replace').strip()[:200]}"
+            )
+    finally:
+        try:
+            os.unlink(keypath)
+        except OSError:
+            pass
 
 
 def _wait_for_ssh_and_copy_env(

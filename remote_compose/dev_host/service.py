@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,7 +194,49 @@ class DevHostService(BaseService):
         if not self.state_path.exists():
             return {}
         loaded = yaml.safe_load(self.state_path.read_text()) or {}
-        return loaded.get("hosts", {}) or {}
+        return self._scrub_legacy_secrets(loaded.get("hosts", {}) or {})
+
+    _legacy_secret_warned = False
+
+    def _scrub_legacy_secrets(self, hosts: dict[str, dict]) -> dict[str, dict]:
+        """Redact credentials from a state file written before rc-bd7.
+
+        Closing the leak going forward does nothing about the tokens already
+        sitting in an existing .rc/dev-hosts.yml. Those are live until someone
+        rotates them, and until then every ``rc dev status`` is one keystroke
+        from printing one to a terminal (and a scrollback, and a screen share).
+
+        So: redact in memory, which means nothing re-persists or prints the
+        value and the next state write scrubs the file. And say so once —
+        rotation is the only thing that actually fixes an already-leaked
+        credential, and rc cannot do that for the user.
+        """
+        exposed: list[str] = []
+        cleaned: dict[str, dict] = {}
+        for name, record in hosts.items():
+            if not isinstance(record, dict):
+                cleaned[name] = record
+                continue
+            src = record.get("source")
+            if isinstance(src, dict) and _has_secret_value(src):
+                exposed.append(name)
+                record = {**record, "source": _redact_secrets(src)}
+            cleaned[name] = record
+
+        if exposed and not DevHostService._legacy_secret_warned:
+            DevHostService._legacy_secret_warned = True
+            sys.stderr.write(
+                f"\nSECURITY: {self.state_path} contains plaintext credentials "
+                f"for dev host(s) {sorted(exposed)}.\n"
+                f"  They were written before rc stopped persisting secrets "
+                f"(rc-bd7). rc has redacted them in memory and will not write "
+                f"them back, but the values on disk are still live until you "
+                f"ROTATE them:\n"
+                f"    https://github.com/settings/tokens\n"
+                f"  The same token is also in this host's EC2 user-data and in "
+                f"any .rc/terraform-state/*.tfstate from when it was created.\n\n"
+            )
+        return cleaned
 
     def _save_state(self, hosts: dict[str, dict]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +270,7 @@ class DevHostService(BaseService):
             try:
                 f.seek(0)
                 loaded = yaml.safe_load(f.read()) or {}
-                hosts = loaded.get("hosts", {}) or {}
+                hosts = self._scrub_legacy_secrets(loaded.get("hosts", {}) or {})
                 yield hosts
                 f.seek(0)
                 f.truncate()
@@ -669,17 +712,61 @@ class DevHostService(BaseService):
 
 
 def _source_to_dict(source: SourceSpec) -> dict:
-    """Serialize a SourceSpec dataclass to a state-file dict."""
-    if hasattr(source, "to_dict"):
-        return source.to_dict()
-    # dataclass fallback
+    """Serialize a SourceSpec dataclass to a state-file dict, minus secrets.
+
+    rc-bd7: .rc/dev-hosts.yml is a plaintext file in the user's working tree,
+    and this used to write ``gh_token`` into it verbatim — four live gho_
+    tokens were found sitting in one. Nothing that reads this record back
+    needs the real value: the only consumer is
+    ``_refresh_tfvars_for_destroy``, which re-renders user-data purely so
+    terraform has a variable of the right shape to tear the box down, and a
+    destroy does not authenticate to GitHub.
+
+    Redaction happens here rather than at the call sites so every future
+    persist path inherits it — a new caller cannot forget.
+    """
     from dataclasses import asdict as _asdict, is_dataclass
 
-    if is_dataclass(source):
-        return _asdict(source)
-    if isinstance(source, dict):
-        return source
-    raise TypeError(f"unsupported source type: {type(source)!r}")
+    if hasattr(source, "to_dict"):
+        raw = source.to_dict()
+    elif is_dataclass(source):
+        raw = _asdict(source)
+    elif isinstance(source, dict):
+        raw = dict(source)
+    else:
+        raise TypeError(f"unsupported source type: {type(source)!r}")
+    return _redact_secrets(raw)
+
+
+def _has_secret_value(raw: dict) -> bool:
+    """True when a serialized source still carries a real credential value."""
+    from .bootstrap import is_secret_env_key
+
+    for k, v in raw.items():
+        if is_secret_env_key(k) and v:
+            return True
+        if k == "extra_env" and isinstance(v, dict):
+            if any(is_secret_env_key(kk) and vv for kk, vv in v.items()):
+                return True
+    return False
+
+
+def _redact_secrets(raw: dict) -> dict:
+    """Strip credential-bearing values out of a serialized source."""
+    from .bootstrap import is_secret_env_key
+
+    out: dict = {}
+    for k, v in raw.items():
+        if is_secret_env_key(k):
+            # Drop the value, keep nothing — an empty string round-trips
+            # through source_from_dict() into a source that renders a
+            # token-less (and therefore secret-free) user-data blob.
+            out[k] = ""
+        elif k == "extra_env" and isinstance(v, dict):
+            out[k] = {kk: ("" if is_secret_env_key(kk) else vv) for kk, vv in v.items()}
+        else:
+            out[k] = v
+    return out
 
 
 def _compress_user_data(user_data: str) -> str:
