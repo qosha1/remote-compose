@@ -16,10 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-
-class ConfigError(ValueError):
-    """Raised when an rc.yml v2 document fails validation."""
-
+from ._errors import ConfigError  # noqa: F401  (re-export: historical import path)
+from ._network_types import NetworkV2, RepositoryV2
 
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
 VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
@@ -232,6 +230,20 @@ class ServiceV2:
     # ``phoenix`` are built-in (see remote_compose.frameworks).
     # Auto-detection from the Dockerfile still runs when this is None.
     framework: Optional[str] = None
+    # Declared-network placement. Both REPLACE rc's defaults rather than
+    # adding to them — the point of naming a security group is to get that
+    # group and nothing else.
+    #
+    # security_groups: names from network.security_groups. When set, the
+    #   service's ECS network config uses exactly these, so it is NOT joined
+    #   to the shared ${project}-tasks group and therefore inherits neither
+    #   its ALB ingress nor its blanket egress -> 0.0.0.0/0. None (the
+    #   default) keeps the historical shared-SG behaviour.
+    # subnets: a name from network.subnets. Placement follows the group, and
+    #   assign_public_ip is derived from it (private group => DISABLED) —
+    #   there is no separate switch to get out of sync with the routing.
+    security_groups: Optional[list[str]] = None
+    subnets: Optional[str] = None
 
     def validate(self) -> None:
         if self.type not in VALID_SERVICE_TYPES:
@@ -246,6 +258,40 @@ class ServiceV2:
             )
         if self.public and self.port is None:
             raise ConfigError(f"service {self.name!r}: public=true requires a port")
+        if self.security_groups is not None:
+            if not isinstance(self.security_groups, list):
+                raise ConfigError(
+                    f"service {self.name!r}: security_groups must be a list of "
+                    f"names from network.security_groups, got "
+                    f"{type(self.security_groups).__name__}"
+                )
+            if not self.security_groups:
+                raise ConfigError(
+                    f"service {self.name!r}: security_groups is empty — an ECS "
+                    f"task needs at least one group. Omit the key to keep the "
+                    f"shared ${{project}}-tasks group."
+                )
+            dupes = {
+                n for n in self.security_groups if self.security_groups.count(n) > 1
+            }
+            if dupes:
+                raise ConfigError(
+                    f"service {self.name!r}: security_groups lists "
+                    f"{sorted(dupes)} more than once"
+                )
+            if len(self.security_groups) > 5:
+                raise ConfigError(
+                    f"service {self.name!r}: security_groups has "
+                    f"{len(self.security_groups)} entries; AWS allows at most 5 "
+                    f"per ENI"
+                )
+        if self.subnets is not None and (
+            not isinstance(self.subnets, str) or not self.subnets
+        ):
+            raise ConfigError(
+                f"service {self.name!r}: subnets must be a single name from "
+                f"network.subnets, got {self.subnets!r}"
+            )
         for entry in self.env_from_secret:
             if (
                 not isinstance(entry, dict)
@@ -584,6 +630,11 @@ class RcConfigV2:
     tls: Optional[TlsConfig] = None
     compose: Optional[ComposeConfig] = None
     bootstrap: Optional[BootstrapConfig] = None
+    # Declared, standalone infrastructure primitives (see _network_types).
+    # Empty by default — a config without these blocks emits terraform
+    # byte-identical to before they existed.
+    network: NetworkV2 = field(default_factory=NetworkV2)
+    repositories: dict[str, RepositoryV2] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.version != 2:
@@ -604,3 +655,6 @@ class RcConfigV2:
             self.tls.validate()
         if self.bootstrap is not None:
             self.bootstrap.validate()
+        self.network.validate()
+        for repo in self.repositories.values():
+            repo.validate()
