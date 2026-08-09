@@ -68,6 +68,30 @@ resource "aws_launch_template" "ec2" {
     name = aws_iam_instance_profile.ec2_instance.name
   }
 
+  # IMDS hardening. http_tokens = "required" makes the instance metadata
+  # service IMDSv2-only: a token has to be minted with a PUT before anything
+  # can be read, which is what a forged GET from inside a container cannot do.
+  # Without it, one SSRF bug in any container on this instance yields the
+  # INSTANCE role (ECS + SSM managed policies above), not just the task role.
+  #
+  # http_put_response_hop_limit is the IP TTL of that token response, and every
+  # container network hop decrements it. 1 admits only the instance's own
+  # network namespace and silently cuts off every bridge-mode container, so rc
+  # defaults to 2 (`ec2_capacity.metadata_hop_limit: 1` if you have confirmed
+  # nothing on the instance needs the extra hop). Note that 1 is NOT a reliable
+  # cut-off for rc's own tasks: they run awsvpc and reach IMDS over their own
+  # ENI. Use `ec2_capacity.block_task_imds: true` for that; it sets the ECS
+  # agent's ECS_AWSVPC_BLOCK_IMDS below.
+  #
+  # http_endpoint is not configurable: disabling IMDS entirely stops the ECS
+  # agent from registering the instance with the cluster, so the "hardened"
+  # stack would simply never run a task.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
   vpc_security_group_ids = [aws_security_group.ec2_instances.id]
 
   user_data = base64encode(<<-EOT

@@ -240,3 +240,66 @@ class TestDefaultLaunchTypeValidation:
         ctx = _ctx(tmp_path, {"web": _svc("web")}, default_launch_type="SPOT")
         with pytest.raises(ProviderConfigError, match="default_launch_type"):
             ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+
+class TestImdsHardening:
+    """IMDS lives on the launch template, not the task definition.
+
+    ``aws_ecs_task_definition`` has no ``metadata_options`` argument, and a
+    Fargate task takes its credentials from the task metadata endpoint
+    (169.254.170.2) rather than IMDS. The instance role is the thing worth
+    stealing, so the hardening belongs on ``aws_launch_template.ec2``.
+    """
+
+    def _cap(self, tmp_path, **ec2_capacity):
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            **({"ec2_capacity": ec2_capacity} if ec2_capacity else {}),
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        return (out / "capacity.tf").read_text()
+
+    def test_imdsv2_required_by_default(self, tmp_path):
+        cap = self._cap(tmp_path)
+        assert "metadata_options {" in cap
+        assert 'http_tokens                 = "required"' in cap
+        assert 'http_endpoint               = "enabled"' in cap
+
+    def test_hop_limit_defaults_to_two_not_one(self, tmp_path):
+        """1 cuts off every bridge-mode container on the instance."""
+        assert "http_put_response_hop_limit = 2" in self._cap(tmp_path)
+
+    def test_strict_hop_limit_is_opt_in(self, tmp_path):
+        cap = self._cap(tmp_path, metadata_hop_limit=1)
+        assert "http_put_response_hop_limit = 1" in cap
+
+    def test_imdsv1_can_be_re_enabled_for_a_stack_that_needs_it(self, tmp_path):
+        cap = self._cap(tmp_path, imdsv2="optional")
+        assert 'http_tokens                 = "optional"' in cap
+
+    def test_task_imds_block_is_off_by_default(self, tmp_path):
+        assert "echo ECS_AWSVPC_BLOCK_IMDS" not in self._cap(tmp_path)
+
+    def test_task_imds_block_writes_the_agent_config(self, tmp_path):
+        """The knob that actually denies awsvpc tasks the instance role."""
+        cap = self._cap(tmp_path, block_task_imds=True)
+        assert "echo ECS_AWSVPC_BLOCK_IMDS=true >> /etc/ecs/ecs.config" in cap
+
+    @pytest.mark.parametrize("value", ["enforced", "yes", True, 1])
+    def test_invalid_imdsv2_mode_rejected(self, tmp_path, value):
+        with pytest.raises(ProviderConfigError, match="imdsv2"):
+            self._cap(tmp_path, imdsv2=value)
+
+    @pytest.mark.parametrize("value", [0, 65, -1, "2", 2.5, True])
+    def test_invalid_hop_limit_rejected(self, tmp_path, value):
+        with pytest.raises(ProviderConfigError, match="metadata_hop_limit"):
+            self._cap(tmp_path, metadata_hop_limit=value)
+
+    def test_no_metadata_options_on_task_definitions(self, tmp_path):
+        """Guard against the knob being re-added where AWS has no such field."""
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        assert "metadata_options" not in (out / "services.tf").read_text()
