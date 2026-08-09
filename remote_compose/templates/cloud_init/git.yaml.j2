@@ -290,6 +290,22 @@ runcmd:
   # /etc/profile.d/rc-dev.sh on shell start), so 'gh repo clone' / 'gh pr'
   # work without re-authing in the box. v2.92.0 pinned for reproducibility.
   - 'arch=$(uname -m); case "$arch" in aarch64) gh_arch=arm64 ;; x86_64) gh_arch=amd64 ;; *) gh_arch="" ;; esac; if [ -n "$gh_arch" ]; then dnf install -y "https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_${gh_arch}.rpm"; fi'
+  # dolt — version-controlled SQL database backing beads' remote-sync state
+  # ('bd dolt push'/'bd dolt pull'). v2.2.3 pinned for reproducibility.
+  - 'arch=$(uname -m); case "$arch" in aarch64) dolt_asset=dolt-linux-arm64.tar.gz ;; x86_64) dolt_asset=dolt-linux-amd64.tar.gz ;; *) dolt_asset="" ;; esac; if [ -n "$dolt_asset" ]; then dolt_dir="${dolt_asset%.tar.gz}"; curl -sL "https://github.com/dolthub/dolt/releases/download/v2.2.3/${dolt_asset}" | tar -xz -C /tmp && install -m 0755 "/tmp/${dolt_dir}/bin/dolt" /usr/local/bin/dolt && rm -rf "/tmp/${dolt_dir}"; fi'
+  # headroom — LLM context-optimization CLI; the local ~/.claude/ settings
+  # shipped to this box may reference it. Needs Python>=3.10 but AL2023's
+  # system python3 is 3.9, so install a separate pinned python3.12 + isolated
+  # venv rather than touch the system interpreter.
+  - 'dnf install -y -q python3.12 python3.12-pip >/dev/null 2>&1 && python3.12 -m venv /opt/headroom-venv && /opt/headroom-venv/bin/pip install -q --no-cache-dir headroom-ai && ln -sf /opt/headroom-venv/bin/headroom /usr/local/bin/headroom'
+  # rtk (Rust Token Killer) — token-optimized CLI proxy the local Claude
+  # session's hooks shell out to for every bash command (~/.claude/RTK.md
+  # shipped to this box documents the hook). v0.45.0 pinned. No prebuilt
+  # aarch64 binary works here: the published gnu build needs glibc>=2.39,
+  # AL2023 ships 2.34, and no aarch64-musl build is published. Build from
+  # source instead via AL2023's own dnf-packaged rust/cargo — measured ~6min
+  # added to first boot, LTO release build on a t4g.xlarge.
+  - 'dnf install -y -q cargo rust >/dev/null 2>&1 && cd /tmp && curl -sL -o rtk-src.tar.gz "https://github.com/rtk-ai/rtk/archive/refs/tags/v0.45.0.tar.gz" && tar xzf rtk-src.tar.gz && cd rtk-0.45.0 && cargo build --release -q && install -m 0755 target/release/rtk /usr/local/bin/rtk && cd /tmp && rm -rf rtk-src.tar.gz rtk-0.45.0'
   # Run repo bootstrap (handles ownership + clone + compose up)
   - bash /usr/local/bin/rc-dev-bootstrap.sh
   # Start claude in a tmux session so user attaches into a ready agent

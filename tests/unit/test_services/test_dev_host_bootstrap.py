@@ -167,6 +167,38 @@ class TestGitSource:
         assert "gh_" in rendered
         assert ".rpm" in rendered  # AL2023 uses dnf install <url>.rpm
 
+    def test_dolt_installed_in_runcmd(self):
+        """dolt backs beads' remote-sync ('bd dolt push'/'pull')."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+
+        assert "dolthub/dolt/releases/download" in rendered
+        assert "/usr/local/bin/dolt" in rendered
+
+    def test_headroom_installed_in_runcmd(self):
+        """headroom needs python>=3.10; AL2023 ships 3.9, so it must not rely
+        on the system interpreter."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+
+        assert "python3.12" in rendered
+        assert "headroom-ai" in rendered
+        assert "/usr/local/bin/headroom" in rendered
+
+    def test_rtk_built_from_source_in_runcmd(self):
+        """No prebuilt aarch64 rtk binary is glibc-compatible with AL2023
+        (gnu build needs glibc>=2.39, AL2023 ships 2.34, no musl aarch64
+        build exists) — must build from source via dnf's rust/cargo."""
+        from remote_compose.dev_host.bootstrap import GitSource
+
+        rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
+
+        assert "rtk-ai/rtk/archive" in rendered
+        assert "cargo build --release" in rendered
+        assert "/usr/local/bin/rtk" in rendered
+
 
 class TestImageSource:
     def test_image_source_defaults(self):
@@ -305,6 +337,24 @@ class TestMultiGitSource:
         ).render_user_data()
 
         assert "--dangerously-skip-permissions" in rendered
+
+    def test_dolt_headroom_rtk_installed_in_runcmd(self):
+        """Same box-tooling guarantee as the single-repo source: dolt (beads
+        remote-sync), headroom (needs its own python3.12, not AL2023's 3.9),
+        and rtk (built from source — no AL2023-compatible prebuilt binary)."""
+        from remote_compose.dev_host.bootstrap import MultiGitSource
+
+        rendered = MultiGitSource(
+            repos=[{"url": "https://github.com/owner/repo.git"}],
+            compose_filenames=["x.yml"],
+        ).render_user_data()
+
+        assert "dolthub/dolt/releases/download" in rendered
+        assert "/usr/local/bin/dolt" in rendered
+        assert "headroom-ai" in rendered
+        assert "/usr/local/bin/headroom" in rendered
+        assert "rtk-ai/rtk/archive" in rendered
+        assert "/usr/local/bin/rtk" in rendered
 
     def test_multiple_compose_files_each_run_as_separate_project(self):
         """Each --compose file runs as its own `docker compose -p <basename>`
