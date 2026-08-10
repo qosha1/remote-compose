@@ -25,8 +25,13 @@ from remote_compose.image.backend import (
     CodeBuildConfig,
     CodeBuildError,
     CODEBUILD_FINAL_DRAIN_SECONDS,
+    RegistryAuth,
+    RegistrySecretRef,
     create_build_backend,
     generate_codebuild_buildspec,
+    parse_registry_auth,
+    registry_auth_env_names,
+    resolve_build_config,
     zip_build_context,
 )
 from remote_compose.image.builder import ImageBuildSpec
@@ -34,6 +39,15 @@ from remote_compose.image.builder import ImageBuildSpec
 HOST = "111111111111.dkr.ecr.us-east-2.amazonaws.com"
 CACHE = f"{HOST}/proj/buildcache"
 ROLE = "arn:aws:iam::111111111111:role/rc-codebuild"
+SECRET = "arn:aws:secretsmanager:us-east-2:111111111111:secret:rc/prod-AbCdEf"
+
+
+def _dockerhub_auth(secret: str = SECRET) -> RegistryAuth:
+    return RegistryAuth(
+        registry="docker.io",
+        username=RegistrySecretRef(secret_arn=secret, key="DOCKERHUB_USERNAME"),
+        password=RegistrySecretRef(secret_arn=secret, key="DOCKERHUB_PASSWORD"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -590,3 +604,339 @@ class TestStreamAndWait:
         # block it chasing the endless stream.
         assert cb.batch_get_builds.call_count == 3
         assert logs.get_log_events.call_count < 100
+
+
+# ---------------------------------------------------------------------------
+# rc-6ej: registry auth (authenticated base-image pulls)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryAuthParsing:
+    """`registry_auth` config → RegistryAuth entries, with the malformed cases
+    failing as config errors (ValueError → ProviderConfigError) before AWS."""
+
+    RAW = [
+        {
+            "registry": "docker.io",
+            "username": {"secret_arn": SECRET, "key": "DOCKERHUB_USERNAME"},
+            "password": {"secret_arn": SECRET, "key": "DOCKERHUB_PASSWORD"},
+        }
+    ]
+
+    def test_absent_is_empty(self):
+        for raw in (None, "", [], ()):
+            assert parse_registry_auth(raw) == ()
+
+    def test_parses_registry_and_secret_refs(self):
+        (auth,) = parse_registry_auth(self.RAW)
+        assert auth.registry == "docker.io"
+        assert auth.username.secret_arn == SECRET
+        assert auth.username.key == "DOCKERHUB_USERNAME"
+        assert auth.password.key == "DOCKERHUB_PASSWORD"
+
+    def test_key_is_optional_whole_secret_value(self):
+        (auth,) = parse_registry_auth(
+            [
+                {
+                    "registry": "ghcr.io",
+                    "username": {"secret_arn": SECRET},
+                    "password": {"secret_arn": SECRET},
+                }
+            ]
+        )
+        assert auth.username.key is None
+        assert auth.username.codebuild_value() == SECRET
+
+    def test_codebuild_value_is_arn_colon_key(self):
+        (auth,) = parse_registry_auth(self.RAW)
+        assert auth.username.codebuild_value() == f"{SECRET}:DOCKERHUB_USERNAME"
+
+    def test_json_string_accepted_for_env_override(self):
+        import json
+
+        (auth,) = parse_registry_auth(json.dumps(self.RAW))
+        assert auth.registry == "docker.io"
+
+    def test_unparseable_json_raises(self):
+        with pytest.raises(ValueError, match="registry_auth"):
+            parse_registry_auth("{not json")
+
+    def test_plaintext_credential_rejected(self):
+        # The whole point: a password can only ever be a Secrets Manager ref.
+        with pytest.raises(ValueError, match="never a plaintext credential"):
+            parse_registry_auth(
+                [
+                    {
+                        "registry": "docker.io",
+                        "username": {"secret_arn": SECRET},
+                        "password": "hunter2",
+                    }
+                ]
+            )
+
+    def test_missing_registry_raises(self):
+        with pytest.raises(ValueError, match="'registry' is required"):
+            parse_registry_auth(
+                [
+                    {
+                        "username": {"secret_arn": SECRET},
+                        "password": {"secret_arn": SECRET},
+                    }
+                ]
+            )
+
+    def test_missing_secret_arn_raises(self):
+        with pytest.raises(ValueError, match="'secret_arn' is required"):
+            parse_registry_auth(
+                [
+                    {
+                        "registry": "docker.io",
+                        "username": {"key": "U"},
+                        "password": {"secret_arn": SECRET},
+                    }
+                ]
+            )
+
+    def test_unknown_keys_raise(self):
+        with pytest.raises(ValueError, match="unknown key"):
+            parse_registry_auth([dict(self.RAW[0], registy="typo")])
+        with pytest.raises(ValueError, match="unknown key"):
+            parse_registry_auth(
+                [dict(self.RAW[0], username={"secret_arn": SECRET, "jsonKey": "U"})]
+            )
+
+    def test_duplicate_registry_raises(self):
+        with pytest.raises(ValueError, match="duplicate registry"):
+            parse_registry_auth(self.RAW + self.RAW)
+
+    def test_colon_in_key_raises(self):
+        # CodeBuild parses a SECRETS_MANAGER value as secret-id:json-key:...,
+        # so a ':' in the key would silently become a version selector.
+        with pytest.raises(ValueError, match="must not contain ':'"):
+            parse_registry_auth(
+                [dict(self.RAW[0], username={"secret_arn": SECRET, "key": "a:b"})]
+            )
+
+    def test_shell_unsafe_registry_raises(self):
+        with pytest.raises(ValueError, match="invalid registry"):
+            parse_registry_auth([dict(self.RAW[0], registry='docker.io"; rm -rf /')])
+
+    def test_env_names_are_derived_from_host(self):
+        assert registry_auth_env_names("docker.io") == (
+            "RC_REGISTRY_USER_DOCKER_IO",
+            "RC_REGISTRY_PASS_DOCKER_IO",
+        )
+        assert registry_auth_env_names("myreg.example.com:5000")[0] == (
+            "RC_REGISTRY_USER_MYREG_EXAMPLE_COM_5000"
+        )
+
+    def test_distinct_registries_get_distinct_env_vars(self):
+        auths = parse_registry_auth(
+            [self.RAW[0], dict(self.RAW[0], registry="ghcr.io")]
+        )
+        names = {n for a in auths for n in a.env_names()}
+        assert len(names) == 4
+
+
+class TestRegistryAuthConfigResolution:
+    """registry_auth resolves through the same env > provider_config > rc.yml
+    precedence as every other codebuild knob."""
+
+    PC = {
+        "ecs": {
+            "build": {
+                "backend": "aws-codebuild",
+                "codebuild": {
+                    "service_role_arn": ROLE,
+                    "registry_auth": TestRegistryAuthParsing.RAW,
+                },
+            }
+        }
+    }
+
+    def test_resolved_from_provider_config(self):
+        cfg = resolve_build_config(self.PC, {}, env={})
+        assert [a.registry for a in cfg.codebuild.registry_auth] == ["docker.io"]
+
+    def test_default_is_empty_tuple(self):
+        cfg = resolve_build_config(
+            {
+                "ecs": {
+                    "build": {
+                        "backend": "aws-codebuild",
+                        "codebuild": {"service_role_arn": ROLE},
+                    }
+                }
+            },
+            {},
+            env={},
+        )
+        assert cfg.codebuild.registry_auth == ()
+
+    def test_env_override_wins(self):
+        import json
+
+        cfg = resolve_build_config(
+            self.PC,
+            {},
+            env={
+                "RC_CODEBUILD_REGISTRY_AUTH": json.dumps(
+                    [
+                        {
+                            "registry": "ghcr.io",
+                            "username": {"secret_arn": SECRET, "key": "U"},
+                            "password": {"secret_arn": SECRET, "key": "P"},
+                        }
+                    ]
+                )
+            },
+        )
+        assert [a.registry for a in cfg.codebuild.registry_auth] == ["ghcr.io"]
+
+    def test_malformed_config_raises_value_error(self):
+        bad = {
+            "ecs": {
+                "build": {"codebuild": {"registry_auth": [{"registry": "docker.io"}]}}
+            }
+        }
+        with pytest.raises(ValueError, match="registry_auth"):
+            resolve_build_config(bad, {}, env={})
+
+
+class TestRegistryAuthBuildspec:
+    def _pre(self, root, **kw):
+        text = generate_codebuild_buildspec(
+            [_nginx_spec(root)], root=root, region="us-east-2", **kw
+        )
+        return yaml.safe_load(text)["phases"]["pre_build"]["commands"], text
+
+    def test_omitted_reproduces_byte_identical_buildspec(self, tmp_path):
+        """Back-compat: no registry_auth → the pre-rc-6ej document, exactly."""
+        root = _repo_tree(tmp_path)
+        specs = [_django_spec(root), _nginx_spec(root)]
+        base = generate_codebuild_buildspec(specs, root=root, region="us-east-2")
+        explicit_empty = generate_codebuild_buildspec(
+            specs, root=root, region="us-east-2", registry_auth=()
+        )
+        assert base == explicit_empty
+        assert "docker login" in base  # the ECR login is still there
+        assert "RC_REGISTRY_" not in base
+
+    def test_emits_guarded_login_per_registry(self, tmp_path):
+        root = _repo_tree(tmp_path)
+        pre, _ = self._pre(root, registry_auth=[_dockerhub_auth()])
+        login = next(c for c in pre if "docker login docker.io" in c)
+        # Guarded on BOTH vars so an unset/failed secret degrades to anonymous.
+        assert '[ -n "${RC_REGISTRY_USER_DOCKER_IO:-}" ]' in login
+        assert '[ -n "${RC_REGISTRY_PASS_DOCKER_IO:-}" ]' in login
+        # Password over stdin — never on the command line (argv is not secret).
+        assert "--password-stdin" in login
+        assert 'echo "${RC_REGISTRY_PASS_DOCKER_IO}" | docker login' in login
+        assert '--username "${RC_REGISTRY_USER_DOCKER_IO}"' in login
+
+    def test_login_never_fails_the_build(self, tmp_path):
+        root = _repo_tree(tmp_path)
+        pre, _ = self._pre(root, registry_auth=[_dockerhub_auth()])
+        login = next(c for c in pre if "docker login docker.io" in c)
+        # A bad credential logs and continues rather than aborting a deploy
+        # that would have worked anonymously.
+        assert "|| echo" in login and "FAILED" in login
+        assert "else echo" in login
+
+    def test_login_precedes_buildx_create(self, tmp_path):
+        """`buildx create --bootstrap` pulls moby/buildkit from Docker Hub, so
+        it is itself a rate-limited anonymous pull unless the login came first."""
+        root = _repo_tree(tmp_path)
+        pre, _ = self._pre(root, registry_auth=[_dockerhub_auth()])
+        login_at = next(i for i, c in enumerate(pre) if "docker login docker.io" in c)
+        create_at = next(i for i, c in enumerate(pre) if "docker buildx create" in c)
+        assert login_at < create_at
+
+    def test_ecr_logins_still_emitted(self, tmp_path):
+        root = _repo_tree(tmp_path)
+        pre, _ = self._pre(root, registry_auth=[_dockerhub_auth()])
+        assert any("aws ecr get-login-password" in c and HOST in c for c in pre)
+
+    def test_one_login_per_registry(self, tmp_path):
+        root = _repo_tree(tmp_path)
+        ghcr = RegistryAuth(
+            registry="ghcr.io",
+            username=RegistrySecretRef(secret_arn=SECRET, key="GHCR_USER"),
+            password=RegistrySecretRef(secret_arn=SECRET, key="GHCR_TOKEN"),
+        )
+        pre, _ = self._pre(root, registry_auth=[_dockerhub_auth(), ghcr])
+        assert len([c for c in pre if "docker login docker.io" in c]) == 1
+        assert len([c for c in pre if "docker login ghcr.io" in c]) == 1
+        assert "RC_REGISTRY_PASS_GHCR_IO" in "\n".join(pre)
+
+    def test_no_secret_material_in_buildspec(self, tmp_path):
+        """Only env-var NAMES and the secret ARN reach the buildspec — the
+        values are resolved by CodeBuild inside the build container."""
+        root = _repo_tree(tmp_path)
+        _, text = self._pre(root, registry_auth=[_dockerhub_auth()])
+        assert SECRET not in text
+        assert "DOCKERHUB_PASSWORD" not in text
+
+
+class TestRegistryAuthEnvInjection:
+    def _run(self, tmp_path, registry_auth):
+        root = _repo_tree(tmp_path)
+        clients = _clients()
+        backend = AwsCodeBuildBackend(
+            session=FakeSession(clients),
+            codebuild=CodeBuildConfig(
+                service_role_arn=ROLE, registry_auth=tuple(registry_auth)
+            ),
+            project="proj",
+        )
+        backend.build_and_push([_nginx_spec(root)])
+        return clients["codebuild"].start_build.call_args.kwargs
+
+    def test_injected_as_secrets_manager_type(self, tmp_path):
+        sb = self._run(tmp_path, [_dockerhub_auth()])
+        env = {e["name"]: e for e in sb["environmentVariablesOverride"]}
+        user = env["RC_REGISTRY_USER_DOCKER_IO"]
+        password = env["RC_REGISTRY_PASS_DOCKER_IO"]
+        # SECRETS_MANAGER (never PLAINTEXT) → CodeBuild resolves + masks it.
+        assert user["type"] == "SECRETS_MANAGER"
+        assert password["type"] == "SECRETS_MANAGER"
+        assert user["value"] == f"{SECRET}:DOCKERHUB_USERNAME"
+        assert password["value"] == f"{SECRET}:DOCKERHUB_PASSWORD"
+
+    def test_no_plaintext_env_var_carries_a_credential(self, tmp_path):
+        sb = self._run(tmp_path, [_dockerhub_auth()])
+        plaintext = [
+            e for e in sb["environmentVariablesOverride"] if e["type"] == "PLAINTEXT"
+        ]
+        assert {e["name"] for e in plaintext} == {
+            "AWS_DEFAULT_REGION",
+            "RC_BUILDCACHE_REPO",
+        }
+
+    def test_omitted_leaves_env_overrides_unchanged(self, tmp_path):
+        sb = self._run(tmp_path, [])
+        names = [e["name"] for e in sb["environmentVariablesOverride"]]
+        assert names == ["AWS_DEFAULT_REGION", "RC_BUILDCACHE_REPO"]
+        assert "RC_REGISTRY_" not in sb["buildspecOverride"]
+
+    def test_buildspec_and_env_var_names_agree(self, tmp_path):
+        """The buildspec's guard reads exactly the vars start_build injects."""
+        sb = self._run(tmp_path, [_dockerhub_auth()])
+        for e in sb["environmentVariablesOverride"]:
+            if e["type"] == "SECRETS_MANAGER":
+                assert f'"${{{e["name"]}:-}}"' in sb["buildspecOverride"]
+
+    def test_progress_reports_registries_without_secrets(self, tmp_path):
+        root = _repo_tree(tmp_path)
+        clients = _clients()
+        events: list[str] = []
+        AwsCodeBuildBackend(
+            session=FakeSession(clients),
+            codebuild=CodeBuildConfig(
+                service_role_arn=ROLE, registry_auth=(_dockerhub_auth(),)
+            ),
+            project="proj",
+            progress=events.append,
+        ).build_and_push([_nginx_spec(root)])
+        assert any("registry auth configured for docker.io" in e for e in events)
+        assert not any(SECRET in e for e in events)

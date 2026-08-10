@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import io
+import json
 import os
 import re
 import shlex
@@ -30,7 +31,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 from uuid import uuid4
 
 import yaml
@@ -103,6 +104,11 @@ CODEBUILD_TERMINAL_STATUSES = (
 )
 # CodeBuild buildspec schema version (a bare float per AWS's spec).
 CODEBUILD_BUILDSPEC_VERSION = 0.2
+# rc-6ej: env-var name prefixes the generated buildspec reads the (Secrets
+# Manager-sourced) registry credentials from. One pair per configured registry,
+# suffixed with a slug of the registry host so entries can't collide.
+REGISTRY_AUTH_USER_ENV_PREFIX = "RC_REGISTRY_USER_"
+REGISTRY_AUTH_PASS_ENV_PREFIX = "RC_REGISTRY_PASS_"
 
 _CODEBUILD_PROJECT_ENV = "RC_CODEBUILD_PROJECT"
 _CODEBUILD_ROLE_ENV = "RC_CODEBUILD_ROLE_ARN"
@@ -111,6 +117,7 @@ _CODEBUILD_IMAGE_ENV = "RC_CODEBUILD_IMAGE"
 _CODEBUILD_BUCKET_ENV = "RC_CODEBUILD_SOURCE_BUCKET"
 _CODEBUILD_REGION_ENV = "RC_CODEBUILD_REGION"
 _CODEBUILD_TIMEOUT_ENV = "RC_CODEBUILD_TIMEOUT_MINUTES"
+_CODEBUILD_REGISTRY_AUTH_ENV = "RC_CODEBUILD_REGISTRY_AUTH"
 
 
 class UnknownBuildBackendError(ValueError):
@@ -300,6 +307,45 @@ class CodeBuildError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RegistrySecretRef:
+    """A Secrets Manager pointer for one registry credential (rc-6ej).
+
+    rc never accepts a plaintext credential in config — a username/password is
+    always a reference to a secret, resolved by CodeBuild at build time.
+
+    secret_arn: the secret's ARN (or name).
+    key: the JSON key inside the secret holding the value; None → the secret's
+        whole string value.
+    """
+
+    secret_arn: str
+    key: Optional[str] = None
+
+    def codebuild_value(self) -> str:
+        """The ``secret-id[:json-key]`` value of a SECRETS_MANAGER env var."""
+        return f"{self.secret_arn}:{self.key}" if self.key else self.secret_arn
+
+
+@dataclass(frozen=True)
+class RegistryAuth:
+    """Credentials for one image registry the build pulls/pushes to (rc-6ej).
+
+    registry: the host passed to ``docker login`` (``docker.io``, ``ghcr.io``,
+        ``myreg.example.com:5000``).
+    username / password: :class:`RegistrySecretRef`s injected into the build as
+        SECRETS_MANAGER env vars (never PLAINTEXT — CodeBuild masks them).
+    """
+
+    registry: str
+    username: RegistrySecretRef
+    password: RegistrySecretRef
+
+    def env_names(self) -> tuple[str, str]:
+        """The (username, password) env-var names for this registry."""
+        return registry_auth_env_names(self.registry)
+
+
+@dataclass(frozen=True)
 class CodeBuildConfig:
     """Resolved AWS CodeBuild knobs (rc-8j7.5).
 
@@ -312,6 +358,8 @@ class CodeBuildConfig:
         derive ``rc-build-source-<account>-<region>`` and create-if-missing.
     region: AWS region; None → the ECS region / parsed from the ECR tag host.
     timeout_minutes: build wall-clock cap (default 60).
+    registry_auth: registries the build logs into before building (rc-6ej).
+        Empty (the default) → anonymous pulls, i.e. today's behavior.
     """
 
     project_name: Optional[str] = None
@@ -321,6 +369,7 @@ class CodeBuildConfig:
     source_bucket: Optional[str] = None
     region: Optional[str] = None
     timeout_minutes: int = DEFAULT_CODEBUILD_TIMEOUT_MINUTES
+    registry_auth: tuple[RegistryAuth, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +377,137 @@ class CodeBuildConfig:
 # ---------------------------------------------------------------------------
 
 _ECR_HOST_RE = re.compile(r"\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com")
+# rc-6ej: a registry host is embedded in generated shell, so restrict it to
+# characters that carry no meaning to the shell — no quotes, `$`, backticks,
+# semicolons or whitespace can reach the buildspec.
+_REGISTRY_SAFE_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+_REGISTRY_SLUG_RE = re.compile(r"[^A-Z0-9]+")
+
+
+def registry_auth_env_names(registry: str) -> tuple[str, str]:
+    """The (username, password) env-var names carrying ``registry``'s creds.
+
+    Derived from the host so two registries can't collide on one variable:
+    ``docker.io`` → ``RC_REGISTRY_USER_DOCKER_IO`` /
+    ``RC_REGISTRY_PASS_DOCKER_IO``.
+    """
+    slug = _REGISTRY_SLUG_RE.sub("_", registry.upper()).strip("_")
+    return (
+        f"{REGISTRY_AUTH_USER_ENV_PREFIX}{slug}",
+        f"{REGISTRY_AUTH_PASS_ENV_PREFIX}{slug}",
+    )
+
+
+def _parse_secret_ref(raw: Any, where: str) -> RegistrySecretRef:
+    """Parse one ``{secret_arn, key}`` credential reference."""
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{where}: expected a mapping like "
+            "{secret_arn: <arn>, key: <json-key>} — rc only accepts a Secrets "
+            "Manager reference here, never a plaintext credential."
+        )
+    unknown = set(raw) - {"secret_arn", "key"}
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown key(s) {sorted(unknown)} "
+            "(supported: ['key', 'secret_arn'])"
+        )
+    secret_arn = str(raw.get("secret_arn") or "").strip()
+    if not secret_arn:
+        raise ValueError(
+            f"{where}: 'secret_arn' is required (a Secrets Manager secret ARN "
+            "or name that the CodeBuild service role can GetSecretValue on)."
+        )
+    key_raw = raw.get("key")
+    key = str(key_raw).strip() if key_raw not in (None, "") else None
+    # CodeBuild encodes a SECRETS_MANAGER value as
+    # `secret-id:json-key:version-stage:version-id`, so a ':' in the key would
+    # be re-parsed as a version selector.
+    if key and ":" in key:
+        raise ValueError(
+            f"{where}: 'key' must not contain ':' (CodeBuild reads a "
+            f"SECRETS_MANAGER value as 'secret-id:json-key:...'); got {key!r}."
+        )
+    return RegistrySecretRef(secret_arn=secret_arn, key=key)
+
+
+def parse_registry_auth(raw: Any) -> tuple[RegistryAuth, ...]:
+    """Parse + validate the ``build.codebuild.registry_auth`` list (rc-6ej).
+
+    Accepts the parsed YAML list, or a JSON string (the
+    ``RC_CODEBUILD_REGISTRY_AUTH`` env override). Missing/empty → ``()``, i.e.
+    anonymous pulls exactly as before. Raises :class:`ValueError` with a
+    config-shaped message on any malformed entry, which the provider surfaces
+    as a ``ProviderConfigError`` before any AWS call.
+    """
+    if raw in (None, "", (), []):
+        return ()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"build.codebuild.registry_auth: expected a list of "
+                f"{{registry, username, password}} entries (JSON when set via "
+                f"{_CODEBUILD_REGISTRY_AUTH_ENV}); could not parse: {exc!s}"
+            ) from exc
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "build.codebuild.registry_auth: expected a list of "
+            "{registry, username, password} entries, got "
+            f"{type(raw).__name__}."
+        )
+
+    entries: list[RegistryAuth] = []
+    seen_registries: set[str] = set()
+    seen_slugs: dict[str, str] = {}
+    for i, item in enumerate(raw):
+        where = f"build.codebuild.registry_auth[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{where}: expected a mapping with registry/username/password, "
+                f"got {type(item).__name__}."
+            )
+        unknown = set(item) - {"registry", "username", "password"}
+        if unknown:
+            raise ValueError(
+                f"{where}: unknown key(s) {sorted(unknown)} "
+                "(supported: ['password', 'registry', 'username'])"
+            )
+        registry = str(item.get("registry") or "").strip()
+        if not registry:
+            raise ValueError(
+                f"{where}: 'registry' is required — the host passed to "
+                "`docker login` (e.g. docker.io, ghcr.io)."
+            )
+        if not _REGISTRY_SAFE_RE.match(registry):
+            raise ValueError(
+                f"{where}: invalid registry {registry!r}; expected a host like "
+                "'docker.io' or 'myreg.example.com:5000'."
+            )
+        if registry in seen_registries:
+            raise ValueError(
+                f"{where}: duplicate registry {registry!r} — one auth entry "
+                "per registry host."
+            )
+        seen_registries.add(registry)
+        # Two distinct hosts must not slug to the same env-var pair, or one
+        # would silently overwrite the other's credentials.
+        slug = registry_auth_env_names(registry)[0]
+        if slug in seen_slugs:
+            raise ValueError(
+                f"{where}: registry {registry!r} collides with "
+                f"{seen_slugs[slug]!r} on the generated env var {slug!r}."
+            )
+        seen_slugs[slug] = registry
+        entries.append(
+            RegistryAuth(
+                registry=registry,
+                username=_parse_secret_ref(item.get("username"), f"{where}.username"),
+                password=_parse_secret_ref(item.get("password"), f"{where}.password"),
+            )
+        )
+    return tuple(entries)
 
 
 def _registry_host(ref: str) -> Optional[str]:
@@ -460,12 +640,14 @@ def generate_codebuild_buildspec(
     root: Path,
     region: str,
     remote_builder: str = CODEBUILD_REMOTE_BUILDER,
+    registry_auth: "Sequence[RegistryAuth]" = (),
 ) -> str:
     """Render the CodeBuild buildspec that runs the SAME buildx build for each
     spec (rc-8j7.5).
 
     pre_build logs docker into every ECR registry the batch touches (tags +
-    cache refs) and creates a docker-container buildx builder (needed to export
+    cache refs), logs into each configured ``registry_auth`` registry (rc-6ej),
+    then creates a docker-container buildx builder (needed to export
     ``--cache-to type=registry``). build then runs, per spec, the identical
     ``docker buildx build`` the local backend emits — same ``buildx_build_flags``
     (``-f``/``--target``/``--platform``/``--no-cache``/``--build-arg``/
@@ -474,6 +656,9 @@ def generate_codebuild_buildspec(
     relative to the extracted tar root. Commands run sequentially; CodeBuild
     fails the build on the first non-zero exit, matching the local backend's
     fail-on-first-error contract.
+
+    ``registry_auth`` is empty by default, in which case the rendered document
+    is byte-identical to the pre-rc-6ej one.
     """
     hosts: list[str] = []
     for spec in specs:
@@ -487,6 +672,29 @@ def generate_codebuild_buildspec(
         pre_build.append(
             f"aws ecr get-login-password --region {region} "
             f"| docker login --username AWS --password-stdin {host}"
+        )
+    # rc-6ej: authenticate base-image registries BEFORE the builder is created.
+    # Anonymous Docker Hub pulls are rate-limited per source IP and CodeBuild
+    # shares that IP budget, so a busy deploy day 429s on `load metadata for
+    # docker.io/library/<base>`. `buildx create --bootstrap` ALSO pulls
+    # (moby/buildkit) from Docker Hub, so the login has to precede it to cover
+    # that pull too. Each login is guarded on both env vars being non-empty and
+    # never fails the build: a bad credential degrades to today's anonymous
+    # behavior rather than blocking a deploy that might have succeeded anyway.
+    # `docker login` prints its own "Login Succeeded" — left unsuppressed so the
+    # build log is greppable — and the values come from SECRETS_MANAGER env
+    # vars, which CodeBuild masks in logs.
+    for auth in registry_auth:
+        user_env, pass_env = auth.env_names()
+        registry = auth.registry
+        pre_build.append(
+            f'if [ -n "${{{user_env}:-}}" ] && [ -n "${{{pass_env}:-}}" ]; then '
+            f'echo "${{{pass_env}}}" | docker login {shlex.quote(registry)} '
+            f'--username "${{{user_env}}}" --password-stdin '
+            f'|| echo "rc: docker login {registry} FAILED - '
+            f'continuing with anonymous pulls"; '
+            f'else echo "rc: no credentials in env for {registry} - '
+            f'continuing with anonymous pulls"; fi'
         )
     pre_build.append(
         f"docker buildx create --name {remote_builder} "
@@ -610,7 +818,16 @@ class AwsCodeBuildBackend(BuildBackend):
         self._emit(f"  codebuild: uploaded context to s3://{bucket}/{key}")
 
         # 3. generate the buildspec (same buildx per image).
-        buildspec = generate_codebuild_buildspec(specs, root=root, region=region)
+        buildspec = generate_codebuild_buildspec(
+            specs, root=root, region=region, registry_auth=cfg.registry_auth
+        )
+        if cfg.registry_auth:
+            # Names only — the values live in Secrets Manager and are resolved
+            # (and masked) inside CodeBuild.
+            self._emit(
+                "  codebuild: registry auth configured for "
+                + ", ".join(a.registry for a in cfg.registry_auth)
+            )
 
         # 4. ensure the project (create-if-missing, referenced IAM role).
         cb = self._session.client("codebuild", region_name=region)
@@ -716,6 +933,27 @@ class AwsCodeBuildBackend(BuildBackend):
         if cache_repo:
             env_overrides.append(
                 {"name": "RC_BUILDCACHE_REPO", "value": cache_repo, "type": "PLAINTEXT"}
+            )
+        # rc-6ej: registry credentials are injected as SECRETS_MANAGER env vars,
+        # never PLAINTEXT — CodeBuild resolves them inside the build container
+        # and masks the resolved values in the log stream, so nothing sensitive
+        # crosses the wire from rc or lands in CloudWatch. The CodeBuild service
+        # role needs secretsmanager:GetSecretValue on each referenced secret.
+        for auth in self._config.registry_auth:
+            user_env, pass_env = auth.env_names()
+            env_overrides.append(
+                {
+                    "name": user_env,
+                    "value": auth.username.codebuild_value(),
+                    "type": "SECRETS_MANAGER",
+                }
+            )
+            env_overrides.append(
+                {
+                    "name": pass_env,
+                    "value": auth.password.codebuild_value(),
+                    "type": "SECRETS_MANAGER",
+                }
             )
         resp = cb.start_build(
             projectName=project_name,
@@ -996,4 +1234,9 @@ def _resolve_codebuild_config(
         source_bucket=_pick(_CODEBUILD_BUCKET_ENV, "source_bucket", None) or None,
         region=_pick(_CODEBUILD_REGION_ENV, "region", None) or None,
         timeout_minutes=timeout,
+        # rc-6ej: a list, so the env override carries it as JSON. Absent →
+        # () → anonymous pulls, i.e. the pre-rc-6ej behavior.
+        registry_auth=parse_registry_auth(
+            _pick(_CODEBUILD_REGISTRY_AUTH_ENV, "registry_auth", None)
+        ),
     )

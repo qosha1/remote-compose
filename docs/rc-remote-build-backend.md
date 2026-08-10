@@ -127,6 +127,81 @@ or the `RC_CODEBUILD_*` env override — same precedence as the other build knob
 | `source_bucket` | `rc-build-source-<account>-<region>` (created if missing) | Prefer a pre-provisioned bucket in prod. |
 | `region` | ECS region / parsed from the ECR tag host | — |
 | `timeout_minutes` | `60` | Build wall-clock cap. |
+| `registry_auth` | `[]` (anonymous pulls) | Registries the build `docker login`s to before building — see below. |
+
+### `registry_auth` — authenticated base-image pulls (rc-6ej)
+
+Dockerfiles pull their bases (`node:18-bullseye-slim`, `python:3.11.5-slim-bullseye`)
+from Docker Hub. **Anonymous** pulls are rate-limited *per source IP*, and a
+CodeBuild build shares that IP budget with everything else in the region — so on
+a busy deploy day the build dies at `load metadata for docker.io/library/node`
+with `429 Too Many Requests`, the "Build + push images" step fails, and the whole
+deploy aborts before the roll. Authenticated pulls get a much higher limit and a
+budget of their own.
+
+```yaml
+provider_config:
+  ecs:
+    build:
+      backend: aws-codebuild
+      codebuild:
+        service_role_arn: arn:aws:iam::<account>:role/rc-codebuild-debuggai-api
+        registry_auth:
+          - registry: docker.io
+            username:
+              secret_arn: arn:aws:secretsmanager:us-east-2:<account>:secret:<name>-AbCdEf
+              key: DOCKERHUB_USERNAME
+            password:
+              secret_arn: arn:aws:secretsmanager:us-east-2:<account>:secret:<name>-AbCdEf
+              key: DOCKERHUB_PASSWORD
+```
+
+- **A list**, so non-Docker-Hub registries work the same way (`ghcr.io`,
+  `quay.io`, a private mirror). One entry per registry host; `registry` is
+  whatever you'd pass to `docker login`.
+- **Secrets only.** `username`/`password` are always `{secret_arn, key}`
+  references — rc has no way to express a plaintext credential here. `key` is
+  the JSON key inside the secret; omit it when the secret's whole string value
+  *is* the credential.
+- **Never plaintext in transit or at rest.** rc injects each credential as a
+  CodeBuild env var of type `SECRETS_MANAGER` (value `<arn>:<json-key>`), so the
+  value is resolved *inside* the build container and masked in CloudWatch. rc
+  itself never reads the secret; only the env-var name and the ARN reach the
+  buildspec.
+- **Generated env-var names** are derived from the host so two registries can't
+  collide: `docker.io` → `RC_REGISTRY_USER_DOCKER_IO` /
+  `RC_REGISTRY_PASS_DOCKER_IO`.
+- **The login runs before `docker buildx create --bootstrap`** — that command
+  pulls `moby/buildkit` from Docker Hub, so it's a rate-limited anonymous pull
+  too unless the login precedes it.
+- **A failed login never fails the build.** The command is guarded on both env
+  vars being non-empty and falls back to anonymous pulls with an explicit
+  `rc: docker login <registry> FAILED` line, so a bad/rotated credential
+  degrades to today's behavior instead of blocking a deploy that might have
+  succeeded anyway. Grep the build log for `Login Succeeded` to confirm the
+  happy path.
+- **Omit the key entirely and nothing changes** — the generated buildspec and
+  the project's env overrides are byte-identical to the pre-rc-6ej ones.
+
+The **CodeBuild service role** needs `secretsmanager:GetSecretValue` on each
+referenced secret (see the `SecretsManagerReadRegistryCreds` statement in (a));
+without it the build fails at PROVISIONING before any command runs.
+
+Env override for a CI trial without editing config —
+`RC_CODEBUILD_REGISTRY_AUTH` takes the same structure as a **JSON** string:
+
+```bash
+RC_CODEBUILD_REGISTRY_AUTH='[{"registry":"docker.io","username":{"secret_arn":"<arn>","key":"DOCKERHUB_USERNAME"},"password":{"secret_arn":"<arn>","key":"DOCKERHUB_PASSWORD"}}]'
+```
+
+**buildx driver note.** rc builds with the `docker-container` (`rc-remote`)
+driver so it can export `--cache-to type=registry`. A plain `docker login`
+covers it: buildx reads `~/.docker/config.json` on the host and forwards the
+credentials to the BuildKit container over the build session (it maps
+`registry-1.docker.io` → the `https://index.docker.io/v1/` entry that
+`docker login docker.io` writes). That's the same mechanism the existing ECR
+login already relies on for cache push/pull, so base-image resolution needs no
+extra BuildKit registry-auth wiring.
 
 ## (a) One-time IAM service role
 
@@ -191,6 +266,14 @@ repo paths, the source bucket, and `<project>`):
       ]
     },
     {
+      "Sid": "SecretsManagerReadRegistryCreds",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "arn:aws:secretsmanager:<region>:<account>:secret:<registry-creds-secret>-??????"
+      ]
+    },
+    {
       "Sid": "CloudWatchLogs",
       "Effect": "Allow",
       "Action": [
@@ -206,6 +289,10 @@ repo paths, the source bucket, and `<project>`):
   ]
 }
 ```
+
+Drop `SecretsManagerReadRegistryCreds` unless `build.codebuild.registry_auth` is
+set; when it is, list one ARN per referenced secret (the trailing `-??????`
+matches the 6-character suffix Secrets Manager appends to a secret's ARN).
 
 Note the **runner's own** credentials (not this role) upload the context, so the
 runner's role additionally needs `s3:PutObject` on the source bucket and, if rc
@@ -255,6 +342,14 @@ Revert instantly with `RC_BUILD_BACKEND=local` (the default).
 6. Failure path check: a broken build ends non-`SUCCEEDED`; rc raises with the
    log tail and the deploy fails (no half-pushed roll). Revert with
    `RC_BUILD_BACKEND=local`.
+7. `registry_auth` check (rc-6ej): after adding the block, deploy and grep the
+   build log for `Login Succeeded` (and confirm neither
+   `rc: docker login … FAILED` nor `rc: no credentials in env for …` appears —
+   those mean the secret didn't resolve, usually a missing
+   `secretsmanager:GetSecretValue` on the CodeBuild service role). Confirm the
+   base-image pull no longer 429s, and that the credential itself is absent
+   from the log: `aws logs filter-log-events … | grep -c '<the password>'`
+   must be `0` — CodeBuild masks `SECRETS_MANAGER` values.
 
 ## Still needs a real-AWS / infra decision
 
