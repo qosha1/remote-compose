@@ -1429,6 +1429,84 @@ class TestClipboardWorksOnTheBox:
             ), f"{src.type}: drag selects into tmux's buffer only"
 
 
+class TestClaudeSessionSurvivesAnyReboot:
+    """The claude tmux session must come back on EVERY boot, not just the
+    first one and not just a `rc dev stop`/`start` cycle.
+
+    Root cause, found live on debugg-dev-3: cloud-init's `runcmd` only ever
+    fires once, tied to the instance's ID, so a plain one-time
+    `sudo -u ec2-user rc-dev-start-claude.sh` call in runcmd never re-runs on
+    a later boot. `rc dev start`'s own explicit relaunch
+    (_relaunch_claude_session) covers a deliberate stop/start, but that path
+    only fires when something actually calls `rc dev start` — confirmed live
+    this is not guaranteed: a persistent Spot Instance can stop AND resume
+    entirely on AWS's own initiative (journalctl showed a clean ACPI "Power
+    key pressed short" shutdown followed by a fresh boot about a minute
+    later, with no `rc dev start` in the picture at all). Docker's
+    containers already self-heal from this via restart:unless-stopped; the
+    claude session had no equivalent until this systemd unit.
+    """
+
+    def _write_files(self, rendered):
+        body = "\n".join(rendered.splitlines()[1:])
+        return {f["path"]: f for f in yaml.safe_load(body)["write_files"]}
+
+    def _runcmd(self, rendered):
+        body = "\n".join(rendered.splitlines()[1:])
+        return "\n".join(str(x) for x in yaml.safe_load(body)["runcmd"])
+
+    def _both_sources(self):
+        from remote_compose.dev_host.bootstrap import GitSource, MultiGitSource
+
+        return [
+            GitSource(url="https://github.com/owner/repo.git", ref="main"),
+            MultiGitSource(
+                repos=[{"url": "https://github.com/owner/backend.git"}],
+                compose_filenames=["docker-compose.full.yml"],
+            ),
+        ]
+
+    def test_systemd_unit_is_written(self):
+        for src in self._both_sources():
+            files = self._write_files(src.render_user_data())
+            assert "/etc/systemd/system/rc-dev-claude.service" in files, (
+                f"{src.type}: no boot-time relaunch unit — claude only ever "
+                "starts once, on first boot"
+            )
+
+    def test_systemd_unit_runs_the_same_start_script(self):
+        for src in self._both_sources():
+            unit = self._write_files(src.render_user_data())[
+                "/etc/systemd/system/rc-dev-claude.service"
+            ]["content"]
+            assert "ExecStart=/usr/local/bin/rc-dev-start-claude.sh" in unit
+            assert "User=ec2-user" in unit
+            assert "WantedBy=multi-user.target" in unit, (
+                f"{src.type}: unit not registered to start on boot — "
+                "enabling it would be a no-op"
+            )
+
+    def test_unit_is_enabled_and_started_in_runcmd(self):
+        for src in self._both_sources():
+            runcmd = self._runcmd(src.render_user_data())
+            assert "systemctl enable --now rc-dev-claude.service" in runcmd, (
+                f"{src.type}: unit written but never enabled — dead file, "
+                "no different from not having it"
+            )
+
+    def test_old_one_time_direct_call_is_gone(self):
+        # A leftover `sudo -u ec2-user rc-dev-start-claude.sh` alongside the
+        # new systemd unit would double-launch (kill+recreate) on every
+        # first boot — harmless given the script's own kill-session guard,
+        # but it means two mechanisms are responsible for the same thing
+        # instead of one.
+        for src in self._both_sources():
+            runcmd = self._runcmd(src.render_user_data())
+            assert (
+                "sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh" not in runcmd
+            )
+
+
 class TestSwapfile:
     """A box with no swap goes UNREACHABLE rather than degrading.
 

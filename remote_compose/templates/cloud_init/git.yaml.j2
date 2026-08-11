@@ -242,6 +242,40 @@ write_files:
       bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel
       bind -T copy-mode    MouseDragEnd1Pane send -X copy-pipe-and-cancel
 
+  # Runs rc-dev-start-claude.sh on EVERY boot, not just first boot — cloud-init's
+  # `runcmd` only ever fires once, ever, tied to this instance's ID. A `rc dev
+  # stop`/`start` cycle is covered separately by the CLI's own explicit
+  # relaunch (_relaunch_claude_session), but that path requires a human or
+  # script to actually call `rc dev start`. Confirmed live this does NOT
+  # always happen: a persistent Spot Instance can stop AND come back up
+  # entirely on its own (AWS resuming the request once capacity frees up,
+  # no external start_instances call from rc at all) — the box's `journalctl`
+  # showed a clean ACPI "Power key pressed short" shutdown followed by a
+  # fresh boot within about a minute, with nothing on the rc/CLI side ever
+  # having run. Docker's containers self-heal from this via restart:unless-
+  # stopped (docker_update in agent-box-up.sh's finish()); the claude tmux
+  # session had no equivalent and was found dead — box otherwise fully
+  # healthy — after exactly this sequence. This unit closes that gap the
+  # same way: self-heal on boot, independent of whether anything external
+  # ever calls `rc dev start`.
+  - path: /etc/systemd/system/rc-dev-claude.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Launch the in-box claude tmux session
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      User=ec2-user
+      ExecStart=/usr/local/bin/rc-dev-start-claude.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /etc/profile.d/rc-dev-locale.sh
     permissions: '0644'
     content: |
@@ -334,4 +368,10 @@ runcmd:
   # sees >= 3.3 and falls back to Ms-stripping safe mode if this build failed.
   # Adds ~2-4 min to bootstrap.
   - 'if [ ! -x /usr/local/bin/tmux ]; then dnf install -y -q gcc make libevent-devel ncurses-devel bison >/dev/null 2>&1 && cd /tmp && curl -sSL -o tmux.tgz https://github.com/tmux/tmux/releases/download/3.5a/tmux-3.5a.tar.gz && tar xzf tmux.tgz && cd tmux-3.5a && ./configure --prefix=/usr/local >/dev/null 2>&1 && make -j"$(nproc)" >/dev/null 2>&1 && make install >/dev/null 2>&1; fi; /usr/local/bin/tmux -V 2>/dev/null || echo "tmux 3.5a build unavailable - falling back to system tmux (clipboard disabled)"'
-  - sudo -u ec2-user /usr/local/bin/rc-dev-start-claude.sh
+  # enable --now: fires immediately for first boot AND registers for every
+  # future boot (see the unit file's own comment for why that matters —
+  # a stop/start that AWS itself initiates and resolves, with nobody ever
+  # calling `rc dev start`, is a real, observed case). This REPLACES the
+  # old one-time `sudo -u ec2-user rc-dev-start-claude.sh` call — one
+  # mechanism responsible for launching claude, not two racing on first boot.
+  - systemctl daemon-reload && systemctl enable --now rc-dev-claude.service
