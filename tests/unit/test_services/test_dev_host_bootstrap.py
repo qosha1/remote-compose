@@ -553,6 +553,71 @@ class TestClaudeConfigTarball:
         assert ".claude.json" in names
 
 
+class TestCopyClaudeConfigFixesHeadroomMcpPath:
+    """_copy_claude_config must rewrite mcpServers.headroom.command in the
+    copied ~/.claude.json to the box's actual headroom path.
+
+    Root cause: the shipped .claude.json is a straight copy of whatever ran
+    `rc dev up` — its headroom MCP entry carries THAT machine's absolute
+    path (e.g. a laptop's /Users/<name>/.local/bin/headroom), which never
+    exists on the box. Confirmed live: left unfixed, `claude mcp list`
+    shows headroom as "Failed to connect", silently breaking
+    `headroom wrap claude`'s compression-marker retrieval tool — the box
+    still launches and routes through the proxy fine, but that one feature
+    quietly does nothing.
+    """
+
+    def _copy_with_mocks(self, tmp_path):
+        """Run _copy_claude_config against hermetic tmp_path sources (never
+        the real machine's ~/.claude.json) and return the extraction
+        command string sent over the second `subprocess.run` (SSH) call."""
+        from unittest.mock import patch, MagicMock
+        from remote_compose.cli_commands.dev import _copy_claude_config
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text('{"mcpServers": {"headroom": {"command": "x"}}}')
+
+        with (
+            # Avoid the real macOS-keychain/Linux-credentials-file subprocess
+            # call inside _build_claude_config_tarball — irrelevant to what
+            # this test checks, and would otherwise feed a MagicMock through
+            # the mocked subprocess.run below into a real file write.
+            patch(
+                "remote_compose.cli_commands.dev._read_claude_credentials",
+                return_value=None,
+            ),
+            patch("subprocess.run") as run,
+        ):
+            run.return_value = MagicMock(returncode=0)
+            _copy_claude_config(
+                "203.0.113.42",
+                "fake-pem-contents",
+                claude_dir=claude_dir,
+                claude_json=claude_json,
+            )
+
+        # Second subprocess.run call is the SSH extract+chown+fix command.
+        return run.call_args_list[1].args[0][-1]
+
+    def test_extraction_command_rewrites_headroom_mcp_path(self, tmp_path):
+        extract_cmd = self._copy_with_mocks(tmp_path)
+        assert "/usr/local/bin/headroom" in extract_cmd
+        assert "mcpServers" in extract_cmd
+        # Must not hard-fail the whole copy if .claude.json is missing/odd.
+        assert "2>/dev/null || true" in extract_cmd
+
+    def test_fix_runs_before_cleanup(self, tmp_path):
+        """The rm -f of the staged tarball must come after the JSON fix, not
+        before — ordering matters since both are chained with && on one
+        remote command."""
+        extract_cmd = self._copy_with_mocks(tmp_path)
+        assert extract_cmd.index("/usr/local/bin/headroom") < extract_cmd.index(
+            "rm -f /tmp/rc-claude-cfg.tar.gz"
+        )
+
+
 class TestSanitizedSourceRepr:
     """rc-h40: stdout-printed source repr must not leak secret-bearing fields."""
 

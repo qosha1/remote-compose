@@ -791,14 +791,29 @@ def _claude_session_command(source: dict) -> str:
     without this, the relaunched agent has no memory of what it was doing
     even though the code on disk is untouched.
 
-    Falls back to a bare `claude {flags}` if --continue fails, via a shell
-    `||` baked into the returned command — load-bearing, not defensive
-    filler. Measured live: `claude --continue` in interactive mode can exit
-    1 with "No deferred tool marker found in the resumed session" (seen on a
-    box whose copied ~/.claude.json carried a stale deferred-tool
-    reference), and a command that exits non-zero as a detached tmux pane's
-    sole process kills the pane, the window, and the whole tmux SERVER along
-    with it — `rc dev attach` then has nothing to attach to at all.
+    Launches through `headroom wrap claude` first: starts a local Headroom
+    optimization proxy and points the session's ANTHROPIC_BASE_URL at it, so
+    every API call gets Headroom's context/token compression for free — a
+    real, measured win, not a hopeful one (confirmed live: a routed session
+    handles a normal prompt/response round-trip correctly end to end).
+    Falls back through THREE more layers if that fails, via shell `||`s
+    baked into the returned command — load-bearing, not defensive filler,
+    same reasoning as the --continue fallback below: a command that exits
+    non-zero as a detached tmux pane's sole process kills the pane, the
+    window, and the whole tmux SERVER along with it, so a failure this deep
+    must never be the last thing tried.
+      1. `headroom wrap claude --continue {flags}` — the preferred path.
+      2. `headroom wrap claude {flags}` — in case --continue itself is what
+         failed (see below), still routed through Headroom.
+      3. `claude --continue {flags}` — Headroom itself unavailable (proxy
+         dependencies missing, port conflict); still resumes the session.
+      4. `claude {flags}` — last resort, matches this function's pre-Headroom
+         behavior exactly.
+
+    Falls back to a bare `claude {flags}` if --continue fails. Measured
+    live: `claude --continue` in interactive mode can exit 1 with "No
+    deferred tool marker found in the resumed session" (seen on a box whose
+    copied ~/.claude.json carried a stale deferred-tool reference).
     """
     from remote_compose.dev_host.bootstrap import _repo_name_from_url
 
@@ -809,9 +824,14 @@ def _claude_session_command(source: dict) -> str:
     else:
         # multi-git/image/local/script sources all land at /home/ec2-user.
         cd = "cd /home/ec2-user"
-    claude_cmd = f"claude --continue {flags}".strip()
-    fallback_cmd = f"claude {flags}".strip()
-    return f"{cd}; {claude_cmd} || {fallback_cmd}"
+    headroom_continue = f"headroom wrap claude --continue {flags}".strip()
+    headroom_bare = f"headroom wrap claude {flags}".strip()
+    claude_continue = f"claude --continue {flags}".strip()
+    claude_bare = f"claude {flags}".strip()
+    return (
+        f"{cd}; {headroom_continue} || {headroom_bare} "
+        f"|| {claude_continue} || {claude_bare}"
+    )
 
 
 def _ssh_opts(keypath: str) -> list[str]:
@@ -1513,6 +1533,20 @@ def _copy_claude_config(
                 "sudo tar -xzf /tmp/rc-claude-cfg.tar.gz -C /home/ec2-user/ && "
                 "sudo chown -R ec2-user:ec2-user /home/ec2-user/.claude /home/ec2-user/.claude.json 2>/dev/null || true && "
                 "sudo chmod 600 /home/ec2-user/.claude.json 2>/dev/null || true && "
+                # The copied .claude.json's mcpServers.headroom.command is whatever
+                # absolute path headroom lived at on the machine that ran `rc dev
+                # up` (e.g. a laptop's /Users/<name>/.local/bin/headroom) — never
+                # correct on the box, where cloud-init installs it to
+                # /usr/local/bin/headroom. Confirmed live: left unfixed, `claude
+                # mcp list` shows headroom as "Failed to connect", silently
+                # disabling `headroom wrap claude`'s compression-marker retrieval.
+                # Rewrite it post-copy rather than templating it at tar-build time
+                # because the fix only needs to be correct on the box, and doing it
+                # here keeps _build_claude_config_tarball ignorant of remote paths.
+                "sudo -u ec2-user python3 -c \"import json; p='/home/ec2-user/.claude.json'; "
+                "d=json.load(open(p)); m=d.get('mcpServers', {}); "
+                "'headroom' in m and m['headroom'].update(command='/usr/local/bin/headroom'); "
+                "json.dump(d, open(p, 'w'), indent=2)\" 2>/dev/null || true && "
                 "rm -f /tmp/rc-claude-cfg.tar.gz",
             ],
             check=True,
