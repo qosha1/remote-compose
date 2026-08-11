@@ -15,6 +15,12 @@ fresh session, across a stop/start or Spot interruption) and its `|| claude
 found in the resumed session"), and a command that exits non-zero as a
 detached tmux pane's sole process kills the pane, the window, and the whole
 tmux server with it.
+
+And the `headroom wrap claude` layer: the launch command now tries Headroom
+(a local token/context-optimization proxy) first, for real measured savings
+on every API call, with the pre-existing claude-only chain kept as a
+fallback if Headroom itself is unavailable — same "never let the last
+resort be non-zero" reasoning as --continue's fallback above.
 """
 
 from __future__ import annotations
@@ -73,7 +79,9 @@ class TestClaudeSessionCommand:
         )
         assert cmd == (
             "cd /home/ec2-user; "
-            "claude --continue --dangerously-skip-permissions "
+            "headroom wrap claude --continue --dangerously-skip-permissions "
+            "|| headroom wrap claude --dangerously-skip-permissions "
+            "|| claude --continue --dangerously-skip-permissions "
             "|| claude --dangerously-skip-permissions"
         )
 
@@ -81,13 +89,19 @@ class TestClaudeSessionCommand:
         cmd = dev_cli._claude_session_command(
             {"type": "multi-git", "skip_permissions": False}
         )
-        assert cmd == "cd /home/ec2-user; claude --continue || claude"
+        assert cmd == (
+            "cd /home/ec2-user; headroom wrap claude --continue "
+            "|| headroom wrap claude || claude --continue || claude"
+        )
 
     def test_source_missing_skip_permissions_key_defaults_off(self):
         # ImageSource/LocalSource/ScriptSource never carry this field at all.
         cmd = dev_cli._claude_session_command({"type": "image"})
         assert "--dangerously-skip-permissions" not in cmd
-        assert cmd == "cd /home/ec2-user; claude --continue || claude"
+        assert cmd == (
+            "cd /home/ec2-user; headroom wrap claude --continue "
+            "|| headroom wrap claude || claude --continue || claude"
+        )
 
     def test_always_includes_continue_regardless_of_skip_permissions(self):
         # A stop/start or a Spot interruption stopping the box is only half
@@ -112,6 +126,46 @@ class TestClaudeSessionCommand:
                 {"type": "multi-git", "skip_permissions": skip_permissions}
             )
             assert " || claude" in cmd
+
+    def test_headroom_wrap_is_tried_first(self):
+        # Real, measured savings on every API call — Headroom should be the
+        # first thing attempted, not an afterthought tacked onto the end.
+        cmd = dev_cli._claude_session_command(
+            {"type": "multi-git", "skip_permissions": True}
+        )
+        after_cd = cmd.split("; ", 1)[1]
+        assert after_cd.startswith("headroom wrap claude --continue")
+
+    def test_four_layer_fallback_chain_in_order(self):
+        # Each layer covers the previous one's specific failure mode:
+        # Headroom+resume -> Headroom fresh (--continue was the problem) ->
+        # bare claude+resume (Headroom itself unavailable) -> bare claude
+        # fresh (last resort). Order matters — a reordering here would
+        # silently change what a given failure falls back to.
+        cmd = dev_cli._claude_session_command(
+            {"type": "multi-git", "skip_permissions": False}
+        )
+        after_cd = cmd.split("; ", 1)[1]
+        layers = after_cd.split(" || ")
+        assert layers == [
+            "headroom wrap claude --continue",
+            "headroom wrap claude",
+            "claude --continue",
+            "claude",
+        ]
+
+    def test_headroom_layers_also_get_skip_permissions_flag(self):
+        # A flag silently dropped from the Headroom-wrapped attempts (but
+        # present on the bare-claude fallbacks) would re-trigger the
+        # folder-trust prompt only when Headroom happens to be unavailable —
+        # exactly the kind of intermittent, hard-to-reproduce bug this
+        # session already chased once for --dangerously-skip-permissions.
+        cmd = dev_cli._claude_session_command(
+            {"type": "multi-git", "skip_permissions": True}
+        )
+        after_cd = cmd.split("; ", 1)[1]
+        for layer in after_cd.split(" || "):
+            assert "--dangerously-skip-permissions" in layer
 
 
 # ---------------------------------------------------------------------------

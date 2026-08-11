@@ -207,16 +207,26 @@ write_files:
       # half the story: without this, the relaunched agent has no memory of
       # what it was doing, even though the code on disk is untouched.
       #
-      # `|| claude {{ claude_flags }}` fallback is load-bearing, not
-      # defensive filler: measured live, `claude --continue` in interactive
-      # mode can exit 1 with "No deferred tool marker found in the resumed
-      # session" (seen on a box whose copied ~/.claude.json carried a stale
-      # deferred-tool reference) and — critically — a command that exits
-      # non-zero as a detached tmux pane's sole process kills the pane, the
-      # window, and the whole tmux SERVER along with it: `rc dev attach`
-      # then has nothing to attach to at all. The fallback keeps a session
-      # launching even when resuming fails for any reason.
-      tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user; claude --continue {{ claude_flags }} || claude {{ claude_flags }}"
+      # Routed through `headroom wrap claude` first: starts a local Headroom
+      # optimization proxy and points the session's ANTHROPIC_BASE_URL at
+      # it, so every API call gets Headroom's context/token compression —
+      # confirmed live end to end (a routed session's prompt/response
+      # round-trip works correctly through the proxy).
+      #
+      # Every `||` here is load-bearing, not defensive filler: measured
+      # live, `claude --continue` in interactive mode can exit 1 with "No
+      # deferred tool marker found in the resumed session" (seen on a box
+      # whose copied ~/.claude.json carried a stale deferred-tool
+      # reference) and — critically — a command that exits non-zero as a
+      # detached tmux pane's sole process kills the pane, the window, and
+      # the whole tmux SERVER along with it: `rc dev attach` then has
+      # nothing to attach to at all. Four layers, each covering the
+      # previous one's failure mode: Headroom+resume, Headroom fresh
+      # (--continue itself was the problem), bare claude+resume (Headroom
+      # itself unavailable — proxy deps missing, port conflict), bare
+      # claude fresh (last resort, identical to this line's pre-Headroom
+      # behavior).
+      tmux new-session -d -s claude -x 220 -y 50 "cd /home/ec2-user; headroom wrap claude --continue {{ claude_flags }} || headroom wrap claude {{ claude_flags }} || claude --continue {{ claude_flags }} || claude {{ claude_flags }}"
       # Clear the one-time "Do you trust this folder?" dialog. Without this,
       # `rc dev attach` drops you on a modal prompt rather than a usable agent —
       # which contradicts the "attach lands ready" promise `up` prints. The
@@ -308,11 +318,18 @@ runcmd:
   # dolt — version-controlled SQL database backing beads' remote-sync state
   # ('bd dolt push'/'bd dolt pull'). v2.2.3 pinned for reproducibility.
   - 'arch=$(uname -m); case "$arch" in aarch64) dolt_asset=dolt-linux-arm64.tar.gz ;; x86_64) dolt_asset=dolt-linux-amd64.tar.gz ;; *) dolt_asset="" ;; esac; if [ -n "$dolt_asset" ]; then dolt_dir="${dolt_asset%.tar.gz}"; curl -sL "https://github.com/dolthub/dolt/releases/download/v2.2.3/${dolt_asset}" | tar -xz -C /tmp && install -m 0755 "/tmp/${dolt_dir}/bin/dolt" /usr/local/bin/dolt && rm -rf "/tmp/${dolt_dir}"; fi'
-  # headroom — LLM context-optimization CLI; the local ~/.claude/ settings
-  # shipped to this box may reference it. Needs Python>=3.10 but AL2023's
-  # system python3 is 3.9, so install a separate pinned python3.12 + isolated
-  # venv rather than touch the system interpreter.
-  - 'dnf install -y -q python3.12 python3.12-pip >/dev/null 2>&1 && python3.12 -m venv /opt/headroom-venv && /opt/headroom-venv/bin/pip install -q --no-cache-dir headroom-ai && ln -sf /opt/headroom-venv/bin/headroom /usr/local/bin/headroom'
+  # headroom — LLM context-optimization CLI. The in-box claude session
+  # launches via `headroom wrap claude` (rc-dev-start-claude.sh), which
+  # actually RUNS a local proxy server (fastapi/uvicorn/etc, not just the
+  # CLI shell) — the bare `headroom-ai` package doesn't include those,
+  # confirmed live: `headroom wrap claude` failed with "Proxy dependencies
+  # not installed... No module named 'fastapi'" until installed with the
+  # [proxy] extra. That extra adds ~24s / ~620MB to first boot (measured
+  # live on a t4g.xlarge) but has prebuilt aarch64 wheels for everything —
+  # no source builds. Needs Python>=3.10 but AL2023's system python3 is 3.9,
+  # so install a separate pinned python3.12 + isolated venv rather than
+  # touch the system interpreter.
+  - 'dnf install -y -q python3.12 python3.12-pip >/dev/null 2>&1 && python3.12 -m venv /opt/headroom-venv && /opt/headroom-venv/bin/pip install -q --no-cache-dir "headroom-ai[proxy]" && ln -sf /opt/headroom-venv/bin/headroom /usr/local/bin/headroom'
   # rtk (Rust Token Killer) — token-optimized CLI proxy the local Claude
   # session's hooks shell out to for every bash command (~/.claude/RTK.md
   # shipped to this box documents the hook). v0.45.0 pinned. No prebuilt
