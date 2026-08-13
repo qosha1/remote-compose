@@ -565,6 +565,61 @@ agent config. Tasks keep their own task role either way.
 `http_endpoint` is deliberately not configurable: disabling IMDS entirely stops
 the ECS agent registering the instance, so the stack would never run a task.
 
+### EC2 task density is capped by ENI limits, not just CPU/memory
+
+Only relevant when a service sets `launch_type: EC2`. Every ECS task uses
+`awsvpc` network mode regardless of launch type, and on EC2 (unlike Fargate)
+that means each task gets its own elastic network interface (ENI) attached to
+the container instance that hosts it. Every EC2 instance type has an AWS-wide
+ceiling on attached ENIs, and one of those is always the instance's own
+primary network interface — never available to a task. So the number of
+awsvpc tasks a container instance can actually host is `max_enis - 1`, not
+however many fit by CPU/memory math alone. A pile of small, high-replica-count
+services can hit this ceiling long before CPU or memory does.
+
+rc's default t3 ladder, verified against the live AWS API
+(`aws ec2 describe-instance-types`, `NetworkInfo.MaximumNetworkInterfaces`):
+
+| Instance type | Max ENIs | Usable for tasks (max − 1) |
+| --- | --- | --- |
+| t3.small / t3.medium / t3.large | 3 | 2 |
+| t3.xlarge / t3.2xlarge | 4 | 3 |
+
+`autosize.py`'s `auto_size()` treats this as a third sizing dimension
+alongside CPU and memory: it computes the instance count needed to cover the
+total EC2 task count (summed across replicas, with the same `safety_headroom`
+multiplier CPU/memory use) at that ceiling, and takes the max of all three
+dimensions. A tiny task with a high replica count can therefore need more
+instances than its CPU/memory footprint alone would suggest, even though
+`instance_type` selection (the smallest shape that fits the *largest single*
+task) stays CPU/memory-only — the ENI ceiling is a floor on instance *count*,
+not a factor in shape choice, so a many-tiny-task stack still lands on
+`t3.small` rather than a shape with better ENI density per dollar. This
+headroom multiplier is only an approximation for ENIs, though: it does not
+model the up-to-200% task duplication ECS permits mid-rolling-deploy for
+non-stateful services, so a 2-replica service can briefly need double its
+steady-state ENI slots while a deploy is in flight. If tasks sit `PENDING`
+for ENIs specifically during rolling deploys, raise
+`ec2_capacity.max`/`safety_headroom` or move to a bigger shape.
+
+**Why not ENI trunking (`awsvpcTrunking`) instead?** AWS does offer an
+account-level ECS setting (`aws_ecs_account_setting_default` with
+`name = "awsvpcTrunking"`) that raises the ENI ceiling for *newly launched*
+instances of eligible types. It was evaluated and rejected for now: (1) it's
+an AWS account/region-wide setting — turning it on changes ECS behavior for
+every workload in that account/region, including ones rc doesn't manage, which
+is a real, unwanted side effect for a tool that deploys into a user's existing
+account; and (2) it would be a no-op for rc's default ladder regardless —
+checked AWS's own published list of ENI-trunking-eligible instance types
+(general purpose, compute optimized, memory optimized, storage optimized,
+accelerated computing, HPC — all six family tables), and **no `t3.*` entry
+appears in any of them, at any size**. Using it at
+all would require a custom ladder pinned to trunking-eligible families (m5,
+c5, r5, and their newer generations), on top of the account-wide opt-in — a
+meaningfully bigger, riskier feature than sizing around the ceiling. Revisit
+if a workload's replica-count-driven instance sprawl becomes a real cost
+problem that a bigger `instance_type` doesn't fix.
+
 ---
 
 ## Feature index
@@ -586,6 +641,7 @@ What's built and live-verified on the `portable-deploy` branch:
 - **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
 - **Declared task roles** (`iam_roles:`) — opt-in per-service IAM instead of one shared task role every service inherits; the shared `${project}-task` role stays exactly as it was for anything that doesn't opt in ([details](#declared-task-roles--per-service-iam-instead-of-one-shared-role))
 - **IMDS hardening on EC2 capacity** — IMDSv2 required on `aws_launch_template.ec2` by default, container-compatible hop limit, opt-in `ECS_AWSVPC_BLOCK_IMDS` ([details](#imds-hardening-on-ec2-container-instances))
+- **ENI-aware EC2 auto-sizing** — `autosize.py` treats awsvpc's one-ENI-per-task ceiling (`max_enis - 1` usable per instance, verified against the AWS API) as a third sizing dimension alongside CPU/memory, so a high-replica-count stack of small tasks can't under-provision instance count ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records

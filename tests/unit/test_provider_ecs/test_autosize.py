@@ -6,6 +6,7 @@ import pytest
 
 from remote_compose.provider.ecs.autosize import (
     EC2TaskDemand,
+    ENI_RESERVED_FOR_PRIMARY,
     InstanceShape,
     RESERVED_MEMORY_MIB,
     Sizing,
@@ -141,6 +142,104 @@ class TestCustomLadder:
             [EC2TaskDemand("x", cpu_units=2048, memory_mib=6144)], ladder=custom
         )
         assert sz.instance_type == "m5.large"
+
+
+class TestEniDensityConstraint:
+    """rc-e5u.25.1: awsvpc gives every EC2 task its own ENI, and without ENI
+    trunking (not viable for T3_LADDER -- see the T3_LADDER comment in
+    autosize.py) the number of tasks an instance can host is capped by
+    ``max_enis - ENI_RESERVED_FOR_PRIMARY``, not by cpu/memory. A pile of
+    tiny, high-replica-count tasks can therefore need more instances than
+    cpu/memory math alone would suggest."""
+
+    def test_eni_reservation_is_exactly_one(self):
+        """The instance's own primary ENI is the only ENI that's never
+        available to a task -- this is a fixed AWS platform fact rc's math
+        depends on, not a tunable, so pin it against regression."""
+        assert ENI_RESERVED_FOR_PRIMARY == 1
+
+    def test_high_replica_tiny_task_forces_extra_instances_on_t3_small(self):
+        """3 replicas of a tiny task (128 cpu / 128 MiB) fit t3.small by cpu
+        and memory with room to spare (desired=1 by those dimensions alone),
+        but t3.small has max_enis=3 -> usable_enis=2, so 3 concurrent awsvpc
+        tasks need ceil(3 * 1.2 / 2) = 2 instances."""
+        sz = auto_size(
+            [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=3)]
+        )
+        assert sz.instance_type == "t3.small"
+        assert sz.desired_size == 2
+
+    def test_eni_dimension_scales_with_replica_count_not_resource_size(self):
+        """Same tiny per-task footprint, more replicas -> more instances
+        needed, even though cpu/memory math alone would still say 1."""
+        sz = auto_size(
+            [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=5)]
+        )
+        assert sz.instance_type == "t3.small"
+        # ceil(5 * 1.2 / 2) = 3
+        assert sz.desired_size == 3
+
+    def test_larger_shape_has_more_usable_enis(self):
+        """t3.xlarge has max_enis=4 -> usable_enis=3, one more slot per
+        instance than the small/medium/large rungs (all usable_enis=2)."""
+        single_rung = [InstanceShape("t3.xlarge", vcpu=4, memory_gib=16, max_enis=4)]
+        sz = auto_size(
+            [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=7)],
+            ladder=single_rung,
+        )
+        # ceil(7 * 1.2 / 3) = 3; cpu/mem math alone would say 1.
+        assert sz.desired_size == 3
+
+    def test_custom_ladder_without_max_enis_skips_eni_dimension(self):
+        """A caller-supplied ladder that doesn't set max_enis (the default)
+        gets the pre-rc-e5u.25.1 behavior: cpu/memory only. This is the
+        documented escape hatch for custom ladders rc hasn't verified ENI
+        numbers for -- it must not silently apply T3 numbers to an
+        unrelated shape."""
+        custom = [InstanceShape("m5.large", vcpu=2, memory_gib=8)]  # max_enis=None
+        sz = auto_size(
+            [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=50)],
+            ladder=custom,
+        )
+        # cpu: ceil(128*50*1.2/2048) = 4. If the (unmodeled) ENI dimension
+        # were applied here it would demand many more instances than this.
+        assert sz.desired_size == 4
+
+    def test_total_task_count_includes_zero_resource_tasks(self):
+        """EC2 task-level cpu/memory are optional (unlike Fargate) -- a task
+        declaring cpu=0/memory=0 is filtered out of the cpu/memory sizing
+        math entirely (it falls into auto_size()'s "no demand" branch), but
+        it still launches an awsvpc task that consumes one ENI. The ENI
+        dimension must count it anyway."""
+        sz = auto_size(
+            [EC2TaskDemand("unbounded", cpu_units=0, memory_mib=0, replicas=5)]
+        )
+        assert sz.instance_type == "t3.small"
+        # ceil(5 * 1.2 / 2) = 3
+        assert sz.desired_size == 3
+
+    def test_max_cap_exactly_equal_to_eni_driven_desired_does_not_raise(self):
+        """The tightest boundary: max_cap set to exactly the ENI-driven
+        desired_size must still produce a valid min <= desired <= max
+        Sizing, not a false-positive raise."""
+        sz = auto_size(
+            [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=30)],
+            max_cap=18,
+        )
+        # ceil(30 * 1.2 / 2) = 18, exactly at the ceiling.
+        assert sz.min_size == 17
+        assert sz.desired_size == 18
+        assert sz.max_size == 18
+
+    def test_eni_driven_desired_exceeding_max_cap_raises(self):
+        """desired_size can never legally exceed max_size in a real ASG.
+        Silently clamping would under-provision exactly the capacity
+        auto_size() exists to guarantee, so this must raise loudly instead
+        of emitting a broken aws_autoscaling_group (min/desired > max)."""
+        with pytest.raises(ValueError, match="max_cap"):
+            auto_size(
+                [EC2TaskDemand("tiny", cpu_units=128, memory_mib=128, replicas=30)]
+            )
 
 
 class TestIntegrationShape:

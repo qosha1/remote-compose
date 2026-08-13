@@ -4002,7 +4002,25 @@ class ECSProvider(Provider):
 
         instance_type = user_cfg.get("instance_type")
         if instance_type is None:
-            sizing = auto_size(ec2_demands)
+            # Thread the user's explicit `max` through as auto_size()'s
+            # max_cap ceiling (default 10 when unset) rather than only
+            # applying it after the fact: auto_size() can now raise
+            # ValueError telling the user to "raise ec2_capacity.max" when
+            # declared EC2 task demand needs more instances than fit (see
+            # rc-e5u.25.1's ENI-density constraint, which made this
+            # reachable with an ordinary high-replica-count config) — that
+            # advice has to actually change what auto_size() computes, or
+            # it's a dead end.
+            try:
+                sizing = auto_size(ec2_demands, max_cap=user_cfg.get("max", 10))
+            except ValueError as exc:
+                # auto_size() raises bare ValueError (it's a standalone,
+                # provider-agnostic module with no ProviderConfigError
+                # dependency); every other user-input validation failure in
+                # this method raises ProviderConfigError, so re-wrap here
+                # rather than let a ValueError leak past this method's
+                # otherwise-consistent error type.
+                raise ProviderConfigError(str(exc)) from exc
             instance_type = sizing.instance_type
             min_size = user_cfg.get("min", sizing.min_size)
             desired_size = user_cfg.get("desired", sizing.desired_size)

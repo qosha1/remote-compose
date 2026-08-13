@@ -31,13 +31,17 @@ def _ctx(tmp_path: Path, services: dict, **ecs_cfg_overrides) -> DeployContext:
 
 
 def _svc(
-    name: str, launch_type: str | None = None, cpu: int = 512, memory: int = 1024
+    name: str,
+    launch_type: str | None = None,
+    cpu: int = 512,
+    memory: int = 1024,
+    replicas: int = 1,
 ) -> ServiceSpec:
     return ServiceSpec(
         name=name,
         cpu=cpu,
         memory=memory,
-        replicas=1,
+        replicas=replicas,
         type="application",
         launch_type=launch_type,
     )
@@ -236,6 +240,68 @@ class TestAutoSizing:
         assert 'instance_type = "t3.large"' in cap
         # multiple instances needed to cover sum with headroom
         assert "desired_capacity    =" in cap
+
+    def test_high_replica_tiny_task_hits_eni_ceiling_not_cpu_mem(self, tmp_path):
+        """rc-e5u.25.1: a single tiny-footprint service with many replicas
+        needs more instances than cpu/memory demand alone would suggest,
+        because awsvpc caps t3.small at 2 usable task ENIs (max_enis=3, one
+        reserved for the instance's own primary ENI). By cpu/memory alone
+        this would size to a single t3.small instance; the ENI ceiling
+        forces desired_capacity up instead."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc(
+                    "worker", launch_type="EC2", cpu=128, memory=128, replicas=5
+                ),
+            },
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert 'instance_type = "t3.small"' in cap
+        # ceil(5 replicas * 1.2 headroom / 2 usable ENIs) = 3 instances,
+        # not the 1 that cpu/memory math alone (128 cpu / 128 MiB) implies.
+        assert "desired_capacity    = 3" in cap
+
+    def test_ec2_capacity_max_too_small_for_eni_demand_raises(self, tmp_path):
+        """`ec2_capacity.max` is threaded into auto_size() as its max_cap
+        ceiling, not just applied to the rendered ASG after the fact — so
+        when declared demand needs more instances than that ceiling allows,
+        emit_terraform must fail loudly instead of rendering an invalid
+        aws_autoscaling_group (desired_capacity > max_size)."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc(
+                    "worker", launch_type="EC2", cpu=128, memory=128, replicas=30
+                ),
+            },
+            ec2_capacity={"max": 5},
+        )
+        with pytest.raises(ProviderConfigError, match="ec2_capacity"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+    def test_raising_ec2_capacity_max_resolves_the_eni_ceiling(self, tmp_path):
+        """The ValueError's advice ("raise ec2_capacity.max") has to
+        actually work: bumping `max` high enough for the same 30-replica
+        demand that failed above must let auto_size() succeed."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc(
+                    "worker", launch_type="EC2", cpu=128, memory=128, replicas=30
+                ),
+            },
+            ec2_capacity={"max": 20},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert 'instance_type = "t3.small"' in cap
+        # ceil(30 * 1.2 / 2) = 18, within the raised max_cap=20.
+        assert "desired_capacity    = 18" in cap
+        assert "max_size            = 20" in cap
 
 
 class TestDefaultLaunchTypeValidation:
