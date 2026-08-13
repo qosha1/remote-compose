@@ -1,4 +1,4 @@
-{%- if not existing_alb -%}
+{%- if alb_makes_own_sg -%}
 resource "aws_security_group" "alb" {
   name        = "${var.project}-alb"
   description = "Allow public HTTP(S) into the load balancer."

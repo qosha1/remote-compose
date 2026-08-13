@@ -583,6 +583,53 @@ class ECSProvider(Provider):
                 "'https_listener_arn' (the live ALB + its HTTPS listener)"
             )
 
+        # Adopt-and-own ALB (rc-v4c): unlike existing_alb (pure read-only
+        # reference — a data source rc never creates/updates/destroys),
+        # adopt_owned.alb emits a real aws_lb/aws_lb_listener *resource* for
+        # a foreign ALB, imported once via terraform import, so rc actually
+        # holds delete/update authority afterward. The forcing case: a live
+        # ALB whose CloudFormation (or other prior-IaC) stack must be
+        # retired, but rc's own services already depend on that ALB.
+        #
+        # A blanket `lifecycle { ignore_changes = all }` on the adopted
+        # resources means rc never diffs their live attributes against what
+        # it would render from scratch — the adopted ALB's real name/SGs
+        # almost never match rc's `${project}-alb` conventions, and forcing
+        # that convention would replace (destroy) the live, traffic-serving
+        # ALB. rc owns the resource for lifecycle (import/destroy) purposes
+        # only, not for day-to-day config drift correction. Coarser than
+        # ideal — same documented tradeoff as ignore_task_definition_changes
+        # (rc-uky tracks field-level ownership as a general follow-up).
+        adopt_owned_cfg = ecs_cfg.get("adopt_owned") or {}
+        adopt_owned_alb_cfg = adopt_owned_cfg.get("alb") or {}
+        adopt_owned_alb = bool(adopt_owned_alb_cfg)
+        adopt_owned_alb_arn = adopt_owned_alb_cfg.get("arn")
+        adopt_owned_alb_http_listener_arn = adopt_owned_alb_cfg.get("http_listener_arn")
+        adopt_owned_alb_https_listener_arn = adopt_owned_alb_cfg.get(
+            "https_listener_arn"
+        )
+        adopt_owned_alb_security_group_ids = list(
+            adopt_owned_alb_cfg.get("security_group_ids") or []
+        )
+        if adopt_owned_alb and existing_alb:
+            raise ProviderConfigError(
+                "provider_config.ecs.adopt_owned.alb and existing_alb are "
+                "mutually exclusive — adopt_owned OWNS the ALB's lifecycle "
+                "(imports it into terraform state, rc can update/destroy "
+                "it); existing_alb only REFERENCES it read-only. Pick one."
+            )
+        if adopt_owned_alb and not (
+            adopt_owned_alb_arn
+            and adopt_owned_alb_http_listener_arn
+            and adopt_owned_alb_security_group_ids
+        ):
+            raise ProviderConfigError(
+                "provider_config.ecs.adopt_owned.alb requires 'arn', "
+                "'http_listener_arn', and a non-empty 'security_group_ids' "
+                "(the live ALB + its HTTP listener + the security groups "
+                "already attached to it)"
+            )
+
         # Existing Cloud Map namespace (rc-adopt, D5): register services into a
         # live private DNS namespace instead of creating `<project>.local`. For
         # adopt-in-place where peers already resolve the existing names — e.g.
@@ -689,6 +736,26 @@ class ECSProvider(Provider):
         # is empty, every template below renders nothing, and the emitted
         # terraform is byte-identical to before this existed.
         network_cfg, repositories_cfg = _parse_declared_network(ctx)
+        if adopt_owned_alb:
+            # network_plan._resolve_sources' "alb" ref today only knows how
+            # to fan out over existing_alb's data-source security groups or
+            # rc's own aws_security_group.alb — neither exists in
+            # adopt_owned mode (literal foreign ids instead). Fail loud
+            # rather than silently emit a dangling reference; not needed by
+            # the browser-mgr forcing case, follow-up if it's ever needed.
+            _alb_ref_users = [
+                sg_name
+                for sg_name, sg in network_cfg.security_groups.items()
+                for rule in (*sg.ingress, *sg.egress)
+                if rule.ref.kind == "alb"
+            ]
+            if _alb_ref_users:
+                raise ProviderConfigError(
+                    "provider_config.ecs.adopt_owned.alb does not yet "
+                    "support network.security_groups rules that reference "
+                    f"'alb' as a source (used by: {sorted(set(_alb_ref_users))}). "
+                    "Remove the 'alb' ref or use existing_alb instead."
+                )
         service_sg_refs = {
             name: [
                 f"aws_security_group.rc_{tf_ident(sg)}.id"
@@ -716,7 +783,9 @@ class ECSProvider(Provider):
                 if getattr(s, "subnet_group", None)
             },
             public_services={n: s.port for n, s in ctx.services.items() if s.public},
-            has_alb=any(s.public for s in ctx.services.values()) or existing_alb,
+            has_alb=any(s.public for s in ctx.services.values())
+            or existing_alb
+            or adopt_owned_alb,
         )
         # Names that collide with resources rc already creates fail at apply,
         # not at validate, so catch them here where the service set is known.
@@ -789,12 +858,27 @@ class ECSProvider(Provider):
         # they don't branch on existing_alb. In create mode they're the
         # original resource references (byte-identical output); in adopt mode
         # they point at the data sources emitted by alb.tf.j2.
+        alb_security_groups_ref = "[aws_security_group.alb.id]"
         if existing_alb:
             alb_dns_ref = "data.aws_lb.main.dns_name"
             alb_zone_ref = "data.aws_lb.main.zone_id"
             https_listener_ref = "data.aws_lb_listener.https.arn"
             # tasks SG ingress: from the existing ALB's own security groups.
             tasks_alb_ingress_ref = "data.aws_lb.main.security_groups"
+        elif adopt_owned_alb:
+            # aws_lb.main is a real (imported) resource here too, so these
+            # resolve identically to create-mode's syntax — only the
+            # security-group source differs (literal foreign ids; rc
+            # creates no aws_security_group.alb for an adopted ALB).
+            alb_dns_ref = "aws_lb.main.dns_name"
+            alb_zone_ref = "aws_lb.main.zone_id"
+            https_listener_ref = "aws_lb_listener.https.arn"
+            alb_security_groups_ref = (
+                "["
+                + ", ".join(f'"{sg}"' for sg in adopt_owned_alb_security_group_ids)
+                + "]"
+            )
+            tasks_alb_ingress_ref = alb_security_groups_ref
         else:
             alb_dns_ref = "aws_lb.main.dns_name"
             alb_zone_ref = "aws_lb.main.zone_id"
@@ -1179,6 +1263,35 @@ class ECSProvider(Provider):
                     "launch-type services (they reference the rc-created ALB "
                     "security group, which an adopted ALB does not emit)"
                 )
+        # adopt_owned.alb DOES own the listener (a real, imported resource),
+        # so unlike existing_alb it can set its own default_action — no
+        # domain-per-service restriction needed. It still emits no
+        # aws_security_group.alb (literal foreign ids instead), so the EC2
+        # capacity restriction still applies.
+        if adopt_owned_alb:
+            # Mirrors _resolve_domain's all_domains truthiness check —
+            # domain_info itself isn't computed until later, but every
+            # input it depends on is already known here.
+            _will_have_domain = bool(
+                domained_services
+                or alias_hostnames
+                or ecs_cfg.get("domain")
+                or (ctx.rc_yml_v2 or {}).get("domain")
+            )
+            if _will_have_domain and not adopt_owned_alb_https_listener_arn:
+                raise ProviderConfigError(
+                    "provider_config.ecs.adopt_owned.alb requires "
+                    "'https_listener_arn' when any service declares a "
+                    "domain (TLS terminates on the adopted ALB's HTTPS "
+                    "listener, which rc must own to add per-service rules)"
+                )
+            if has_ec2_service:
+                raise ProviderConfigError(
+                    "provider_config.ecs.adopt_owned.alb is not supported "
+                    "with EC2 launch-type services yet (they reference the "
+                    "rc-created ALB security group, which adopt_owned.alb "
+                    "replaces with literal foreign ids)"
+                )
         # has_efs drives the EFS template (security group, file system,
         # mount targets, access points). True for either persistent OR
         # dev-mode source mounts since both need the same EFS plumbing.
@@ -1464,6 +1577,9 @@ class ECSProvider(Provider):
             "public_subnet_idx_ref": public_subnet_idx_ref,
             "private_subnet_ids_ref": private_subnet_ids_ref,
             "existing_alb": existing_alb,
+            "adopt_owned_alb": adopt_owned_alb,
+            "alb_security_groups_ref": alb_security_groups_ref,
+            "alb_makes_own_sg": not existing_alb and not adopt_owned_alb,
             "existing_alb_arn": existing_alb_arn,
             "existing_alb_https_listener_arn": existing_alb_https_listener_arn,
             "existing_cloud_map_namespace": existing_cloud_map_namespace,
@@ -1660,6 +1776,7 @@ class ECSProvider(Provider):
         runner.init()
         self._reconcile_orphan_log_groups(ctx, runner)
         self._reconcile_orphan_backup_bucket(ctx, runner)
+        self._reconcile_adopt_owned_alb(ctx, runner)
         runner.apply()
         outputs = runner.output()
 
@@ -2592,6 +2709,115 @@ class ECSProvider(Provider):
                 f"import: terraform -chdir={self._tf_dir(ctx)} import "
                 f"aws_s3_bucket.backups {bucket_name}"
             )
+
+    def _reconcile_adopt_owned_alb(
+        self,
+        ctx: DeployContext,
+        runner: TerraformRunner,
+    ) -> None:
+        """Import an adopted ALB + its listeners into terraform state.
+
+        Unlike _reconcile_orphan_log_groups / _reconcile_orphan_backup_bucket
+        (which import resources whose IDs rc derives itself — a log group
+        name from the cluster name, an S3 bucket name from rc.yml), the
+        resource ids here are foreign LITERALS the user supplies
+        (provider_config.ecs.adopt_owned.alb). That changes the failure
+        mode: those reconcilers can safely no-op when the AWS probe finds
+        nothing ("terraform will create it fresh on apply" is a normal,
+        expected outcome for a self-derived id). Here, "the ARN the user
+        gave me isn't live" means MISCONFIGURATION — letting apply proceed
+        would have terraform CREATE A BRAND NEW ALB under this project's
+        name while the real, traffic-serving ALB is untouched and the
+        stack silently points nowhere useful. So: hard error, not a
+        silent skip.
+
+        Also unlike those two: there is no delete-and-recreate fallback on
+        import failure. This is live foreign prod infra (someone else's
+        ALB), not something rc can safely destroy and let terraform
+        rebuild — surface the failure and stop.
+        """
+        ecs_cfg = _ecs_cfg(ctx)
+        adopt_owned_alb_cfg = (ecs_cfg.get("adopt_owned") or {}).get("alb") or {}
+        if not adopt_owned_alb_cfg:
+            return
+
+        alb_arn = adopt_owned_alb_cfg["arn"]
+        http_listener_arn = adopt_owned_alb_cfg["http_listener_arn"]
+        https_listener_arn = adopt_owned_alb_cfg.get("https_listener_arn")
+
+        session = self.session_factory(ctx)
+        elbv2 = session.client("elbv2")
+
+        try:
+            resp = elbv2.describe_load_balancers(LoadBalancerArns=[alb_arn])
+            live_albs = resp.get("LoadBalancers", [])
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderConfigError(
+                f"provider_config.ecs.adopt_owned.alb: could not verify "
+                f"{alb_arn} is live — {type(exc).__name__}: {exc}"
+            ) from exc
+        if not live_albs:
+            raise ProviderConfigError(
+                f"provider_config.ecs.adopt_owned.alb.arn {alb_arn} is not "
+                f"a live ALB in this account/region. Refusing to proceed: "
+                f"apply would otherwise CREATE A NEW ALB under this "
+                f"project's name while any real ALB at that arn keeps "
+                f"serving traffic, untouched. Fix the arn, or remove "
+                f"adopt_owned.alb to create fresh."
+            )
+
+        listener_arns_to_check = [http_listener_arn] + (
+            [https_listener_arn] if https_listener_arn else []
+        )
+        try:
+            resp = elbv2.describe_listeners(ListenerArns=listener_arns_to_check)
+            live_listener_arns = {
+                listener["ListenerArn"] for listener in resp.get("Listeners", [])
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderConfigError(
+                f"provider_config.ecs.adopt_owned.alb: could not verify "
+                f"listener(s) {listener_arns_to_check} are live — "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        missing = [a for a in listener_arns_to_check if a not in live_listener_arns]
+        if missing:
+            raise ProviderConfigError(
+                f"provider_config.ecs.adopt_owned.alb: listener arn(s) "
+                f"{missing} are not live. Refusing to proceed — same "
+                f"reasoning as the ALB check above."
+            )
+
+        imports = [
+            ("aws_lb.main", alb_arn),
+            ("aws_lb_listener.http", http_listener_arn),
+        ]
+        if https_listener_arn:
+            imports.append(("aws_lb_listener.https", https_listener_arn))
+
+        for address, resource_id in imports:
+            try:
+                runner.import_resource(address, resource_id)
+                self._emit(
+                    f"imported adopt_owned ALB resource {address} "
+                    f"({resource_id}) into terraform state"
+                )
+            except TerraformError as exc:
+                msg = ((exc.stderr or "") + (exc.stdout or "")).lower()
+                already_managed_signals = (
+                    "already managed",
+                    "is already managing",
+                    "already exists in state",
+                )
+                if any(s in msg for s in already_managed_signals):
+                    self._emit(
+                        f"  ✓ {address} already in terraform state — prior "
+                        f"'Error: Resource already managed' is "
+                        f"informational; deploy continues."
+                    )
+                    continue
+                # No safe fallback (see docstring) — surface and stop.
+                raise
 
     # Service-type rollout priority (rc-e5u.46.5). Force-rolls in this order
     # on first deploys so workers + proxies don't race their dependencies on

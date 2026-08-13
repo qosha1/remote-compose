@@ -19,12 +19,24 @@ resource "aws_lb" "main" {
   name               = length("${var.project}-alb") <= 32 ? "${var.project}-alb" : "${substr(var.project, 0, 19)}-${substr(md5(var.project), 0, 8)}"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
+  security_groups    = {{ alb_security_groups_ref }}
   subnets            = {{ public_subnet_ids_ref }}
   # Connection idle timeout (provider_config.ecs.idle_timeout; default 60 = AWS
   # default). Raise for long-lived connections (WebSockets/SSE/streaming) so the
   # LB doesn't drop the socket mid-stream.
   idle_timeout       = {{ alb_idle_timeout }}
+{%- if adopt_owned_alb %}
+
+  # Adopted from a foreign stack (provider_config.ecs.adopt_owned.alb) —
+  # imported via terraform import, not created here. rc owns this ALB's
+  # lifecycle (update/destroy authority) but deliberately never diffs its
+  # live attributes against what rc would render from scratch: the name
+  # above almost never matches the adopted ALB's real name, and forcing it
+  # would replace (destroy) a traffic-serving ALB.
+  lifecycle {
+    ignore_changes = all
+  }
+{%- endif %}
 }
 
 {%- if not default_target_has_own_tg %}
@@ -83,6 +95,12 @@ resource "aws_lb_listener" "http" {
       status_code = "HTTP_301"
     }
   }
+{%- if adopt_owned_alb %}
+
+  lifecycle {
+    ignore_changes = all
+  }
+{%- endif %}
 }
 
 resource "aws_lb_listener" "https" {
@@ -100,6 +118,12 @@ resource "aws_lb_listener" "https" {
     type             = "forward"
     target_group_arn = local.default_target_group_arn
   }
+{%- if adopt_owned_alb %}
+
+  lifecycle {
+    ignore_changes = all
+  }
+{%- endif %}
 }
 {%- endif %}
 
@@ -157,6 +181,12 @@ resource "aws_lb_listener" "http" {
     type             = "forward"
     target_group_arn = local.default_target_group_arn
   }
+{%- if adopt_owned_alb %}
+
+  lifecycle {
+    ignore_changes = all
+  }
+{%- endif %}
 }
 {%- endif %}
 {%- endif %}
