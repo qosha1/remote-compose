@@ -448,22 +448,26 @@ def _ec2_mixed_ctx(tmp_path):
 @requires_terraform
 class TestEc2LaunchTypeHclValidates:
     """rc-e5u.25.3: terraform-validate coverage for the EC2 launch_type
-    path (parent bug: rc-e5u.25 -- capacity.tf.j2 hardcodes the EC2 ASG
-    into private subnets with no NAT/public-IP path, unlike the Fargate
+    path (parent bug: rc-e5u.25 -- capacity.tf.j2 used to hardcode the EC2
+    ASG into private subnets with no NAT/public-IP path, unlike the Fargate
     placement logic in services.tf.j2).
 
     IMPORTANT: `terraform validate` is a static, offline schema/reference
-    check -- it never contacts AWS and has no notion of subnet routing.
-    It CANNOT catch "ASG placed in a private subnet with no NAT gateway,
-    so instances never reach the internet to register with ECS" -- that is
-    a runtime reachability failure, only observable via `apply` or by
-    reading the HCL. Both tests below are confirmed (as of this writing,
-    pre-rc-e5u.25.5 fix) to PASS `terraform validate` even though the
-    underlying stack is non-functional. Do not read a green run here as
-    "the EC2 path works" -- it only means the HCL is syntactically and
-    referentially valid. The structural assertions alongside each
-    `validate()` call pin the current (broken) shape so that rc-e5u.25.5's
-    fix is forced to touch this file.
+    check -- it never contacts AWS and has no notion of subnet routing. It
+    CANNOT catch "ASG placed in a private subnet with no NAT gateway, so
+    instances never reach the internet to register with ECS" -- that is a
+    runtime reachability failure, only observable via `apply` or by reading
+    the HCL. A green run here means the HCL is syntactically and
+    referentially valid, not that the stack is reachable -- the structural
+    assertion below (`test_default_launch_type_ec2_asg_reaches_internet_via_public_ip`)
+    is what pins the actual placement shape.
+
+    rc-e5u.25.5 fixed this: the EC2 ASG now gets the same
+    default_subnet_placement-aware placement (public subnets +
+    associate_public_ip_address, locked-down SG) that Fargate task ENIs
+    already got from rc-0cv. See capacity.tf.j2's network_interfaces block
+    and provider.py's reuse of default_placement_subnets_ref /
+    default_placement_assign_public_ip for the EC2 capacity_cfg.
     """
 
     def test_default_launch_type_ec2_module_passes_terraform_validate(self, tmp_path):
@@ -474,28 +478,39 @@ class TestEc2LaunchTypeHclValidates:
         runner.init(backend=False)
         runner.validate()
 
-    def test_default_launch_type_ec2_asg_has_no_route_to_internet(self, tmp_path):
-        """rc-e5u.25: pins the current bug. The ASG sits in the same
-        private-subnet list Fargate tasks use, and network.tf never
-        provisions a NAT gateway -- so instances launched here have no
-        path to the ECS control plane. `terraform validate` is silent
-        about this because it is a routing/reachability fact, not a
-        schema violation. When rc-e5u.25.5 adds a NAT gateway or a
-        public-IP path for the ASG, this assertion must be updated
-        (that's the point: it forces a conscious change here)."""
+    def test_default_launch_type_ec2_asg_reaches_internet_via_public_ip(self, tmp_path):
+        """rc-e5u.25.5: with no explicit default_subnet_placement, the ASG
+        lands in the public subnets (rc-0cv's default) with
+        associate_public_ip_address = true, mirroring how Fargate tasks with
+        no subnet_group get assign_public_ip = true in services.tf.j2. No
+        NAT gateway is needed for this path -- the instances reach the ECS
+        control plane / ECR / CloudWatch directly, the same "public subnets
+        + locked-down SG" tradeoff Fargate placement already made (SG only
+        allows inbound from the ALB SG + self, so the public IP is an
+        egress path, not an exposure)."""
         ctx = _ec2_default_launch_type_ctx(tmp_path)
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         capacity_tf = (out / "capacity.tf").read_text()
         network_tf = (out / "network.tf").read_text()
-        assert "vpc_zone_identifier = aws_subnet.private[*].id" in capacity_tf
+        assert "vpc_zone_identifier = aws_subnet.public[*].id" in capacity_tf
         assert "aws_nat_gateway" not in network_tf
-        # rc-e5u.25.5's eventual fix (associate_public_ip_address) requires
-        # wrapping the top-level vpc_security_group_ids in a
-        # network_interfaces block on aws_launch_template.ec2 -- neither
-        # exists yet.
-        assert "network_interfaces" not in capacity_tf
-        assert "vpc_security_group_ids = [aws_security_group.ec2_instances.id]" in (
+        # vpc_security_group_ids moved inside network_interfaces -- the AWS
+        # provider rejects a launch template that sets both.
+        assert "network_interfaces {" in capacity_tf
+        assert "associate_public_ip_address = true" in capacity_tf
+        # device_index / delete_on_termination are schema-optional but set
+        # explicitly here to remove reliance on RunInstances-time ENI
+        # defaulting -- whether that defaulting would behave the same is a
+        # runtime AWS API question `terraform validate` cannot confirm
+        # either way.
+        assert "device_index                = 0" in capacity_tf
+        assert "delete_on_termination       = true" in capacity_tf
+        assert (
+            "security_groups             = [aws_security_group.ec2_instances.id]"
+            in (capacity_tf)
+        )
+        assert "vpc_security_group_ids = [aws_security_group.ec2_instances.id]" not in (
             capacity_tf
         )
 

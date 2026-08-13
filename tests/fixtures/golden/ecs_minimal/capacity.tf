@@ -62,7 +62,7 @@ resource "aws_security_group" "ec2_instances" {
 resource "aws_launch_template" "ec2" {
   name_prefix   = "${var.project}-ec2-"
   image_id      = data.aws_ssm_parameter.ecs_ami.value
-  instance_type = "t3.small"
+  instance_type = "t3.medium"
 
   iam_instance_profile {
     name = aws_iam_instance_profile.ec2_instance.name
@@ -92,7 +92,34 @@ resource "aws_launch_template" "ec2" {
     http_put_response_hop_limit = 2
   }
 
-  vpc_security_group_ids = [aws_security_group.ec2_instances.id]
+  # Placement mirrors Fargate task ENIs (services.tf.j2's network_configuration
+  # block): public subnets + a locked-down SG by default, so instances can
+  # reach the ECS control plane / ECR / CloudWatch without a NAT gateway
+  # (~$0.045/hr saved). aws_security_group.ec2_instances only allows inbound
+  # from the ALB SG + self, so a public IP here is an egress path, not an
+  # exposure. Follows provider_config.ecs.default_subnet_placement (rc-0cv);
+  # set it to "private" for the NAT/no-public-IP variant.
+  #
+  # associate_public_ip_address only takes effect inside a network_interfaces
+  # block, which is why the security group -- vpc_security_group_ids at the
+  # launch-template top level -- has to move down here instead: the AWS
+  # provider rejects a launch template that sets both.
+  #
+  # device_index and delete_on_termination are both schema-optional (the AWS
+  # provider accepts this block without them) -- but whether the ASG's
+  # RunInstances call behaves the same with them unset is a runtime API
+  # question `terraform validate` cannot confirm either way (offline, no AWS
+  # calls). Set both explicitly to remove the ambiguity rather than lean on
+  # unverified defaulting: device_index = 0 marks this the primary (and only)
+  # ENI, and delete_on_termination = true keeps a terminated/scaled-in
+  # instance from leaking an orphaned ENI that rc's reap path would
+  # otherwise miss.
+  network_interfaces {
+    associate_public_ip_address = true
+    device_index                = 0
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.ec2_instances.id]
+  }
 
   user_data = base64encode(<<-EOT
     #!/bin/bash
@@ -109,10 +136,10 @@ resource "aws_launch_template" "ec2" {
 
 resource "aws_autoscaling_group" "ec2" {
   name                = "${var.project}-ec2-asg"
-  vpc_zone_identifier = aws_subnet.private[*].id
+  vpc_zone_identifier = aws_subnet.public[*].id
   min_size            = 1
-  max_size            = 4
-  desired_capacity    = 2
+  max_size            = 2
+  desired_capacity    = 1
   launch_template {
     id      = aws_launch_template.ec2.id
     version = "$Latest"

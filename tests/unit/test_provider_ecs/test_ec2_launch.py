@@ -229,8 +229,11 @@ class TestAutoSizing:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         cap = (out / "capacity.tf").read_text()
-        # largest single task = 2048/4096 → t3.medium
-        assert 'instance_type = "t3.medium"' in cap
+        # largest single task = 2048 CPU / 4096 MiB. 4096 MiB is t3.medium's
+        # full nominal memory, and autosize reserves headroom for the ECS
+        # agent + OS (see RESERVED_MEMORY_MIB in autosize.py), so t3.medium
+        # no longer has enough allocatable memory and this bumps to t3.large.
+        assert 'instance_type = "t3.large"' in cap
         # multiple instances needed to cover sum with headroom
         assert "desired_capacity    =" in cap
 

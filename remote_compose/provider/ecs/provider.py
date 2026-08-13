@@ -1570,6 +1570,20 @@ class ECSProvider(Provider):
             if has_ec2_service
             else None
         )
+        if ec2_capacity_cfg is not None:
+            # rc-e5u.25.5: the ASG's instances get the same placement a
+            # Fargate task ENI gets when its service declares no explicit
+            # subnet_group -- default_placement_subnets_ref /
+            # default_placement_assign_public_ip (rc-0cv's
+            # default_subnet_placement, "public" unless overridden), reused
+            # rather than duplicated. Capacity has no per-service subnet_group
+            # equivalent to follow: subnet_group is a per-*service* knob and
+            # one ASG can host many services, potentially declaring different
+            # groups, so a declared `network:` block does not (yet) change
+            # where the ASG lands -- tracked as a follow-up rather than
+            # guessed at here.
+            ec2_capacity_cfg["subnets_ref"] = default_placement_subnets_ref
+            ec2_capacity_cfg["assign_public_ip"] = default_placement_assign_public_ip
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
         # not opted out via bucket_managed=false, terraform creates and
