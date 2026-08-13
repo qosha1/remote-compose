@@ -359,3 +359,166 @@ class TestSharedImageHclValidates:
         assert services_tf.count('resource "aws_ecr_repository" "django"') == 1
         assert 'resource "aws_ecr_repository" "celery_beat"' not in services_tf
         assert services_tf.count('resource "aws_ecs_task_definition"') == 3
+
+
+def _ec2_default_launch_type_ctx(tmp_path):
+    """rc-e5u.25.3: env-wide `default_launch_type: EC2`, no per-service
+    override. All 42 tests in test_ec2_launch.py only assert on rendered
+    .tf string content -- nothing runs `terraform validate` against this
+    shape. Mirrors the top-level `ecs_ctx` fixture (same two services) so
+    the only variable being exercised is the launch type."""
+    return DeployContext(
+        project="itest",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+                "default_launch_type": "EC2",
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/health",
+            ),
+            "api": ServiceSpec(name="api", cpu=512, memory=1024, type="application"),
+        },
+        secrets=[],
+    )
+
+
+def _ec2_mixed_ctx(tmp_path):
+    """rc-e5u.25.3: one FARGATE service + one EC2 service in the same
+    module, mirroring TestMixedMode.test_fargate_and_ec2_coexist_in_same_module
+    in tests/unit/test_provider_ecs/test_ec2_launch.py but run through real
+    terraform instead of string assertions."""
+    return DeployContext(
+        project="itest",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+                "ec2_capacity": {
+                    "capacity_type": "SPOT",
+                    "instance_type": "m5.large",
+                    "min": 1,
+                    "max": 3,
+                    "desired": 2,
+                },
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            "web": ServiceSpec(
+                name="web",
+                cpu=256,
+                memory=512,
+                type="proxy",
+                public=True,
+                port=80,
+                health_check_path="/health",
+                launch_type="FARGATE",
+            ),
+            "worker": ServiceSpec(
+                name="worker",
+                cpu=512,
+                memory=1024,
+                type="worker",
+                launch_type="EC2",
+            ),
+        },
+        secrets=[],
+    )
+
+
+@requires_terraform
+class TestEc2LaunchTypeHclValidates:
+    """rc-e5u.25.3: terraform-validate coverage for the EC2 launch_type
+    path (parent bug: rc-e5u.25 -- capacity.tf.j2 hardcodes the EC2 ASG
+    into private subnets with no NAT/public-IP path, unlike the Fargate
+    placement logic in services.tf.j2).
+
+    IMPORTANT: `terraform validate` is a static, offline schema/reference
+    check -- it never contacts AWS and has no notion of subnet routing.
+    It CANNOT catch "ASG placed in a private subnet with no NAT gateway,
+    so instances never reach the internet to register with ECS" -- that is
+    a runtime reachability failure, only observable via `apply` or by
+    reading the HCL. Both tests below are confirmed (as of this writing,
+    pre-rc-e5u.25.5 fix) to PASS `terraform validate` even though the
+    underlying stack is non-functional. Do not read a green run here as
+    "the EC2 path works" -- it only means the HCL is syntactically and
+    referentially valid. The structural assertions alongside each
+    `validate()` call pin the current (broken) shape so that rc-e5u.25.5's
+    fix is forced to touch this file.
+    """
+
+    def test_default_launch_type_ec2_module_passes_terraform_validate(self, tmp_path):
+        ctx = _ec2_default_launch_type_ctx(tmp_path)
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        runner = TerraformRunner(out)
+        runner.init(backend=False)
+        runner.validate()
+
+    def test_default_launch_type_ec2_asg_has_no_route_to_internet(self, tmp_path):
+        """rc-e5u.25: pins the current bug. The ASG sits in the same
+        private-subnet list Fargate tasks use, and network.tf never
+        provisions a NAT gateway -- so instances launched here have no
+        path to the ECS control plane. `terraform validate` is silent
+        about this because it is a routing/reachability fact, not a
+        schema violation. When rc-e5u.25.5 adds a NAT gateway or a
+        public-IP path for the ASG, this assertion must be updated
+        (that's the point: it forces a conscious change here)."""
+        ctx = _ec2_default_launch_type_ctx(tmp_path)
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        capacity_tf = (out / "capacity.tf").read_text()
+        network_tf = (out / "network.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.private[*].id" in capacity_tf
+        assert "aws_nat_gateway" not in network_tf
+        # rc-e5u.25.5's eventual fix (associate_public_ip_address) requires
+        # wrapping the top-level vpc_security_group_ids in a
+        # network_interfaces block on aws_launch_template.ec2 -- neither
+        # exists yet.
+        assert "network_interfaces" not in capacity_tf
+        assert "vpc_security_group_ids = [aws_security_group.ec2_instances.id]" in (
+            capacity_tf
+        )
+
+    def test_mixed_fargate_and_ec2_module_passes_terraform_validate(self, tmp_path):
+        ctx = _ec2_mixed_ctx(tmp_path)
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        runner = TerraformRunner(out)
+        runner.init(backend=False)
+        runner.validate()
+
+    def test_mixed_module_both_launch_shapes_present(self, tmp_path):
+        """Sanity check alongside validate(): the FARGATE service keeps
+        launch_type, the EC2 service switches to capacity_provider_strategy,
+        and capacity.tf is populated -- same assertions as
+        TestMixedMode.test_fargate_and_ec2_coexist_in_same_module in the
+        unit suite, now proven against real terraform."""
+        ctx = _ec2_mixed_ctx(tmp_path)
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        services_tf = (out / "services.tf").read_text()
+        assert 'launch_type     = "FARGATE"' in services_tf
+        assert "capacity_provider_strategy" in services_tf
+        cap = (out / "capacity.tf").read_text()
+        assert cap.strip() != ""
+        assert "mixed_instances_policy" in cap  # SPOT capacity_type
