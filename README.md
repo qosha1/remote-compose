@@ -523,6 +523,91 @@ What holds regardless:
 The task *execution* role (`${project}-task-exec`, the one ECS itself uses to
 pull images and read secrets) is untouched by any of this.
 
+### default_launch_type — run every service on EC2 instead of Fargate
+
+Every service defaults to `launch_type: FARGATE`. Switch the whole
+environment to EC2-backed ECS with one key:
+
+```yaml
+provider_config:
+  ecs:
+    default_launch_type: EC2   # FARGATE (default) | EC2
+```
+
+A service's own `launch_type:` always wins over the default, so a mixed
+fleet — some services on EC2, some on Fargate — is just per-service
+overrides on top of the environment-wide default:
+
+```yaml
+provider_config:
+  ecs:
+    default_launch_type: EC2    # env-wide default
+
+services:
+  worker:
+    launch_type: EC2            # redundant with the default here, but explicit
+  web:
+    launch_type: FARGATE        # opts OUT of the EC2 default
+```
+
+Any service that resolves to EC2 (via the default or its own override) is
+scheduled through an `aws_ecs_capacity_provider` backed by an
+`aws_autoscaling_group` of `aws_launch_template.ec2` instances. rc only
+emits these into `capacity.tf` when at least one service actually needs
+them — an all-Fargate stack renders no extra resources there.
+
+Tune the ASG under `ec2_capacity`:
+
+```yaml
+provider_config:
+  ecs:
+    ec2_capacity:
+      instance_type: m5.xlarge   # no fixed default — omit to auto-size, see below
+      capacity_type: ON_DEMAND   # ON_DEMAND (default) | SPOT | MIXED
+      spot_weight: 3             # MIXED only; default 3
+      min: 1                     # default 1 when instance_type is set, else auto-sized
+      desired: 1                 # default 1 when instance_type is set, else auto-sized
+      max: 3                     # default 3 when instance_type is set, else auto-sized
+```
+
+- **`instance_type`** — the EC2 shape backing the ASG. No fixed default:
+  set it explicitly, or omit it to let rc auto-size (below).
+- **`capacity_type`** — `ON_DEMAND` (default), `SPOT`, or `MIXED`. `SPOT`
+  renders a `mixed_instances_policy` with `on_demand_base_capacity = 0`
+  (100% spot, `capacity-optimized` allocation). `MIXED` keeps one
+  on-demand instance as a floor (`on_demand_base_capacity = 1`) and fills
+  the rest with spot.
+- **`spot_weight`** — only consulted when `capacity_type: MIXED`. Feeds
+  `on_demand_percentage_above_base_capacity = 100 // (spot_weight + 1)`;
+  the default `3` works out to 25% on-demand / 75% spot above the
+  one-instance floor.
+- **`min` / `desired` / `max`** — ASG sizing. Any of the three you set
+  explicitly is honored as-is. Whichever you omit is filled in by
+  auto-sizing when `instance_type` is also omitted; otherwise the
+  fallback is `1` / `1` / `3`.
+- `ec2_capacity` is also where the IMDS hardening knobs (`imdsv2`,
+  `metadata_hop_limit`, `block_task_imds`) live — covered next.
+
+**Omitting `instance_type` triggers auto-sizing** (`autosize.py`): rc picks
+the smallest t3-family shape that fits the single largest EC2 task's
+CPU/memory request, then sizes the ASG to cover total EC2 task demand
+across three independent dimensions — CPU, memory, and awsvpc task ENIs —
+taking whichever needs the most instances. See [EC2 task density is capped
+by ENI limits, not just
+CPU/memory](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory)
+below for the ENI dimension's mechanics. `max` doubles as `auto_size()`'s
+hard cap (default ceiling `10`): declared EC2 demand that needs more
+instances than that raises a config error telling you to raise
+`ec2_capacity.max` rather than silently under-provisioning.
+
+EC2 instance placement (public vs. private subnets) is not a separate
+knob — the ASG follows the same environment-wide
+[`default_subnet_placement`](#what-rcyml-v2-looks-like) (`public` unless
+set to `private`) that a Fargate service with no `subnet_group:` gets.
+Capacity has no per-service equivalent: one ASG can host many services,
+potentially declaring different subnet groups, so a service's own
+`network:` block does not (yet) change where the ASG itself lands.
+
 ### IMDS hardening on EC2 container instances
 
 Only relevant when a service sets `launch_type: EC2`. Fargate tasks take their
@@ -640,6 +725,7 @@ What's built and live-verified on the `portable-deploy` branch:
 - **Declared network** (`network:`) — standalone, nameable security groups with default-deny ingress/egress, subnet groups with an explicit egress mode (`endpoints` / `nat` / `none`), and VPC endpoints; per-service `security_groups:` / `subnets:` that *replace* rc's defaults ([details](#declared-network--standalone-security-groups-private-subnets-vpc-endpoints))
 - **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
 - **Declared task roles** (`iam_roles:`) — opt-in per-service IAM instead of one shared task role every service inherits; the shared `${project}-task` role stays exactly as it was for anything that doesn't opt in ([details](#declared-task-roles--per-service-iam-instead-of-one-shared-role))
+- **`default_launch_type: EC2`** — environment-wide switch to schedule every service through an EC2-backed `aws_autoscaling_group` capacity provider instead of Fargate; per-service `launch_type:` always overrides it. `ec2_capacity` tunes instance type, on-demand/spot mix, and ASG sizing, auto-sized from declared task demand when `instance_type` is omitted ([details](#default_launch_type--run-every-service-on-ec2-instead-of-fargate))
 - **IMDS hardening on EC2 capacity** — IMDSv2 required on `aws_launch_template.ec2` by default, container-compatible hop limit, opt-in `ECS_AWSVPC_BLOCK_IMDS` ([details](#imds-hardening-on-ec2-container-instances))
 - **ENI-aware EC2 auto-sizing** — `autosize.py` treats awsvpc's one-ENI-per-task ceiling (`max_enis - 1` usable per instance, verified against the AWS API) as a third sizing dimension alongside CPU/memory, so a high-replica-count stack of small tasks can't under-provision instance count ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
