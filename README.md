@@ -150,12 +150,25 @@ provider_config:
     # By default rc creates its own VPC. Set vpc_id to deploy INTO an existing
     # one instead — use this when the stack must share a VPC + security group
     # with peer systems (so same-VPC SG references + Cloud Map DNS work, which
-    # cross-VPC peering can't replicate). All four keys are opt-in; omit them
+    # cross-VPC peering can't replicate). All keys below are opt-in; omit them
     # and behavior is unchanged.
     #   vpc_id: vpc-0abc123                       # adopt this VPC (vpc_cidr unused)
     #   public_subnet_ids: [subnet-a, subnet-b]   # >=2 AZs, PUBLIC (IGW route) —
     #                                             # ALB + Fargate (assign_public_ip)
     #   private_subnet_ids: [subnet-c, subnet-d]  # optional; defaults to public
+    #   default_subnet_placement: private         # public (default) | private —
+    #                                             # where a service with NO
+    #                                             # `subnet_group:` lands. Without
+    #                                             # this, private_subnet_ids above
+    #                                             # is threaded through but never
+    #                                             # actually used for placement;
+    #                                             # every service still gets a
+    #                                             # public IP unless it opts into
+    #                                             # the heavier `network:` block
+    #                                             # (which, in adopt mode, always
+    #                                             # carves a NEW subnet — it can't
+    #                                             # place a service on one you
+    #                                             # already own).
     #   security_group_ids: [sg-mesh]             # extra SGs attached to every
     #                                             # task (join an existing mesh)
     #   internet_gateway_id: igw-0abc             # only needed if a declared
@@ -168,6 +181,35 @@ provider_config:
     # mode rc creates NO VPC/IGW/subnets/route-tables and does NOT touch the
     # VPC's DHCP options, so cross-service discovery must use FQDNs
     # (<svc>.<project>.local) rather than short names.
+
+    # --- Adopting a foreign ALB (optional) -------------------------------------
+    # Two different modes, easy to reach for the wrong one:
+    #   existing_alb: rc REFERENCES a live ALB read-only — a data source it
+    #     never creates, updates, or destroys. Every public service must set
+    #     `domain:`; rc only adds host-based listener rules onto the existing
+    #     listener, never touches its default action.
+    #   adopt_owned.alb: rc OWNS the ALB's lifecycle — a real `aws_lb` resource,
+    #     imported once via terraform import, so rc holds update/destroy
+    #     authority afterward (the point: retiring whatever CloudFormation/other
+    #     stack used to own it). No domain-per-service restriction, since rc
+    #     owns the listener's default action too.
+    #   existing_alb:
+    #     arn: arn:aws:elasticloadbalancing:...:loadbalancer/app/NAME/ID
+    #     https_listener_arn: arn:aws:elasticloadbalancing:...:listener/.../...
+    #   adopt_owned:
+    #     alb:
+    #       arn: arn:aws:elasticloadbalancing:...:loadbalancer/app/NAME/ID
+    #       http_listener_arn: arn:aws:elasticloadbalancing:...:listener/.../...
+    #       https_listener_arn: arn:aws:elasticloadbalancing:...:listener/.../...  # only required if any service sets domain:
+    #       security_group_ids: [sg-abc, sg-def]  # the SGs already on the live ALB
+    # Mutually exclusive with each other. adopt_owned.alb sets
+    # `lifecycle { ignore_changes = all }` on the adopted resources — rc holds
+    # delete/update authority but deliberately never diffs their live attributes
+    # against what it would render from scratch (the adopted ALB's real name/SGs
+    # essentially never match rc's `${project}-alb` convention; forcing that
+    # would replace/destroy a traffic-serving ALB). Before apply, rc boto3-
+    # verifies the given ARNs are actually live and hard-errors if not — a bad
+    # ARN here would otherwise have terraform create a brand-new ALB instead.
 
     # --- App-IAM grants on the task role (optional) ---------------------------
     # rc emits ONE shared task role (aws_iam_role.task) for all services. By
@@ -538,6 +580,8 @@ What's built and live-verified on the `portable-deploy` branch:
 ### ECS provider — what terraform we generate
 
 - VPC + 2 public + 2 private subnets, IGW, security groups, default routing
+- **`default_subnet_placement`** — environment-wide default (public today, opt into private) for any service with no explicit `subnet_group:`, without needing the heavier declarative `network:` block
+- **`adopt_owned.alb`** — own a foreign ALB's terraform lifecycle (real resource + one-time `terraform import`), distinct from `existing_alb`'s read-only reference; the escape hatch for retiring a prior IaC tool (Copilot, hand-rolled CFN) that still owns a live, shared ALB
 - **Declared network** (`network:`) — standalone, nameable security groups with default-deny ingress/egress, subnet groups with an explicit egress mode (`endpoints` / `nat` / `none`), and VPC endpoints; per-service `security_groups:` / `subnets:` that *replace* rc's defaults ([details](#declared-network--standalone-security-groups-private-subnets-vpc-endpoints))
 - **Standalone ECR repos** (`repositories:`) — not tied to any service's build; for mirroring an upstream image into a NAT-free segment
 - **Declared task roles** (`iam_roles:`) — opt-in per-service IAM instead of one shared task role every service inherits; the shared `${project}-task` role stays exactly as it was for anything that doesn't opt in ([details](#declared-task-roles--per-service-iam-instead-of-one-shared-role))
