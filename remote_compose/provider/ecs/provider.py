@@ -118,6 +118,7 @@ def _service_placement_view(
     net_plan: NetworkPlan,
     default_subnets_ref: str,
     extra_security_group_ids: list[str],
+    default_assign_public_ip: bool = True,
 ) -> dict[str, Any]:
     """Resolve a service's subnets / security groups / public-IP for the task ENI.
 
@@ -128,7 +129,11 @@ def _service_placement_view(
     ``assign_public_ip`` is derived, never declared: it follows the placement
     subnet's routing. A private subnet with a public IP is a broken
     configuration AWS will happily accept and then silently fail to route, so
-    there is no switch here to get it wrong with.
+    there is no switch here to get it wrong with. For a service with no
+    explicit ``subnet_group``, that routing follows
+    ``provider_config.ecs.default_subnet_placement`` (rc-0cv) —
+    ``default_assign_public_ip`` is the caller-resolved answer for "public"
+    (default, True) vs "private" (False).
     """
     declared_sgs = list(getattr(spec, "security_groups", None) or [])
     subnet_group_name = getattr(spec, "subnet_group", None)
@@ -149,7 +154,7 @@ def _service_placement_view(
         assign_public_ip = group.public
     else:
         subnets_ref = default_subnets_ref
-        assign_public_ip = True
+        assign_public_ip = default_assign_public_ip
 
     return {
         "subnets_ref": subnets_ref,
@@ -564,6 +569,22 @@ class ECSProvider(Provider):
         if not private_subnet_ids:
             private_subnet_ids = public_subnet_ids
 
+        # rc-0cv: a service with no explicit subnet_group (the only opt-in
+        # today, and a heavier one — it requires the full network: block,
+        # which in existing-VPC mode always carves a BRAND NEW subnet, not
+        # an adopted one) always landed on public_subnet_ids with a public
+        # IP. There was no way to make "private by default" the environment-
+        # wide behavior even when the caller already threaded real, adopted
+        # private_subnet_ids through provider_config.ecs — e.g. every
+        # Foundry tenant service in start-simpli-api ran with a public IP
+        # solely because rc had no default to tell it otherwise (rc-0cv).
+        default_subnet_placement = ecs_cfg.get("default_subnet_placement", "public")
+        if default_subnet_placement not in {"public", "private"}:
+            raise ProviderConfigError(
+                "provider_config.ecs.default_subnet_placement must be "
+                f"'public' or 'private', got {default_subnet_placement!r}"
+            )
+
         # Existing-ALB adopt (rc-adopt, D4): reference a live ALB + its HTTPS
         # listener instead of creating one — for adopt-in-place of a stack
         # already fronted by an ALB (e.g. browser-mgr's Copilot ALB + the
@@ -723,6 +744,19 @@ class ECSProvider(Provider):
             public_subnet_first_ref = "aws_subnet.public[0].id"
             private_subnet_ids_ref = "aws_subnet.private[*].id"
             igw_id_ref = "aws_internet_gateway.main.id"
+
+        # rc-0cv: environment-wide default for services with no explicit
+        # subnet_group. "public" (default) is exactly today's behavior,
+        # byte-identical. "private" points every such service at the
+        # already-resolved private subnets instead — no separate feature to
+        # opt into, no risk of carving a duplicate subnet next to ones a
+        # parent stack already provisioned.
+        if default_subnet_placement == "private":
+            default_placement_subnets_ref = private_subnet_ids_ref
+            default_placement_assign_public_ip = False
+        else:
+            default_placement_subnets_ref = public_subnet_ids_ref
+            default_placement_assign_public_ip = True
 
         # --- Declared network (rc.yml `network:` / `repositories:`) ---------
         #
@@ -1182,8 +1216,9 @@ class ECSProvider(Provider):
                 _service_placement_view(
                     spec,
                     net_plan=net_plan,
-                    default_subnets_ref=public_subnet_ids_ref,
+                    default_subnets_ref=default_placement_subnets_ref,
                     extra_security_group_ids=extra_security_group_ids,
+                    default_assign_public_ip=default_placement_assign_public_ip,
                 )
             )
             svc_view.update(_service_role_view(spec, iam_plan=iam_plan))
