@@ -112,6 +112,60 @@ def _service_role_view(spec: Any, *, iam_plan: IamPlan) -> dict[str, Any]:
     }
 
 
+def _resolve_subnet_group_placement(
+    subnet_group_name: Optional[str],
+    *,
+    net_plan: NetworkPlan,
+    default_subnets_ref: str,
+    default_assign_public_ip: bool,
+    where: str,
+) -> dict[str, Any]:
+    """Resolve ``subnets_ref`` / ``assign_public_ip`` for a named subnet group.
+
+    Shared by ``_service_placement_view`` (a service's own ``subnet_group:``)
+    and the EC2 capacity ASG's ``ec2_capacity.subnet_group`` (rc-e5u.25.6) —
+    both need IDENTICAL semantics, so this is the one place that resolves a
+    declared name into placement, rather than two copies that could drift.
+
+    ``assign_public_ip`` is derived, never declared: it follows the placement
+    subnet's routing (``group.public``). A private subnet with a public IP is
+    a broken configuration AWS will happily accept and then silently fail to
+    route, so there is no switch here to get it wrong with.
+
+    With no ``subnet_group_name``, falls back to the caller-resolved
+    environment default — ``provider_config.ecs.default_subnet_placement``
+    (rc-0cv), "public" unless overridden.
+
+    An unknown name raises ``ProviderConfigError`` rather than letting
+    ``net_plan.subnet_group()``'s bare ``KeyError`` escape — ``where`` names
+    the offending knob (``"service 'web': subnet_group"`` vs
+    ``"provider_config.ecs.ec2_capacity.subnet_group"``) so the message
+    points at whichever caller triggered it. In the normal ``emit_terraform``
+    flow this branch is unreachable for both callers: the unknown-group case
+    is already caught earlier — services by ``validate_network_refs``,
+    ec2_capacity by the parallel check next to it — before ``net_plan`` is
+    even built. It stays here as a safety net for any caller that resolves
+    placement without going through that front door first.
+    """
+    if not subnet_group_name:
+        return {
+            "subnets_ref": default_subnets_ref,
+            "assign_public_ip": default_assign_public_ip,
+        }
+    try:
+        group = net_plan.subnet_group(subnet_group_name)
+    except KeyError:
+        known = sorted(g.name for g in net_plan.subnet_groups)
+        raise ProviderConfigError(
+            f"{where}: {subnet_group_name!r} does not name a declared "
+            f"network.subnets group (known: {known or 'none'})"
+        ) from None
+    return {
+        "subnets_ref": f"aws_subnet.{group.tf_name}[*].id",
+        "assign_public_ip": group.public,
+    }
+
+
 def _service_placement_view(
     spec: Any,
     *,
@@ -126,14 +180,9 @@ def _service_placement_view(
     and still being joined to the shared ``tasks`` group would defeat the
     point, since that group carries ALB ingress and blanket egress.
 
-    ``assign_public_ip`` is derived, never declared: it follows the placement
-    subnet's routing. A private subnet with a public IP is a broken
-    configuration AWS will happily accept and then silently fail to route, so
-    there is no switch here to get it wrong with. For a service with no
-    explicit ``subnet_group``, that routing follows
-    ``provider_config.ecs.default_subnet_placement`` (rc-0cv) —
-    ``default_assign_public_ip`` is the caller-resolved answer for "public"
-    (default, True) vs "private" (False).
+    Subnet placement itself is resolved by ``_resolve_subnet_group_placement``
+    — see its docstring for why ``assign_public_ip`` is derived rather than
+    declared.
     """
     declared_sgs = list(getattr(spec, "security_groups", None) or [])
     subnet_group_name = getattr(spec, "subnet_group", None)
@@ -148,18 +197,18 @@ def _service_placement_view(
         extras = "".join(f', "{sg}"' for sg in extra_security_group_ids)
         security_groups_ref = f"[aws_security_group.tasks.id{extras}]"
 
-    if subnet_group_name:
-        group = net_plan.subnet_group(subnet_group_name)
-        subnets_ref = f"aws_subnet.{group.tf_name}[*].id"
-        assign_public_ip = group.public
-    else:
-        subnets_ref = default_subnets_ref
-        assign_public_ip = default_assign_public_ip
+    placement = _resolve_subnet_group_placement(
+        subnet_group_name,
+        net_plan=net_plan,
+        default_subnets_ref=default_subnets_ref,
+        default_assign_public_ip=default_assign_public_ip,
+        where=f"service {getattr(spec, 'name', '?')!r}: subnet_group",
+    )
 
     return {
-        "subnets_ref": subnets_ref,
+        "subnets_ref": placement["subnets_ref"],
         "security_groups_ref": security_groups_ref,
-        "assign_public_ip": assign_public_ip,
+        "assign_public_ip": placement["assign_public_ip"],
         "declared_subnet_group": subnet_group_name,
         "declared_security_groups": declared_sgs,
     }
@@ -821,6 +870,27 @@ class ECSProvider(Provider):
             or existing_alb
             or adopt_owned_alb,
         )
+        # rc-e5u.25.6: ec2_capacity.subnet_group is a provider_config.ecs.*
+        # knob, not an rc.yml network: block field, so it lives outside
+        # validate_network_refs (config/_network_types.py has no business
+        # knowing about provider_config) — a parallel, consistently-styled
+        # check instead, catching a typo'd name here rather than letting
+        # net_plan.subnet_group() raise a bare KeyError once has_ec2_service
+        # is known. Checked unconditionally: a bad name is a bug whether or
+        # not any service actually resolves to EC2 launch_type.
+        ec2_capacity_subnet_group = (ecs_cfg.get("ec2_capacity") or {}).get(
+            "subnet_group"
+        )
+        if (
+            ec2_capacity_subnet_group is not None
+            and ec2_capacity_subnet_group not in network_cfg.subnets
+        ):
+            raise ProviderConfigError(
+                f"provider_config.ecs.ec2_capacity.subnet_group: "
+                f"{ec2_capacity_subnet_group!r} does not name a declared "
+                f"network.subnets group (known: "
+                f"{sorted(network_cfg.subnets) or 'none'})"
+            )
         # Names that collide with resources rc already creates fail at apply,
         # not at validate, so catch them here where the service set is known.
         check_reserved_names(
@@ -838,24 +908,46 @@ class ECSProvider(Provider):
         # apply time — it fails minutes into the rollout with an opaque
         # CannotPullContainerError. Check it while we can still name the
         # missing endpoint.
-        check_endpoint_reachability(
-            network_cfg,
-            placements=[
-                {
-                    "service": name,
-                    "subnet_group": getattr(spec, "subnet_group", None),
-                    "security_groups": list(
-                        getattr(spec, "security_groups", None) or []
-                    ),
-                    # Secrets are attached to every service's task def (see the
-                    # secrets fan-out below), so any stack-level secret means
-                    # every task needs to reach Secrets Manager.
-                    "needs_secrets": bool(ctx.secrets)
-                    or bool(getattr(spec, "env_from_secret", None)),
-                }
-                for name, spec in ctx.services.items()
-            ],
+        reachability_placements = [
+            {
+                "service": name,
+                "subnet_group": getattr(spec, "subnet_group", None),
+                "security_groups": list(getattr(spec, "security_groups", None) or []),
+                # Secrets are attached to every service's task def (see the
+                # secrets fan-out below), so any stack-level secret means
+                # every task needs to reach Secrets Manager.
+                "needs_secrets": bool(ctx.secrets)
+                or bool(getattr(spec, "env_from_secret", None)),
+            }
+            for name, spec in ctx.services.items()
+        ]
+        # rc-e5u.25.6: the EC2 capacity ASG's container instances, when
+        # placed via ec2_capacity.subnet_group, get their own synthetic
+        # placement in this same check — a container INSTANCE has to reach
+        # AWS services no Fargate task (or the task-shaped check above) needs
+        # to, just to register with the cluster at all. `has_ec2_service`
+        # isn't resolved until later in this method (it needs the per-service
+        # loop below), so this uses a deliberately cheap, tolerant peek at
+        # default_launch_type — the real, VALIDATED local of the same name is
+        # computed further down; re-ordering that validation earlier would
+        # change which error surfaces first for a config with two independent
+        # problems, which existing tests may pin.
+        _early_default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
+        any_ec2_service = any(
+            (spec.launch_type or _early_default_launch_type) == "EC2"
+            for spec in ctx.services.values()
         )
+        if any_ec2_service and ec2_capacity_subnet_group:
+            reachability_placements.append(
+                {
+                    "service": "ec2_capacity",
+                    "subnet_group": ec2_capacity_subnet_group,
+                    "security_groups": [],
+                    "needs_secrets": False,
+                    "is_ec2_capacity": True,
+                }
+            )
+        check_endpoint_reachability(network_cfg, placements=reachability_placements)
         # --- Declared task roles (rc.yml `iam_roles:`) -----------------------
         #
         # Opt-in per-service least privilege. The shared aws_iam_role.task is
@@ -1571,19 +1663,27 @@ class ECSProvider(Provider):
             else None
         )
         if ec2_capacity_cfg is not None:
-            # rc-e5u.25.5: the ASG's instances get the same placement a
+            # rc-e5u.25.5 gave the ASG's instances the same placement a
             # Fargate task ENI gets when its service declares no explicit
             # subnet_group -- default_placement_subnets_ref /
             # default_placement_assign_public_ip (rc-0cv's
-            # default_subnet_placement, "public" unless overridden), reused
-            # rather than duplicated. Capacity has no per-service subnet_group
-            # equivalent to follow: subnet_group is a per-*service* knob and
-            # one ASG can host many services, potentially declaring different
-            # groups, so a declared `network:` block does not (yet) change
-            # where the ASG lands -- tracked as a follow-up rather than
-            # guessed at here.
-            ec2_capacity_cfg["subnets_ref"] = default_placement_subnets_ref
-            ec2_capacity_cfg["assign_public_ip"] = default_placement_assign_public_ip
+            # default_subnet_placement, "public" unless overridden).
+            # rc-e5u.25.6 adds an opt-in on top: ec2_capacity.subnet_group
+            # points the ASG at a DECLARED network.subnets group instead,
+            # through the exact same resolver a service's own subnet_group:
+            # uses (_resolve_subnet_group_placement) -- see its docstring.
+            # Absent the knob (the common case), this is byte-identical to
+            # rc-e5u.25.5: subnet_group_name is None, so it falls straight
+            # through to the default_placement_* values above.
+            ec2_placement = _resolve_subnet_group_placement(
+                ec2_capacity_subnet_group,
+                net_plan=net_plan,
+                default_subnets_ref=default_placement_subnets_ref,
+                default_assign_public_ip=default_placement_assign_public_ip,
+                where="provider_config.ecs.ec2_capacity.subnet_group",
+            )
+            ec2_capacity_cfg["subnets_ref"] = ec2_placement["subnets_ref"]
+            ec2_capacity_cfg["assign_public_ip"] = ec2_placement["assign_public_ip"]
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
         # not opted out via bucket_managed=false, terraform creates and

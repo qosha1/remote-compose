@@ -942,7 +942,10 @@ def check_endpoint_reachability(
     ``CannotPullContainerError`` minutes into a rollout.
 
     ``placements`` entries: ``{"service", "subnet_group", "security_groups",
-    "needs_secrets"}``.
+    "needs_secrets"}``. An entry may also set ``"is_ec2_capacity": True`` for
+    the EC2 capacity ASG's synthetic placement (rc-e5u.25.6) — see the
+    no-security-groups branch below for why it gets its own message instead
+    of the task-shaped one.
     """
     for placement in placements:
         group_name = placement.get("subnet_group")
@@ -959,6 +962,47 @@ def check_endpoint_reachability(
         svc = placement["service"]
         sg_names = list(placement.get("security_groups") or [])
         if not sg_names:
+            if placement.get("is_ec2_capacity"):
+                # Unlike a service, ec2_capacity has no `security_groups:`
+                # override to declare in the first place — its instances
+                # always sit on the fixed ${project}-ec2-instances group
+                # (capacity.tf.j2), which is never a member of
+                # network.security_groups and so can never be admitted by a
+                # VPC endpoint's own security group (only a DECLARED group
+                # named in a 'to: endpoint:<name>' egress rule gets that
+                # admission — see this module's docstring). So this placement
+                # can never succeed today, regardless of which endpoints are
+                # declared: refuse unconditionally rather than let it look
+                # like a fixable "missing endpoint" case.
+                #
+                # A container INSTANCE also needs MORE than a task does, on
+                # top of that: the ECS agent has to poll
+                # com.amazonaws.<region>.{ecs, ecs-agent, ecs-telemetry} just
+                # to register with the cluster and be handed tasks at all —
+                # endpoints a Fargate task (or an EC2 task's own awsvpc ENI)
+                # never touches, because Fargate's control-plane traffic
+                # never transits the customer's VPC. Verified against
+                # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/vpc-endpoints.html
+                # ("Tasks using Fargate don't require the interface VPC
+                # endpoints for Amazon ECS" vs. the ecs-agent/ecs-telemetry/
+                # ecs trio listed under "Creating the VPC Endpoints for
+                # Amazon ECS").
+                raise ProviderConfigError(
+                    f"provider_config.ecs.ec2_capacity.subnet_group names "
+                    f"network.subnets.{group_name} (egress: {group.egress}, "
+                    f"so no default route), but the EC2 capacity ASG's "
+                    f"container instances sit on the fixed "
+                    f"${{project}}-ec2-instances security group — there is "
+                    f"no ec2_capacity knob to give them a declared one "
+                    f"today, so they can never be admitted by a VPC "
+                    f"endpoint's own security group. A container instance "
+                    f"also needs more than a task does just to register "
+                    f"with the cluster (com.amazonaws.<region>.ecs, "
+                    f"ecs-agent, and ecs-telemetry — none of which a "
+                    f"Fargate task needs). Point ec2_capacity.subnet_group "
+                    f"at a group with egress: nat, or a public group, "
+                    f"instead."
+                )
             raise ProviderConfigError(
                 f"service {svc!r} is placed in network.subnets.{group_name} "
                 f"(egress: {group.egress}, so no default route), but it has no "

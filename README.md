@@ -568,6 +568,7 @@ provider_config:
       min: 1                     # default 1 when instance_type is set, else auto-sized
       desired: 1                 # default 1 when instance_type is set, else auto-sized
       max: 3                     # default 3 when instance_type is set, else auto-sized
+      subnet_group: asg-private  # optional — a declared network.subnets group; see below
 ```
 
 - **`instance_type`** — the EC2 shape backing the ASG. No fixed default:
@@ -585,6 +586,16 @@ provider_config:
   explicitly is honored as-is. Whichever you omit is filled in by
   auto-sizing when `instance_type` is also omitted; otherwise the
   fallback is `1` / `1` / `3`.
+- **`subnet_group`** — place the ASG's instances in a DECLARED
+  [`network.subnets`](#what-rcyml-v2-looks-like) group instead of the
+  environment-wide `default_subnet_placement`. Resolved through the exact
+  same machinery a service's own `subnet_group:` uses: `assign_public_ip`
+  always follows the named group's routing (`public: true` → public IP,
+  `egress: nat` → none), never independently declared. This is also how
+  you get NAT-gateway egress for EC2 capacity — point it at a group with
+  `egress: nat`; declared groups already provision the real
+  `aws_nat_gateway` + route table. Omit it and nothing changes (see
+  below).
 - `ec2_capacity` is also where the IMDS hardening knobs (`imdsv2`,
   `metadata_hop_limit`, `block_task_imds`) live — covered next.
 
@@ -600,13 +611,29 @@ hard cap (default ceiling `10`): declared EC2 demand that needs more
 instances than that raises a config error telling you to raise
 `ec2_capacity.max` rather than silently under-provisioning.
 
-EC2 instance placement (public vs. private subnets) is not a separate
-knob — the ASG follows the same environment-wide
+With no `ec2_capacity.subnet_group`, EC2 instance placement (public vs.
+private subnets) follows the same environment-wide
 [`default_subnet_placement`](#what-rcyml-v2-looks-like) (`public` unless
-set to `private`) that a Fargate service with no `subnet_group:` gets.
-Capacity has no per-service equivalent: one ASG can host many services,
-potentially declaring different subnet groups, so a service's own
-`network:` block does not (yet) change where the ASG itself lands.
+set to `private`) that a Fargate service with no `subnet_group:` gets —
+byte-identical to before `ec2_capacity.subnet_group` existed. Set it to
+put the ASG on a declared group instead — the same one a service's own
+`subnet_group:` can name, or a dedicated group just for capacity. One ASG
+still hosts every EC2-launch-type service in the stack regardless of what
+each service's own `subnet_group:` says, so this only controls where the
+*instances* sit, not which services land on them.
+
+A declared group with `egress: endpoints` (VPC-endpoints-only, no default
+route) is refused at plan time for `ec2_capacity.subnet_group` today: the
+ASG's instances always sit on the fixed `${project}-ec2-instances`
+security group, which is never a member of `network.security_groups` and
+so can never be granted ingress by a VPC endpoint's own security group the
+way a service's own `security_groups:` override can. A container
+*instance* also has to reach more than a task does just to register with
+the cluster in the first place — the ECS agent polls
+`com.amazonaws.<region>.{ecs, ecs-agent, ecs-telemetry}`, none of which a
+Fargate task (or an EC2 task's own `awsvpc` ENI) ever needs, because
+Fargate's control-plane traffic never transits your VPC. Use `egress: nat`
+or a public group for `ec2_capacity.subnet_group` instead.
 
 ### IMDS hardening on EC2 container instances
 

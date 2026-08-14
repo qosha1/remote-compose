@@ -11,7 +11,9 @@ from remote_compose.provider.base import ProviderConfigError
 from remote_compose.provider.ecs import ECSProvider
 
 
-def _ctx(tmp_path: Path, services: dict, **ecs_cfg_overrides) -> DeployContext:
+def _ctx(
+    tmp_path: Path, services: dict, rc_yml_v2: dict | None = None, **ecs_cfg_overrides
+) -> DeployContext:
     ecs_cfg = {
         "region": "us-west-2",
         "cluster": "test-cluster",
@@ -21,7 +23,7 @@ def _ctx(tmp_path: Path, services: dict, **ecs_cfg_overrides) -> DeployContext:
     return DeployContext(
         project="myapp",
         compose_path=tmp_path / "docker-compose.yml",
-        rc_yml_v2={},
+        rc_yml_v2=rc_yml_v2 or {},
         provider_config={"ecs": ecs_cfg},
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
@@ -372,3 +374,139 @@ class TestImdsHardening:
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         assert "metadata_options" not in (out / "services.tf").read_text()
+
+
+class TestEc2CapacitySubnetGroup:
+    """rc-e5u.25.6: ec2_capacity.subnet_group opts the ASG's instances into a
+    DECLARED network.subnets group, through the same resolver
+    (_resolve_subnet_group_placement) a service's own subnet_group: uses.
+
+    Absent the knob, ec2_capacity keeps rc-e5u.25.5's
+    default_subnet_placement-derived behavior exactly -- covered by
+    test_golden.py (byte-identical fixture) and
+    test_default_subnet_placement.py, not repeated here.
+    """
+
+    def _ctx(self, tmp_path, network, ec2_capacity=None, **ecs_cfg_overrides):
+        return _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            rc_yml_v2={"network": network},
+            ec2_capacity=ec2_capacity or {},
+            **ecs_cfg_overrides,
+        )
+
+    def test_declared_public_group(self, tmp_path):
+        ctx = self._ctx(
+            tmp_path,
+            {"subnets": {"asg-public": {"public": True}}},
+            {"subnet_group": "asg-public"},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.rc_asg_public[*].id" in cap
+        assert "associate_public_ip_address = true" in cap
+
+    def test_declared_private_nat_group(self, tmp_path):
+        ctx = self._ctx(
+            tmp_path,
+            {"subnets": {"asg-nat": {"egress": "nat"}}},
+            {"subnet_group": "asg-nat"},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        network_declared = (out / "network_declared.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.rc_asg_nat[*].id" in cap
+        assert "associate_public_ip_address = false" in cap
+        assert "aws_nat_gateway" in network_declared
+
+    def test_declared_endpoints_group_is_rejected(self, tmp_path):
+        """A container instance's ${project}-ec2-instances security group is
+        never a member of network.security_groups, so it can never be
+        admitted by a VPC endpoint's own security group -- unlike a service,
+        ec2_capacity has no `security_groups:` override to fix this with.
+        Refuse unconditionally rather than let this look like a fixable
+        "missing endpoint" case (see network_plan.check_endpoint_reachability
+        for the AWS-doc citations on what a container instance additionally
+        needs -- ecs / ecs-agent / ecs-telemetry -- just to register)."""
+        ctx = self._ctx(
+            tmp_path,
+            {
+                # A declared group's egress rule is what keeps
+                # validate_network_refs' orphan-endpoint check (a separate,
+                # earlier guard) from firing -- it does NOT make the endpoint
+                # reachable from the ec2_instances SG the ASG actually uses,
+                # which is the gap under test here.
+                "security_groups": {"unused": {"egress": [{"to": "endpoint:ecs"}]}},
+                "subnets": {"asg-endpoints": {"egress": "endpoints"}},
+                "endpoints": {
+                    "ecs": {
+                        "services": ["ecs", "ecs-agent", "ecs-telemetry"],
+                        "subnets": ["asg-endpoints"],
+                    }
+                },
+            },
+            {"subnet_group": "asg-endpoints"},
+        )
+        with pytest.raises(ProviderConfigError) as exc:
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+        assert "ec2_capacity.subnet_group" in str(exc.value)
+        assert "ec2-instances" in str(exc.value)
+        assert "ecs-agent" in str(exc.value)
+
+    def test_undeclared_group_name_rejected(self, tmp_path):
+        ctx = self._ctx(
+            tmp_path,
+            {"subnets": {"asg-public": {"public": True}}},
+            {"subnet_group": "typo-dname"},
+        )
+        with pytest.raises(
+            ProviderConfigError, match="ec2_capacity.subnet_group"
+        ) as exc:
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+        assert "typo-dname" in str(exc.value)
+        assert "asg-public" in str(exc.value)  # names what IS known
+
+    def test_undeclared_group_name_rejected_even_with_no_network_block(self, tmp_path):
+        """No `network:` block at all -- known groups is 'none'."""
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2")},
+            ec2_capacity={"subnet_group": "nope"},
+        )
+        with pytest.raises(ProviderConfigError, match="known: none"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+    def test_absent_subnet_group_is_unaffected(self, tmp_path):
+        """No ec2_capacity.subnet_group -- falls straight through to
+        rc-e5u.25.5's default (public subnets, byte-identical)."""
+        ctx = self._ctx(
+            tmp_path,
+            {"subnets": {"asg-public": {"public": True}}},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.public[*].id" in cap
+
+    def test_absent_subnet_group_still_honors_default_subnet_placement_private(
+        self, tmp_path
+    ):
+        """No ec2_capacity.subnet_group, but default_subnet_placement:
+        private -- the fallback branch of _resolve_subnet_group_placement
+        must still route through rc-0cv's private default, not silently get
+        overwritten by the new resolver. Neither test_golden.py (public
+        default) nor test_default_subnet_placement.py (no EC2 service) would
+        catch a wiring mistake here."""
+        ctx = self._ctx(
+            tmp_path,
+            {"subnets": {"asg-public": {"public": True}}},
+            default_subnet_placement="private",
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.private[*].id" in cap
+        assert "associate_public_ip_address = false" in cap

@@ -468,6 +468,15 @@ class TestEc2LaunchTypeHclValidates:
     already got from rc-0cv. See capacity.tf.j2's network_interfaces block
     and provider.py's reuse of default_placement_subnets_ref /
     default_placement_assign_public_ip for the EC2 capacity_cfg.
+
+    rc-e5u.25.6 adds an opt-in on top: ec2_capacity.subnet_group points the
+    ASG at a DECLARED network.subnets group instead of the environment-wide
+    default -- see TestEc2CapacitySubnetGroupHclValidates below for that
+    path's terraform-validate coverage (public and private+nat groups; a
+    declared `egress: endpoints` group is refused before any .tf exists at
+    all, so it has no terraform-validate case -- see
+    tests/unit/test_provider_ecs/test_ec2_launch.py::
+    TestEc2CapacitySubnetGroup::test_declared_endpoints_group_is_rejected).
     """
 
     def test_default_launch_type_ec2_module_passes_terraform_validate(self, tmp_path):
@@ -537,3 +546,77 @@ class TestEc2LaunchTypeHclValidates:
         cap = (out / "capacity.tf").read_text()
         assert cap.strip() != ""
         assert "mixed_instances_policy" in cap  # SPOT capacity_type
+
+
+def _ec2_capacity_declared_subnet_ctx(tmp_path, *, network, subnet_group):
+    """rc-e5u.25.6: one EC2 service, ec2_capacity.subnet_group pointed at a
+    DECLARED network.subnets group."""
+    return DeployContext(
+        project="itest",
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={"network": network},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "itest-cluster",
+                "vpc_cidr": "10.0.0.0/16",
+                "ec2_capacity": {"subnet_group": subnet_group},
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            "worker": ServiceSpec(
+                name="worker",
+                cpu=512,
+                memory=1024,
+                type="worker",
+                launch_type="EC2",
+            ),
+        },
+        secrets=[],
+    )
+
+
+@requires_terraform
+class TestEc2CapacitySubnetGroupHclValidates:
+    """rc-e5u.25.6: ec2_capacity.subnet_group -- terraform-validate coverage
+    for the two placements that actually work today (a declared public
+    group, and a declared private+nat group). A declared `egress: endpoints`
+    group is refused by check_endpoint_reachability before any .tf file
+    exists (see network_plan.check_endpoint_reachability's is_ec2_capacity
+    branch, and the unit-test coverage in test_ec2_launch.py), so there is
+    no terraform-validate case for it -- confirmed by the unit test, not
+    repeated here."""
+
+    def test_declared_public_group_passes_terraform_validate(self, tmp_path):
+        ctx = _ec2_capacity_declared_subnet_ctx(
+            tmp_path,
+            network={"subnets": {"asg-public": {"public": True}}},
+            subnet_group="asg-public",
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        runner = TerraformRunner(out)
+        runner.init(backend=False)
+        runner.validate()
+        cap = (out / "capacity.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.rc_asg_public[*].id" in cap
+        assert "associate_public_ip_address = true" in cap
+
+    def test_declared_private_nat_group_passes_terraform_validate(self, tmp_path):
+        ctx = _ec2_capacity_declared_subnet_ctx(
+            tmp_path,
+            network={"subnets": {"asg-nat": {"egress": "nat"}}},
+            subnet_group="asg-nat",
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        runner = TerraformRunner(out)
+        runner.init(backend=False)
+        runner.validate()
+        cap = (out / "capacity.tf").read_text()
+        network_declared = (out / "network_declared.tf").read_text()
+        assert "vpc_zone_identifier = aws_subnet.rc_asg_nat[*].id" in cap
+        assert "associate_public_ip_address = false" in cap
+        assert "aws_nat_gateway" in network_declared
