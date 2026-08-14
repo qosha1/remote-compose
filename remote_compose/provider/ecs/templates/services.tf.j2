@@ -240,7 +240,17 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
     subnets          = {{ svc.subnets_ref }}
     security_groups  = {{ svc.security_groups_ref }}
+{%- if svc.launch_type != "EC2" %}
     assign_public_ip = {{ 'true' if svc.assign_public_ip else 'false' }}
+{%- else %}
+    # assign_public_ip is a FARGATE-only parameter -- the ECS CreateService
+    # API rejects it outright for EC2 launch type ("Assign public IP is not
+    # supported for this launch type"), confirmed against real AWS
+    # (rc-e5u.25 cloud smoke). An EC2 task's ENI gets a public IP from the
+    # SUBNET's own map_public_ip_on_launch instead (aws_subnet.public sets
+    # this true; a declared network.subnets public group does too) -- same
+    # outcome, different mechanism, no service-level knob needed.
+{%- endif %}
   }
 
 {%- if has_service_discovery %}

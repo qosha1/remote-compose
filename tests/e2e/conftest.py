@@ -148,14 +148,11 @@ def provider() -> ECSProvider:
     return ECSProvider()
 
 
-@pytest.fixture
-def e2e_lifecycle(e2e_ctx: DeployContext, provider: ECSProvider):
-    """Yield the context, then teardown: destroy + reap."""
-    yield e2e_ctx
-
+def _teardown(ctx: DeployContext, provider: ECSProvider) -> None:
+    """Shared finalizer: destroy + reap, regardless of test outcome."""
     keep = os.environ.get("RC_E2E_KEEP_ON_FAIL") == "1"
     try:
-        provider.destroy(e2e_ctx)
+        provider.destroy(ctx)
     except Exception as exc:
         print(f"provider.destroy failed: {exc}", file=sys.stderr)
         if keep:
@@ -176,3 +173,56 @@ def e2e_lifecycle(e2e_ctx: DeployContext, provider: ECSProvider):
         print(f"reap script exited {result.returncode}", file=sys.stderr)
         print(result.stdout, file=sys.stderr)
         print(result.stderr, file=sys.stderr)
+
+
+@pytest.fixture
+def e2e_lifecycle(e2e_ctx: DeployContext, provider: ECSProvider):
+    """Yield the context, then teardown: destroy + reap."""
+    yield e2e_ctx
+    _teardown(e2e_ctx, provider)
+
+
+@pytest.fixture
+def e2e_ec2_ctx(e2e_preconditions, test_project_name, tmp_path) -> DeployContext:
+    """rc-e5u.25: worker-only EC2 launch-type service, no ALB (not public).
+
+    Isolates the cloud smoke to the ASG/capacity-provider path the bug is
+    about — no build/ECR push (pre-built public image), no ALB — so cost
+    and runtime stay minimal and any failure is unambiguously about EC2
+    capacity placement/registration, not the build or ALB pipeline.
+    """
+    return DeployContext(
+        project=test_project_name,
+        compose_path=tmp_path / "docker-compose.yml",
+        rc_yml_v2={"version": 2, "project": test_project_name},
+        provider_config={
+            "ecs": {
+                "region": REGION,
+                "cluster": f"{test_project_name}-cluster",
+                "vpc_cidr": "10.99.0.0/16",
+                "ec2_capacity": {"instance_type": "t3.small"},
+            }
+        },
+        tf_backend_config={"type": "local"},
+        working_dir=tmp_path,
+        services={
+            "worker": ServiceSpec(
+                name="worker",
+                cpu=256,
+                memory=512,
+                replicas=1,
+                type="worker",
+                launch_type="EC2",
+                image="public.ecr.aws/docker/library/busybox:latest",
+                command=["sleep", "1800"],
+            ),
+        },
+        secrets=[],
+    )
+
+
+@pytest.fixture
+def e2e_ec2_lifecycle(e2e_ec2_ctx: DeployContext, provider: ECSProvider):
+    """Yield the EC2-launch-type context, then teardown: destroy + reap."""
+    yield e2e_ec2_ctx
+    _teardown(e2e_ec2_ctx, provider)

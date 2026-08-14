@@ -373,7 +373,13 @@ resource "aws_ecs_service" "worker" {
     # per-service `subnets:` for the private-subnet variant.
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = true
+    # assign_public_ip is a FARGATE-only parameter -- the ECS CreateService
+    # API rejects it outright for EC2 launch type ("Assign public IP is not
+    # supported for this launch type"), confirmed against real AWS
+    # (rc-e5u.25 cloud smoke). An EC2 task's ENI gets a public IP from the
+    # SUBNET's own map_public_ip_on_launch instead (aws_subnet.public sets
+    # this true; a declared network.subnets public group does too) -- same
+    # outcome, different mechanism, no service-level knob needed.
   }
   service_registries {
     registry_arn = aws_service_discovery_service.worker.arn
