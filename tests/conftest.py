@@ -25,6 +25,32 @@ def pytest_configure():
 
 
 # ---------------------------------------------------------------------------
+# rc-9r2u: process-env isolation — no test's os.environ mutation survives it.
+# ---------------------------------------------------------------------------
+# `monkeypatch.setenv`/`delenv` already auto-revert, so they're unaffected by
+# this. It exists for code paths that mutate `os.environ` directly (e.g.
+# `os.environ.setdefault(...)`, `os.environ[...] = ...`) without going through
+# monkeypatch — those mutations otherwise survive the test and leak into
+# whichever test pytest-randomly schedules next in the same process. Root
+# cause example: cli_commands/db.py's `rc db psql` does
+# `os.environ.setdefault("AWS_PROFILE", aws_profile)` and never unsets it;
+# under pytest-randomly, a test exercising that path ahead of a moto-backed
+# AWS test poisons the later test's credential resolution with
+# `botocore.exceptions.ProfileNotFound`. Autouse + function-scoped so it
+# applies to every test in the fast + integration tiers regardless of
+# ordering; snapshot/restore of a ~dozen-to-few-hundred-key dict is
+# microseconds, well inside the 8s per-test runtime budget below.
+@pytest.fixture(autouse=True)
+def _isolate_os_environ():
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
+# ---------------------------------------------------------------------------
 # Shared model fixtures
 # ---------------------------------------------------------------------------
 
