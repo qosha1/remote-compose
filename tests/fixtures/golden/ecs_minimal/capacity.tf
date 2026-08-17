@@ -150,6 +150,26 @@ resource "aws_autoscaling_group" "ec2" {
     value               = "true"
     propagate_at_launch = true
   }
+
+  # aws_autoscaling_group is a known exception to the provider's
+  # default_tags (providers.tf.j2) -- ASG tags use this block schema, not
+  # the tags = {} map default_tags merges into, so nothing here is tagged
+  # automatically. Every other resource in this module (VPC, subnets,
+  # SGs, ...) gets Project/ManagedBy/Environment/Ephemeral/ExpiresAt for
+  # free; the ASG needs them spelled out explicitly or it's invisible to
+  # both scripts/reap_test_region.py (rc-e5u.25.8, confirmed: this is why
+  # a real EC2 instance survived two reap passes) and any production `rc
+  # reap` / out-of-band tag-scan reaper that relies on Ephemeral/ExpiresAt.
+  tag {
+    key                 = "Project"
+    value               = var.project
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "ManagedBy"
+    value               = "remote-compose"
+    propagate_at_launch = true
+  }
 }
 
 resource "aws_ecs_capacity_provider" "ec2" {
