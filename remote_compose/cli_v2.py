@@ -83,11 +83,18 @@ def resolve_compose_path(
     not pull its image. So a missing compose file is an error here, named
     with both the resolved path and the rc.yml key that pointed at it.
 
-    ``required=False`` is for the commands that never emit terraform — they
-    only talk to infrastructure that is already deployed (status, outputs,
-    exec, run, lifecycle hooks, destroy). Ephemeral stacks delete their
-    generated compose file once the deploy lands, so requiring it there would
-    strand every way of inspecting or tearing down a live stack.
+    ``required=False`` is for the paths where nothing durable is derived from
+    compose: status, outputs, exec, run, lifecycle hooks and destroy either
+    read live state or act inside containers that are already running. (Destroy
+    does emit terraform when its working dir is gone, but only to give
+    ``terraform destroy`` a config to read — the image it renders never becomes
+    a running task.) Ephemeral stacks delete their generated compose file once
+    the deploy lands, so requiring it on those paths would strand every way of
+    inspecting or tearing down a live stack.
+
+    Note that "emits terraform" is the common case, not the rule itself:
+    secrets push emits nothing yet still requires the file, because compose's
+    ``env_file`` entries decide which keys it writes.
     """
     from .config._schema_types import ConfigError as _ConfigError
 

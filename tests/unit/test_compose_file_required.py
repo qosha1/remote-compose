@@ -137,10 +137,11 @@ class TestLiveStackCommandsTolerateAMissingComposeFile:
     """A missing compose file must never strand deployed infrastructure.
 
     Ephemeral stacks delete their generated compose file once the deploy
-    lands, so for those stacks it is absent *by design* from then on. The
-    commands that emit no terraform — status, outputs, exec, run, lifecycle
-    hooks, destroy — only read or act on what is already deployed, and have
-    to keep working. Only the paths that reach emit_terraform error out.
+    lands, so for those stacks it is absent *by design* from then on. Status,
+    outputs, exec, run, lifecycle hooks and destroy only read live state or
+    act inside already-running containers — nothing durable is derived from
+    compose — so they have to keep working. The paths that turn compose data
+    into infrastructure (plan, deploy, adopt) still error out.
     """
 
     def test_build_deploy_context_opt_out(self, tmp_path, capsys):
