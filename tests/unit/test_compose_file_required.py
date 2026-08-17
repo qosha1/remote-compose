@@ -87,6 +87,24 @@ class TestMissingComposeFileIsAnError:
             f"pushes: {[str(f) for f in bogus]}"
         )
 
+    def test_secrets_push_refuses_to_push_a_partial_key_set(self, tmp_path):
+        """The one caller that deliberately tolerated the silent ``{}``.
+
+        ``_secrets_push_v2`` emits no terraform, so the emit-time rule would
+        wave it through — but ``env_file_auto`` expands from compose's
+        ``env_file`` entries, so without the compose file it writes a
+        *different set of keys* than the deploy expects. It has to error, and
+        nothing else in the suite pins that.
+        """
+        import click
+
+        from remote_compose.cli_commands._dispatchers import _secrets_push_v2
+
+        p = _write_rc(tmp_path)
+
+        with pytest.raises(click.exceptions.Exit):
+            _secrets_push_v2(str(p))
+
     def test_absolute_compose_file_is_reported_verbatim(self, tmp_path):
         missing = tmp_path / "elsewhere" / "compose.yml"
         p = _write_rc(tmp_path, compose_file=str(missing))
