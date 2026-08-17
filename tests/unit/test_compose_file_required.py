@@ -63,7 +63,14 @@ class TestMissingComposeFileIsAnError:
         assert str((tmp_path / "docker-compose.yml").resolve()) in msg
 
     def test_no_terraform_is_emitted_with_a_bogus_latest_tag(self, tmp_path):
-        """The end-to-end shape of the bug: emit used to succeed."""
+        """The end-to-end shape of the bug.
+
+        Before the fix this whole block ran clean and left .tf on disk whose
+        task definition pointed at ``<ecr_repo>.repository_url:latest``. Now
+        it stops at the context build, so emit_terraform is never reached and
+        nothing is written — both halves are asserted, since "no bogus tag in
+        the emitted files" is satisfied vacuously by "no emitted files".
+        """
         p = _write_rc(tmp_path)
         _, raw, v2 = load_rc_yml(p)
         out = tmp_path / "tf"
@@ -73,6 +80,7 @@ class TestMissingComposeFileIsAnError:
             ECSProvider().emit_terraform(ctx, out)
 
         emitted = list(out.glob("*.tf")) if out.exists() else []
+        assert not emitted, f"terraform was emitted: {[str(f) for f in emitted]}"
         bogus = [f for f in emitted if "repository_url}:latest" in f.read_text()]
         assert not bogus, (
             "terraform was emitted pointing at an ECR tag rc never builds or "
@@ -125,8 +133,15 @@ class TestEmptyComposeFileIsAnError:
         assert str((tmp_path / "docker-compose.yml").resolve()) in str(exc.value)
 
 
-class TestTeardownToleratesAMissingComposeFile:
-    """A missing compose file must never strand deployed infrastructure."""
+class TestLiveStackCommandsTolerateAMissingComposeFile:
+    """A missing compose file must never strand deployed infrastructure.
+
+    Ephemeral stacks delete their generated compose file once the deploy
+    lands, so for those stacks it is absent *by design* from then on. The
+    commands that emit no terraform — status, outputs, exec, run, lifecycle
+    hooks, destroy — only read or act on what is already deployed, and have
+    to keep working. Only the paths that reach emit_terraform error out.
+    """
 
     def test_build_deploy_context_opt_out(self, tmp_path, capsys):
         p = _write_rc(tmp_path)
@@ -136,6 +151,17 @@ class TestTeardownToleratesAMissingComposeFile:
 
         assert "web" in ctx.services
         assert "compose_file" in capsys.readouterr().err
+
+    def test_opt_out_also_survives_an_unreadable_compose_file(self, tmp_path, capsys):
+        """Present-but-broken is as fatal to a live stack as absent."""
+        (tmp_path / "docker-compose.yml").write_text("{{ COMPOSE_FILE }}\n")
+        p = _write_rc(tmp_path)
+        _, raw, v2 = load_rc_yml(p)
+
+        ctx = build_deploy_context(v2, raw, p, require_compose_file=False)
+
+        assert "web" in ctx.services
+        assert "WARN" in capsys.readouterr().err
 
     def test_destroy_dispatches_without_a_compose_file(self, tmp_path, monkeypatch):
         from remote_compose import cli_v2
@@ -150,3 +176,32 @@ class TestTeardownToleratesAMissingComposeFile:
         monkeypatch.setattr(cli_v2, "resolve_provider", lambda *a, **k: _FakeProvider())
         assert cli_v2.dispatch_if_v2(p, "destroy", yes=True) is True
         assert destroyed == ["wxb7"]
+
+    def test_status_dispatches_without_a_compose_file(self, tmp_path, monkeypatch):
+        """rc status only reads live ECS state — the bead's own trigger
+        scenario is a deployed stack whose compose file is already gone."""
+        from remote_compose import cli_v2
+        from remote_compose.provider import StatusReport
+
+        p = _write_rc(tmp_path, provider="fake")
+        asked = []
+
+        class _FakeProvider:
+            def status(self, ctx):
+                asked.append(sorted(ctx.services))
+                return StatusReport(services=[], cluster_health="active")
+
+        monkeypatch.setattr(cli_v2, "resolve_provider", lambda *a, **k: _FakeProvider())
+        assert cli_v2.dispatch_if_v2(p, "status") is True
+        assert asked == [["web"]]
+
+    def test_plan_still_errors_without_a_compose_file(self, tmp_path, monkeypatch):
+        """The tolerant commands must not soften the ones that emit."""
+        import click
+
+        from remote_compose import cli_v2
+
+        p = _write_rc(tmp_path, provider="fake")
+        monkeypatch.setattr(cli_v2, "resolve_provider", lambda *a, **k: object())
+        with pytest.raises(click.exceptions.Exit):
+            cli_v2.dispatch_if_v2(p, "plan")

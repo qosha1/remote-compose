@@ -83,8 +83,11 @@ def resolve_compose_path(
     not pull its image. So a missing compose file is an error here, named
     with both the resolved path and the rc.yml key that pointed at it.
 
-    ``required=False`` is for teardown, where the compose file may already be
-    gone and infrastructure that exists still has to come down.
+    ``required=False`` is for the commands that never emit terraform — they
+    only talk to infrastructure that is already deployed (status, outputs,
+    exec, run, lifecycle hooks, destroy). Ephemeral stacks delete their
+    generated compose file once the deploy lands, so requiring it there would
+    strand every way of inspecting or tearing down a live stack.
     """
     from .config._schema_types import ConfigError as _ConfigError
 
@@ -616,18 +619,30 @@ def build_deploy_context(
 ) -> DeployContext:
     """Convert a validated RcConfigV2 into a Provider-ready DeployContext.
 
-    ``require_compose_file=False`` is for teardown only: a compose file that
-    has already been deleted must not block destroying live infrastructure.
-    Every other caller wants the loud error (startsim-wxb7).
+    ``require_compose_file=False`` is for the commands that emit no terraform
+    and only act on already-deployed infrastructure (status, outputs, exec,
+    run, lifecycle hooks, destroy): an unreadable or deleted compose file must
+    not block inspecting or tearing down a live stack. Every caller that can
+    reach ``emit_terraform`` wants the loud error (startsim-wxb7).
     """
     project_dir = rc_yml_path.parent.resolve()
 
     compose_path = resolve_compose_path(v2, project_dir, required=require_compose_file)
-    # resolve_compose_path raises unless the caller opted out, so an absent
-    # file here means teardown — carry on with no compose data.
-    compose_services = (
-        _parse_compose_services(compose_path) if compose_path.exists() else {}
-    )
+    if require_compose_file:
+        # resolve_compose_path has already guaranteed the file is there.
+        compose_services = _parse_compose_services(compose_path)
+    else:
+        from .config._schema_types import ConfigError as _ConfigError
+
+        try:
+            compose_services = (
+                _parse_compose_services(compose_path) if compose_path.exists() else {}
+            )
+        except _ConfigError as exc:
+            import click
+
+            click.echo(f"  WARN: {exc} — continuing without compose data.", err=True)
+            compose_services = {}
 
     # Expand env_file_auto BEFORE building service envs so the suppression
     # set is available — without this, env_file values land in the task-def
@@ -1295,7 +1310,10 @@ def run_auto_on_deploy_hooks_for_path(
     if not has_auto:
         return
 
-    ctx = build_deploy_context(v2, raw, p)
+    # Hooks exec against containers that are already running and emit no
+    # terraform; the hook set comes from rc.yml, not compose. Warn and carry
+    # on rather than crashing a post-deploy step (startsim-wxb7).
+    ctx = build_deploy_context(v2, raw, p, require_compose_file=False)
     provider = resolve_provider(v2)
 
     # rc-e5u.36.6: wait+run is now folded into _run_auto_on_deploy_hooks.
@@ -1334,11 +1352,17 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     if version != 2 or v2 is None:
         return False
 
-    # Teardown tolerates a missing compose file — everything else needs it,
-    # or the emitted task definitions point at images rc never pushed.
+    # plan and deploy emit terraform, so they need the compose file or the
+    # task definitions point at images rc never pushed. status and destroy
+    # only read/act on live infrastructure, and an ephemeral stack's compose
+    # file is routinely deleted once its deploy lands — requiring it there
+    # would make a deployed stack un-inspectable and un-destroyable.
     try:
         ctx = build_deploy_context(
-            v2, raw, path, require_compose_file=command != "destroy"
+            v2,
+            raw,
+            path,
+            require_compose_file=command not in ("destroy", "status"),
         )
     except ConfigError as exc:
         click.echo(f"rc.yml at {path}: {exc}", err=True)

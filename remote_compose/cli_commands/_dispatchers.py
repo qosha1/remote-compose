@@ -402,7 +402,9 @@ def _db_push_v2(
         ExpiresIn=7200,
     )
 
-    deploy_ctx = build_deploy_context(v2, raw, path)
+    # Restores a dump inside a live container; emits no terraform, so a
+    # missing compose file must not block it (startsim-wxb7).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     restore_script = _build_restore_script(local.name, presigned, fmt)
@@ -615,7 +617,9 @@ def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
         )
         raise click.exceptions.Exit(1)
 
-    ctx = build_deploy_context(v2, raw, path)
+    # Execs into a live container; emits no terraform, so a missing compose
+    # file must not block it (startsim-wxb7).
+    ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     interactive = sys.stdin.isatty()
