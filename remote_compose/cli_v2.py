@@ -69,13 +69,93 @@ def load_rc_yml(path: str | Path) -> tuple[int, dict, RcConfigV2 | None]:
     return version, raw, None
 
 
+def resolve_compose_path(
+    v2: RcConfigV2, base_dir: str | Path, *, required: bool = True
+) -> Path:
+    """Resolve rc.yml's ``compose_file`` against ``base_dir``.
+
+    startsim-wxb7: a ``compose_file`` naming a path that does not exist used
+    to resolve to an empty service map with no error and no warning. Every
+    service then had no resolvable image, and the ECS templates fell through
+    to ``<ecr_repo>.repository_url:latest`` — terraform created an empty
+    repository and pointed the task definition at a tag nothing pushes. The
+    render succeeded; the failure surfaced much later as a task that could
+    not pull its image. So a missing compose file is an error here, named
+    with both the resolved path and the rc.yml key that pointed at it.
+
+    ``required=False`` is for teardown, where the compose file may already be
+    gone and infrastructure that exists still has to come down.
+    """
+    from .config._schema_types import ConfigError as _ConfigError
+
+    declared = v2.compose_file
+    compose_path = Path(declared)
+    if not compose_path.is_absolute():
+        compose_path = (Path(base_dir) / compose_path).resolve()
+    if compose_path.exists():
+        return compose_path
+    if required:
+        raise _ConfigError(
+            f"compose file {compose_path} not found (rc.yml "
+            f"`compose_file: {declared}`). Every service's image and build "
+            f"context is read from that file — without it rc would emit task "
+            f"definitions pointing at ECR tags it never builds or pushes."
+        )
+
+    import click
+
+    click.echo(
+        f"  WARN: compose file {compose_path} not found (rc.yml "
+        f"`compose_file: {declared}`) — continuing without compose data.",
+        err=True,
+    )
+    return compose_path
+
+
 def _parse_compose_services(compose_path: Path) -> dict[str, dict]:
-    """Extract build/image data from docker-compose.yml, keyed by service name."""
+    """Extract build/image data from docker-compose.yml, keyed by service name.
+
+    Raises ConfigError when the file is missing, unreadable, not a mapping,
+    or declares no services — see resolve_compose_path for why an empty
+    result cannot be allowed to pass silently. Callers that tolerate an
+    absent compose file must check ``compose_path.exists()`` themselves
+    instead of relying on an empty return.
+    """
+    from .config._schema_types import ConfigError as _ConfigError
+
     if not compose_path.exists():
-        return {}
-    with compose_path.open() as f:
-        data = yaml.safe_load(f) or {}
-    return data.get("services") or {}
+        raise _ConfigError(f"compose file {compose_path} not found.")
+    try:
+        with compose_path.open() as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        loc = ""
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            loc = f" (line {mark.line + 1}, column {mark.column + 1})"
+        raise _ConfigError(
+            f"compose file {compose_path}{loc}: YAML syntax error — {exc}"
+        ) from exc
+    except OSError as exc:
+        raise _ConfigError(f"compose file {compose_path}: cannot read — {exc}") from exc
+    if not isinstance(data, dict):
+        raise _ConfigError(
+            f"compose file {compose_path}: must be a mapping, got "
+            f"{type(data).__name__}"
+        )
+    services = data.get("services") or {}
+    if not isinstance(services, dict):
+        raise _ConfigError(
+            f"compose file {compose_path}: `services` must be a mapping, got "
+            f"{type(services).__name__}"
+        )
+    if not services:
+        raise _ConfigError(
+            f"compose file {compose_path} declares no services. rc reads every "
+            f"image and build context from it — with none, every service would "
+            f"be emitted pointing at an ECR tag nothing pushes."
+        )
+    return services
 
 
 def _service_build_info(
@@ -531,14 +611,23 @@ def build_deploy_context(
     v2: RcConfigV2,
     raw: dict,
     rc_yml_path: Path,
+    *,
+    require_compose_file: bool = True,
 ) -> DeployContext:
-    """Convert a validated RcConfigV2 into a Provider-ready DeployContext."""
+    """Convert a validated RcConfigV2 into a Provider-ready DeployContext.
+
+    ``require_compose_file=False`` is for teardown only: a compose file that
+    has already been deleted must not block destroying live infrastructure.
+    Every other caller wants the loud error (startsim-wxb7).
+    """
     project_dir = rc_yml_path.parent.resolve()
 
-    compose_path = Path(v2.compose_file)
-    if not compose_path.is_absolute():
-        compose_path = (project_dir / compose_path).resolve()
-    compose_services = _parse_compose_services(compose_path)
+    compose_path = resolve_compose_path(v2, project_dir, required=require_compose_file)
+    # resolve_compose_path raises unless the caller opted out, so an absent
+    # file here means teardown — carry on with no compose data.
+    compose_services = (
+        _parse_compose_services(compose_path) if compose_path.exists() else {}
+    )
 
     # Expand env_file_auto BEFORE building service envs so the suppression
     # set is available — without this, env_file values land in the task-def
@@ -935,10 +1024,12 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
         return
 
     # Resolve compose path the same way build_deploy_context does so the
-    # env_file_auto expansion matches.
-    compose_path = Path(v2.compose_file)
-    if not compose_path.is_absolute():
-        compose_path = (Path(rc_path).parent / compose_path).resolve()
+    # env_file_auto expansion matches. This runs after a successful deploy,
+    # so a compose file that has since vanished warns and skips the check
+    # rather than turning a finished deploy into a failure.
+    compose_path = resolve_compose_path(v2, Path(rc_path).parent, required=False)
+    if not compose_path.exists():
+        return
     compose_services = _parse_compose_services(compose_path)
     expanded, _suppressed, _per_svc = _expand_env_file_auto(
         secrets,
@@ -1230,6 +1321,8 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     """
     import click
 
+    from .config._schema_types import ConfigError
+
     path = Path(config_path) if config_path else Path.cwd() / "rc.yml"
     if not path.exists():
         return False
@@ -1241,7 +1334,15 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     if version != 2 or v2 is None:
         return False
 
-    ctx = build_deploy_context(v2, raw, path)
+    # Teardown tolerates a missing compose file — everything else needs it,
+    # or the emitted task definitions point at images rc never pushed.
+    try:
+        ctx = build_deploy_context(
+            v2, raw, path, require_compose_file=command != "destroy"
+        )
+    except ConfigError as exc:
+        click.echo(f"rc.yml at {path}: {exc}", err=True)
+        raise click.exceptions.Exit(1)
     provider = resolve_provider(v2)
 
     click.echo(f"\nRemote Compose v2 — provider={v2.provider} project={v2.project}")

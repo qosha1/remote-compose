@@ -40,6 +40,13 @@ def _write(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data))
 
 
+def _write_compose(tmp_path: Path, services_yaml: str) -> Path:
+    """rc.yml's compose_file has to exist and declare services (startsim-wxb7)."""
+    p = tmp_path / "docker-compose.yml"
+    p.write_text("services:\n" + services_yaml)
+    return p
+
+
 class TestLoadRcYml:
     def test_v2_parses(self, tmp_path):
         p = tmp_path / "rc.yml"
@@ -66,6 +73,7 @@ class TestLoadRcYml:
 
 class TestBuildDeployContext:
     def test_context_mirrors_v2_schema(self, tmp_path):
+        _write_compose(tmp_path, "  web:\n    image: nginx\n")
         p = tmp_path / "rc.yml"
         _write(p, V2_SAMPLE)
         _, raw, v2 = load_rc_yml(p)
@@ -87,6 +95,7 @@ class TestBuildDeployContext:
         assert ctx.compose_path == (tmp_path / "docker-compose.yml").resolve()
 
     def test_none_backend_fields_stripped(self, tmp_path):
+        _write_compose(tmp_path, "  web:\n    image: nginx\n")
         cfg = dict(V2_SAMPLE)
         cfg["terraform"] = {
             "backend": {
@@ -114,6 +123,7 @@ class TestDispatcher:
         assert dispatch_if_v2(tmp_path / "missing.yml", "deploy") is False
 
     def test_v2_plan_dispatches(self, tmp_path, capsys):
+        _write_compose(tmp_path, "  web:\n    image: nginx\n")
         p = tmp_path / "rc.yml"
         _write(p, V2_SAMPLE)
         ok = dispatch_if_v2(p, "plan")
@@ -533,9 +543,7 @@ class TestComposeAutoImport:
     automatically. rc.yml services[] becomes overrides on top."""
 
     def _write_compose(self, tmp_path, services_yaml: str) -> Path:
-        p = tmp_path / "docker-compose.yml"
-        p.write_text("services:\n" + services_yaml)
-        return p
+        return _write_compose(tmp_path, services_yaml)
 
     def _v2(self, **overrides) -> dict:
         base = {
@@ -670,6 +678,7 @@ class TestSecretsPushV2:
         env_file.parent.mkdir(parents=True)
         env_file.write_text("SECRET_KEY=abc\nDATABASE_URL=postgres://x\n")
 
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, self._v2_cfg(".envs/.test/.django"))
         monkeypatch.chdir(tmp_path)
@@ -701,6 +710,7 @@ class TestSecretsPushV2:
 
         env_file = tmp_path / ".django"
         env_file.write_text("K=v\n")
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, self._v2_cfg(str(env_file)))
         monkeypatch.chdir(tmp_path)
@@ -757,6 +767,7 @@ class TestAutoOnDeployHooks:
                 "migrate": {"command": ["./bin/migrate"], "auto_on_deploy": True},
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
@@ -793,6 +804,7 @@ class TestAutoOnDeployHooks:
                 "third": {"command": ["./third"], "auto_on_deploy": True},
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
@@ -825,6 +837,7 @@ class TestAutoOnDeployHooks:
                 },
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
@@ -863,6 +876,7 @@ class TestAutoOnDeployHooks:
                 },
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
@@ -894,6 +908,7 @@ class TestAutoOnDeployHooks:
                 "migrate": {"command": ["./fail"], "auto_on_deploy": True},
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
@@ -924,6 +939,7 @@ class TestAutoOnDeployHooks:
                 "shell": {"command": ["./shell"], "interactive": True},
             }
         )
+        _write_compose(tmp_path, "  django:\n    image: busybox\n")
         p = tmp_path / "rc.yml"
         _write(p, cfg)
         monkeypatch.chdir(tmp_path)
