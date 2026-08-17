@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.base import ProviderConfigError
 from remote_compose.provider.ecs import ECSProvider
+from remote_compose.terraform.runner import RecordingTerraformRunner
 
 
 def _ctx(
@@ -510,3 +512,243 @@ class TestEc2CapacitySubnetGroup:
         cap = (out / "capacity.tf").read_text()
         assert "vpc_zone_identifier = aws_subnet.private[*].id" in cap
         assert "associate_public_ip_address = false" in cap
+
+
+# ---------------------------------------------------------------------
+# rc-e5u.25.9: destroy() pre-drains EC2-launch-type services + their
+# capacity ASG via the AWS SDK before terraform destroy ever runs.
+# See ECSProvider._predrain_ec2_capacity's docstring for the full
+# mechanism / citations. These tests mock terraform (RecordingTerraformRunner)
+# and boto3 (per-service-name MagicMocks) — no real terraform or AWS calls.
+# ---------------------------------------------------------------------
+
+
+def _multi_client_session():
+    """A mock boto3 Session whose .client(name) returns a DISTINCT
+    MagicMock per service name (unlike a single shared mock), so
+    assertions on the "ecs" client can't accidentally pass because of
+    calls actually made against the "autoscaling" client or vice versa."""
+    clients: dict[str, mock.MagicMock] = {}
+
+    def _client(name, *args, **kwargs):
+        return clients.setdefault(name, mock.MagicMock())
+
+    sess = mock.MagicMock()
+    sess.client.side_effect = _client
+    sess.clients = clients  # test-only convenience accessor
+    return sess
+
+
+@pytest.fixture
+def recorder():
+    holder: dict = {"runner": None}
+
+    def factory(out_dir: Path) -> RecordingTerraformRunner:
+        if holder["runner"] is None:
+            holder["runner"] = RecordingTerraformRunner(out_dir)
+        return holder["runner"]
+
+    factory.holder = holder  # type: ignore[attr-defined]
+    return factory
+
+
+@pytest.fixture
+def mock_session():
+    return _multi_client_session()
+
+
+@pytest.fixture
+def provider(recorder, mock_session):
+    return ECSProvider(
+        runner_factory=recorder,
+        session_factory=lambda ctx: mock_session,
+    )
+
+
+def _already_drained(ecs_client, autoscaling_client) -> None:
+    """Script both clients so the pre-drain wait loops exit on their
+    FIRST poll (no sleeping, no reliance on RC_DESTROY_DRAIN_TIMEOUT_S)."""
+    ecs_client.describe_services.return_value = {
+        "services": [{"serviceName": "worker", "runningCount": 0}],
+    }
+    autoscaling_client.describe_auto_scaling_groups.return_value = {
+        "AutoScalingGroups": [{"Instances": []}],
+    }
+    ecs_client.list_container_instances.return_value = {
+        "containerInstanceArns": [],
+    }
+
+
+class TestDestroyPreDrainFargateUnaffected:
+    def test_fargate_only_destroy_makes_zero_aws_calls(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """Regression guard for the proven Fargate destroy path
+        (test_ecs_full_lifecycle.py): a Fargate-only stack's destroy()
+        must not touch AWS at all."""
+        ctx = _ctx(tmp_path, {"web": _svc("web", launch_type="FARGATE")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        runner = recorder(ctx.working_dir / "terraform")
+        runner.calls.clear()
+
+        provider.destroy(ctx)
+
+        assert mock_session.client.call_count == 0
+        subcmds = [c.args[0] for c in runner.calls]
+        assert subcmds == ["init", "destroy"]
+
+
+class TestDestroyPreDrainEc2:
+    def test_predrain_sets_desired_count_zero_before_terraform_destroy(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(
+            tmp_path, {"worker": _svc("worker", launch_type="EC2")}, cluster="myclust"
+        )
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        runner = recorder(ctx.working_dir / "terraform")
+        runner.calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        _already_drained(ecs, autoscaling)
+
+        provider.destroy(ctx)
+
+        ecs.update_service.assert_called_once_with(
+            cluster="myclust", service="worker", desiredCount=0
+        )
+        autoscaling.update_auto_scaling_group.assert_called_once_with(
+            AutoScalingGroupName="myapp-ec2-asg",
+            MinSize=0,
+            MaxSize=0,
+            DesiredCapacity=0,
+        )
+        # terraform destroy still runs — the pre-drain is additive, not
+        # a replacement for terraform's own teardown.
+        subcmds = [c.args[0] for c in runner.calls]
+        assert subcmds == ["init", "destroy"]
+
+    def test_predrain_deregisters_leftover_container_instances(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        _already_drained(ecs, autoscaling)
+        ecs.list_container_instances.return_value = {
+            "containerInstanceArns": ["arn:aws:ecs:...:container-instance/abc"]
+        }
+
+        provider.destroy(ctx)
+
+        ecs.deregister_container_instance.assert_called_once_with(
+            cluster="test-cluster",
+            containerInstance="arn:aws:ecs:...:container-instance/abc",
+            force=True,
+        )
+
+    def test_predrain_only_touches_ec2_services_in_mixed_stack(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(
+            tmp_path,
+            {
+                "web": _svc("web", launch_type="FARGATE"),
+                "worker": _svc("worker", launch_type="EC2"),
+            },
+        )
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.describe_services.return_value = {
+            "services": [{"serviceName": "worker", "runningCount": 0}],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        assert ecs.update_service.call_count == 1
+        assert ecs.update_service.call_args.kwargs["service"] == "worker"
+
+    def test_predrain_timeout_warns_but_still_runs_terraform_destroy(
+        self, provider, recorder, mock_session, tmp_path, monkeypatch
+    ):
+        """A task that never stops must not hang destroy() forever —
+        terraform's own destroy timeout is the real backstop."""
+        monkeypatch.setenv("RC_DESTROY_DRAIN_TIMEOUT_S", "0")
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        runner = recorder(ctx.working_dir / "terraform")
+        runner.calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        # Task never drains, ASG instance never terminates.
+        ecs.describe_services.return_value = {
+            "services": [{"serviceName": "worker", "runningCount": 1}],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": [{"InstanceId": "i-stuck"}]}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+        warnings = []
+
+        provider2 = ECSProvider(
+            runner_factory=recorder,
+            session_factory=lambda c: mock_session,
+            progress=warnings.append,
+        )
+        provider2.destroy(ctx)
+
+        assert any("WARN" in w for w in warnings)
+        subcmds = [c.args[0] for c in runner.calls]
+        assert subcmds == ["init", "destroy"]
+
+    def test_predrain_never_raises_on_client_error(
+        self, provider, recorder, mock_session, tmp_path, monkeypatch
+    ):
+        """AWS errors during pre-drain (expired creds, service already
+        gone, ...) must be swallowed — runner.destroy() is always the
+        backstop; a raise here would make the stack undestroyable."""
+        # Bounds the autoscaling wait loop to exactly one poll regardless
+        # of the (unconfigured, therefore truthy-MagicMock) response
+        # shape below — this test is about the ecs client raising, not
+        # about timing out the ASG wait.
+        monkeypatch.setenv("RC_DESTROY_DRAIN_TIMEOUT_S", "0")
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        runner = recorder(ctx.working_dir / "terraform")
+        runner.calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        ecs.update_service.side_effect = RuntimeError("ExpiredTokenException")
+        ecs.describe_services.side_effect = RuntimeError("ExpiredTokenException")
+
+        provider.destroy(ctx)  # must not raise
+
+        subcmds = [c.args[0] for c in runner.calls]
+        assert subcmds == ["init", "destroy"]
+
+    def test_predrain_treats_service_not_reported_as_already_drained(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """describe_services omitting a service (deleted out of band)
+        must be treated as drained, not as 'still running forever'."""
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.describe_services.return_value = {"services": []}
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)  # must complete without looping/hanging
+
+        assert ecs.update_service.call_count == 1

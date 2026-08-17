@@ -164,6 +164,26 @@ class TestDestroy:
         subcmds = [c.args[0] for c in runner.calls]
         assert subcmds == ["init", "destroy"]
 
+    def test_destroy_fargate_only_makes_zero_aws_calls(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """rc-e5u.25.9: the EC2 pre-drain path added to destroy() must be
+        a complete no-op (zero AWS SDK calls) for a Fargate-only stack —
+        regression guard for the proven Fargate destroy path
+        (test_ecs_full_lifecycle.py). EC2-specific pre-drain behavior is
+        covered in tests/unit/test_provider_ecs/test_ec2_launch.py."""
+        ctx = _ctx(tmp_path)  # web + api, no launch_type => FARGATE
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        runner = recorder(ctx.working_dir / "terraform")
+        runner.calls.clear()
+        mock_session.client.reset_mock()
+
+        provider.destroy(ctx)
+
+        assert mock_session.client.call_count == 0
+        subcmds = [c.args[0] for c in runner.calls]
+        assert subcmds == ["init", "destroy"]
+
     def test_destroy_emits_if_no_module(self, provider, recorder, tmp_path):
         """If tf dir doesn't exist yet, destroy emits first (so terraform
         has something to init against)."""

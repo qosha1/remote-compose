@@ -417,6 +417,24 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
+def _destroy_drain_timeout_s(default_s: int = 600) -> int:
+    """Bound on each pre-drain poll loop in ``destroy()`` (rc-e5u.25.9).
+
+    RC_DESTROY_DRAIN_TIMEOUT_S overrides the default; tests set it to 0
+    to short-circuit the wait entirely without mocking time.sleep. A
+    timeout here only ever produces a WARN -- terraform's own destroy
+    timeout is the real backstop, never this one.
+    """
+    raw = os.environ.get("RC_DESTROY_DRAIN_TIMEOUT_S")
+    if not raw:
+        return default_s
+    try:
+        n = int(raw)
+        return n if n >= 0 else default_s
+    except ValueError:
+        return default_s
+
+
 def image_group_owners(
     services: dict[str, Any], share_repos: bool = True
 ) -> dict[str, str]:
@@ -3281,9 +3299,290 @@ class ECSProvider(Provider):
         out_dir = self._tf_dir(ctx)
         if not out_dir.exists():
             self.emit_terraform(ctx, out_dir)
+        # rc-e5u.25.9: for EC2-launch-type stacks, drain services + scale
+        # the capacity ASG to zero via the AWS SDK BEFORE terraform ever
+        # touches the module. See _predrain_ec2_capacity's docstring for
+        # the full mechanism this closes. No-ops (zero AWS calls) for a
+        # Fargate-only stack.
+        self._predrain_ec2_capacity(ctx)
         runner = self.runner_factory(out_dir)
         runner.init()
         runner.destroy()
+
+    def _ec2_service_names(self, ctx: DeployContext) -> list[str]:
+        """Service names that resolve to EC2 launch_type -- local/pure,
+        no AWS calls, so callers can decide whether to touch AWS at all
+        (a Fargate-only stack must make zero SDK calls here)."""
+        ecs_cfg = _ecs_cfg(ctx)
+        default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
+        return [
+            name
+            for name, spec in sorted(ctx.services.items())
+            if (spec.launch_type or default_launch_type) == "EC2"
+        ]
+
+    def _predrain_ec2_capacity(self, ctx: DeployContext) -> None:
+        """rc-e5u.25.9: drain EC2-launch-type services and scale their
+        capacity ASG to zero via the AWS SDK before ``terraform destroy``.
+
+        The real-AWS failure this fixes (bd rc-e5u.25.9): after a
+        successful EC2-launch deploy, ``terraform destroy`` (1) hung the
+        full 20-minute default timeout waiting for the ECS service to go
+        DRAINING -> INACTIVE, and (2) then failed detaching the Internet
+        Gateway with a DependencyViolation because the ASG's EC2
+        instance still had an ENI with a mapped public IP attached.
+
+        Root cause, reasoned through against AWS's own docs (see bead
+        for full citations) -- NOT terraform dependency-graph ordering:
+        terraform already sequences aws_ecs_service ->
+        aws_ecs_capacity_provider -> aws_autoscaling_group correctly (a
+        capacity_provider_strategy / auto_scaling_group_arn reference
+        chain makes each dependent destroyed before its dependency), so
+        the ASG is never touched by terraform until the service is
+        already gone. The deadlock is inside the SERVICE's own delete:
+        every non-stateful service (services.tf.j2) sets
+        deployment_minimum_healthy_percent = 100, and AWS's container-
+        instance-draining docs state plainly that "[i]f the minimum is
+        100%, the service scheduler can't remove existing tasks until
+        the replacement tasks are considered healthy"
+        (https://docs.aws.amazon.com/AmazonECS/latest/developerguide/container-instance-draining.html).
+        The capacity provider's managed_scaling reacts to
+        CapacityProviderReservation independently of terraform -- the
+        instant desiredCount starts heading toward 0, AWS's own scaling
+        automation can put the (often sole) EC2 instance into container-
+        instance DRAINING while desiredCount is still > 0, and the
+        service scheduler then wants a REPLACEMENT task placed before it
+        will stop the one running -- but a single-instance ASG has
+        nowhere to place it. Genuine deadlock, not just a slow drain;
+        Fargate has no container instances to drain so it never hits
+        this path (test_ecs_full_lifecycle.py's history is clean).
+
+        The fix: force desiredCount to 0 via the SDK, and wait for it to
+        actually take effect, BEFORE terraform (or anything terraform's
+        own calls might trigger AWS-side) gets involved at all. Scaling
+        DOWN to a lower desired count needs no replacement placement, so
+        the deadlock precondition never arises. Then explicitly resize
+        the ASG to 0 and wait for its instance(s) to terminate, so by
+        the time `terraform destroy` starts there is no live EC2
+        instance (and no ENI holding a mapped public IP) left for the
+        Internet Gateway's delete to race against -- closing the second
+        failure by construction, independent of whether the first one
+        would otherwise have been slow.
+
+        Scoped strictly to EC2-launch-type services (`_ec2_service_names`
+        short-circuits with zero AWS calls when there are none) so the
+        proven Fargate destroy path is completely untouched.
+
+        Best-effort throughout and must NEVER raise: this runs against
+        stacks that may already be partially destroyed (cluster gone,
+        ASG never created, expired creds, ...), and `runner.destroy()`
+        remains the backstop either way. A raise here would make a
+        broken stack permanently undestroyable via `rc destroy`, which
+        is strictly worse than the bug being fixed.
+
+        Known limitation (not handled here): standalone tasks started
+        via `rc run` / `run_one_off` are invisible to
+        `update_service(desiredCount=0)` and AWS's own container-
+        instance draining leaves them running until they stop on their
+        own or are stopped manually -- see this method's unit tests and
+        the bead for the tracked follow-up.
+        """
+        ec2_services = self._ec2_service_names(ctx)
+        if not ec2_services:
+            return  # Fargate-only (or plan-only) stack -- no AWS calls.
+
+        try:
+            ecs_cfg = _ecs_cfg(ctx)
+            cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
+            session = self.session_factory(ctx)
+            ecs = session.client("ecs")
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                f"  WARN: destroy pre-drain: could not create an AWS ECS "
+                f"client ({exc!s}); skipping pre-drain -- terraform "
+                f"destroy will attempt teardown directly."
+            )
+            return
+
+        self._emit(
+            f"  destroy: pre-draining {len(ec2_services)} EC2-launch-type "
+            f"service(s) before terraform destroy: {', '.join(ec2_services)}"
+        )
+        for name in ec2_services:
+            try:
+                ecs.update_service(cluster=cluster, service=name, desiredCount=0)
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    f"  WARN: destroy pre-drain: update_service"
+                    f"(desiredCount=0) failed for {name!r} ({exc!s}) -- "
+                    f"service may already be gone; continuing."
+                )
+
+        self._wait_for_zero_running_services(ecs, cluster, ec2_services)
+        self._scale_down_ec2_capacity(ctx, cluster)
+
+    def _wait_for_zero_running_services(
+        self, ecs: Any, cluster: str, service_names: list[str]
+    ) -> None:
+        """Poll until every named service reports runningCount == 0 (or is
+        no longer reported at all -- already deleted out of band), bounded
+        by RC_DESTROY_DRAIN_TIMEOUT_S. Never raises; a timeout just emits a
+        WARN and lets terraform's own destroy timeout be the backstop."""
+        from ...heartbeat import heartbeat as _hb
+
+        timeout_s = _destroy_drain_timeout_s()
+        deadline = time.monotonic() + timeout_s
+        remaining = set(service_names)
+        with _hb(self.progress, "destroy pre-drain: waiting for tasks to stop"):
+            # Poll-then-check-deadline (not check-then-poll): guarantees at
+            # least one describe_services call even when the timeout
+            # budget is 0 (tests short-circuit the wait this way).
+            while True:
+                try:
+                    desc = ecs.describe_services(
+                        cluster=cluster, services=sorted(remaining)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._emit(
+                        f"  WARN: destroy pre-drain: describe_services "
+                        f"failed ({exc!s}); giving up on the drain wait "
+                        f"and proceeding to terraform destroy."
+                    )
+                    return
+                reported = {
+                    s.get("serviceName")
+                    for s in (desc.get("services") or [])
+                    if s.get("serviceName")
+                }
+                still_running = {
+                    s.get("serviceName")
+                    for s in (desc.get("services") or [])
+                    if int(s.get("runningCount", 0) or 0) > 0
+                }
+                # Anything ECS no longer reports at all is treated as
+                # already drained (deleted out of band).
+                remaining = (remaining & reported) & still_running
+                if not remaining:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(max(0.0, min(5.0, deadline - time.monotonic())))
+        if remaining:
+            self._emit(
+                f"  WARN: destroy pre-drain: {len(remaining)} service(s) "
+                f"still report running tasks after {timeout_s}s "
+                f"({', '.join(sorted(remaining))}) -- proceeding to "
+                f"terraform destroy anyway; it may hit its own drain "
+                f"timeout."
+            )
+
+    def _scale_down_ec2_capacity(self, ctx: DeployContext, cluster: str) -> None:
+        """Resize the project's EC2 capacity ASG (capacity.tf.j2's
+        ``${var.project}-ec2-asg``) to zero and wait for its instance(s)
+        to actually terminate, then defensively deregister any leftover
+        container instances. Never raises."""
+        from ...heartbeat import heartbeat as _hb
+
+        asg_name = f"{ctx.project}-ec2-asg"
+        try:
+            session = self.session_factory(ctx)
+            autoscaling = session.client("autoscaling")
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                f"  WARN: destroy pre-drain: could not create an "
+                f"autoscaling client ({exc!s}); skipping ASG scale-down."
+            )
+            return
+
+        try:
+            autoscaling.update_auto_scaling_group(
+                AutoScalingGroupName=asg_name,
+                MinSize=0,
+                MaxSize=0,
+                DesiredCapacity=0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                f"  WARN: destroy pre-drain: could not scale down ASG "
+                f"{asg_name!r} ({exc!s}) -- it may not exist (yet), or "
+                f"may already be gone; continuing to terraform destroy."
+            )
+            return
+
+        self._emit(
+            f"  destroy: scaled {asg_name!r} to 0; waiting for its "
+            f"instance(s) to terminate"
+        )
+        timeout_s = _destroy_drain_timeout_s()
+        deadline = time.monotonic() + timeout_s
+        drained = False
+        with _hb(
+            self.progress,
+            f"destroy pre-drain: waiting for {asg_name} instances to terminate",
+        ):
+            # Poll-then-check-deadline: guarantees at least one
+            # describe_auto_scaling_groups call even with a 0s budget.
+            while True:
+                try:
+                    resp = autoscaling.describe_auto_scaling_groups(
+                        AutoScalingGroupNames=[asg_name]
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._emit(
+                        f"  WARN: destroy pre-drain: "
+                        f"describe_auto_scaling_groups failed ({exc!s}); "
+                        f"giving up on the ASG drain wait."
+                    )
+                    break
+                groups = resp.get("AutoScalingGroups") or []
+                if not groups or not groups[0].get("Instances"):
+                    drained = True
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(max(0.0, min(5.0, deadline - time.monotonic())))
+        if not drained:
+            self._emit(
+                f"  WARN: destroy pre-drain: {asg_name!r} still shows "
+                f"running instance(s) after {timeout_s}s -- proceeding "
+                f"to terraform destroy anyway."
+            )
+
+        self._deregister_leftover_container_instances(ctx, cluster)
+
+    def _deregister_leftover_container_instances(
+        self, ctx: DeployContext, cluster: str
+    ) -> None:
+        """Belt-and-suspenders for the sibling bead (rc-e5u.25.8): force-
+        deregister any container instances the cluster still knows about
+        after the ASG scale-down, so a leftover record can't block
+        `aws_ecs_cluster` destroy with
+        ClusterContainsContainerInstancesException. Never raises."""
+        try:
+            session = self.session_factory(ctx)
+            ecs = session.client("ecs")
+            arns = (
+                ecs.list_container_instances(cluster=cluster).get(
+                    "containerInstanceArns"
+                )
+                or []
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                f"  WARN: destroy pre-drain: could not list container "
+                f"instances on {cluster!r} ({exc!s})."
+            )
+            return
+        for arn in arns:
+            try:
+                ecs.deregister_container_instance(
+                    cluster=cluster, containerInstance=arn, force=True
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    f"  WARN: destroy pre-drain: could not deregister "
+                    f"container instance {arn} ({exc!s})."
+                )
 
     def redeploy(
         self,
