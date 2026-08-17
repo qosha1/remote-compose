@@ -732,6 +732,73 @@ meaningfully bigger, riskier feature than sizing around the ceiling. Revisit
 if a workload's replica-count-driven instance sprawl becomes a real cost
 problem that a bigger `instance_type` doesn't fix.
 
+### Worked example: Django + Celery, web on Fargate, workers on EC2
+
+The common shape this is for: a Django app where `web` is bursty and
+request-driven (Fargate — you pay per task, scales cleanly with traffic) but
+`worker`/`beat` are always-on background daemons that never scale to zero.
+Running always-on processes on Fargate means paying the Fargate premium
+24/7 for capacity that never idles down; one small EC2 instance hosting both
+is usually cheaper the moment "always on" is true. Extends the `postgres` /
+`django` / `nginx` example above — `postgres`, `django`, and `nginx` are
+unchanged, omitted here for brevity:
+
+```yaml
+services:
+  redis:
+    type: infrastructure
+    cpu: 256
+    memory: 512
+
+  worker:
+    type: worker
+    cpu: 256
+    memory: 512
+    launch_type: EC2                 # overrides Fargate for this service only
+    command: ["celery", "-A", "myapp", "worker", "-l", "info"]
+
+  beat:
+    type: worker
+    cpu: 128
+    memory: 256
+    launch_type: EC2
+    command: ["celery", "-A", "myapp", "beat", "-l", "info"]
+
+provider_config:
+  ecs:
+    ec2_capacity:
+      instance_type: t3.small        # explicit, not auto-sized -- see below
+      min: 1
+      max: 1                         # never scale to a second instance
+      desired: 1
+```
+
+What each knob is doing and why:
+
+- **`launch_type: EC2` only on `worker`/`beat`** — `django` and `nginx` stay
+  on Fargate (the env-wide default). Per-service `launch_type:` always beats
+  the default, so a mixed fleet is just this one override, not a
+  wholesale `default_launch_type: EC2` switch.
+- **`ec2_capacity.max: 1`** pins the ASG to a single instance so `worker` and
+  `beat` are *guaranteed* to land together, not just likely to. Without this,
+  ECS's scheduler bin-packs opportunistically — usually the same outcome at
+  this scale, but not a guarantee if the ASG ever has room for two.
+- **`instance_type: t3.small` set explicitly, not auto-sized** — this is the
+  ENI ceiling from the section above, applied: `worker` + `beat` is exactly 2
+  awsvpc tasks, and `t3.small` has exactly 2 usable ENI slots. That fits with
+  zero headroom for a third process. Add `flower` or a second queue's worker
+  later and this same config needs `t3.xlarge` (3 usable slots) — not because
+  CPU/memory ran out, but because ENIs did. Auto-sizing (omit `instance_type`)
+  already accounts for this; setting it explicitly here makes the ceiling
+  visible rather than implicit.
+- **`redis`** is the Celery broker, Fargate (no `launch_type:`) since it's
+  not part of this EC2 story — apply the same worker-on-EC2 reasoning to it
+  too if it's also always-on and small enough to share the box.
+
+Verified: this exact config (with `django`/`nginx`/`postgres` from the
+example above) passes `ECSProvider().emit_terraform()` + `terraform
+validate` — copy-paste starting point, not illustrative pseudo-YAML.
+
 ---
 
 ## Feature index
