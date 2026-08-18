@@ -38,7 +38,12 @@ from ..base import (
     ServiceStatus,
     StatusReport,
 )
-from .autosize import EC2TaskDemand, auto_size
+from .autosize import (
+    EC2TaskDemand,
+    KNOWN_INSTANCE_SHAPES,
+    auto_size,
+    check_fixed_shape_capacity,
+)
 from .iam_plan import IamPlan, build_iam_plan
 from .network_plan import (
     NetworkPlan,
@@ -4449,6 +4454,18 @@ class ECSProvider(Provider):
             min_size = user_cfg.get("min", 1)
             desired_size = user_cfg.get("desired", 1)
             max_size = user_cfg.get("max", 3)
+            # auto_size() never runs on this branch, so nothing else checks
+            # whether desired_size instances of this shape can actually host
+            # the declared EC2 task demand (cpu/memory/ENI) -- rc-e5u.25.10.
+            # Only for instance types rc has verified numbers for
+            # (KNOWN_INSTANCE_SHAPES); an unlisted/unverified type is not
+            # modeled and skips this, same as a custom auto_size() ladder.
+            known_shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
+            if known_shape is not None:
+                try:
+                    check_fixed_shape_capacity(known_shape, ec2_demands, desired_size)
+                except ValueError as exc:
+                    raise ProviderConfigError(str(exc)) from exc
 
         return {
             "instance_type": instance_type,

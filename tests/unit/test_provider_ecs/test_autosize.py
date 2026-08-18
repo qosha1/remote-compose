@@ -8,10 +8,12 @@ from remote_compose.provider.ecs.autosize import (
     EC2TaskDemand,
     ENI_RESERVED_FOR_PRIMARY,
     InstanceShape,
+    KNOWN_INSTANCE_SHAPES,
     RESERVED_MEMORY_MIB,
     Sizing,
     T3_LADDER,
     auto_size,
+    check_fixed_shape_capacity,
 )
 
 
@@ -247,3 +249,95 @@ class TestIntegrationShape:
         sz = auto_size([EC2TaskDemand("x", cpu_units=256, memory_mib=512)])
         assert isinstance(sz, Sizing)
         assert sz.instance_type in [s.name for s in T3_LADDER]
+
+
+class TestKnownInstanceShapes:
+    """rc-e5u.25.10: ec2_capacity.instance_type set explicitly bypasses
+    auto_size() entirely, so nothing else validates cpu/memory/ENI fit for
+    it. KNOWN_INSTANCE_SHAPES + check_fixed_shape_capacity close that gap
+    for verified instance types."""
+
+    def test_t3a_small_eni_ceiling_differs_from_t3_and_t4g_small(self):
+        """The whole reason this table isn't derived from a per-family
+        formula: t3a.small has HALF the usable ENI slots of its same-size
+        t3/t4g siblings despite an identical vCPU/memory shape."""
+        assert KNOWN_INSTANCE_SHAPES["t3.small"].max_enis == 3
+        assert KNOWN_INSTANCE_SHAPES["t4g.small"].max_enis == 3
+        assert KNOWN_INSTANCE_SHAPES["t3a.small"].max_enis == 2
+
+    def test_c5_xlarge_memory_is_half_of_m5_xlarge(self):
+        """c5/c6i (compute-optimized) carry half the memory of m5/m6i/t3 at
+        the same vCPU count and 'xlarge' label -- a table that collapsed
+        same-size-label rows across families would get this wrong."""
+        assert KNOWN_INSTANCE_SHAPES["c5.xlarge"].memory_gib == 8
+        assert KNOWN_INSTANCE_SHAPES["m5.xlarge"].memory_gib == 16
+        assert KNOWN_INSTANCE_SHAPES["t3.xlarge"].memory_gib == 16
+
+    def test_nano_fractional_memory(self):
+        assert KNOWN_INSTANCE_SHAPES["t3.nano"].memory_gib == 0.5
+
+
+class TestCheckFixedShapeCapacity:
+    def _shape(self, **overrides):
+        base = dict(name="m5.large", vcpu=2, memory_gib=8, max_enis=3)
+        base.update(overrides)
+        return InstanceShape(**base)
+
+    def test_fits_does_not_raise(self):
+        check_fixed_shape_capacity(
+            self._shape(),
+            [EC2TaskDemand("web", cpu_units=512, memory_mib=1024, replicas=2)],
+            desired_size=1,
+        )
+
+    def test_single_task_too_big_for_shape_raises(self):
+        with pytest.raises(ValueError, match="cannot host a task"):
+            check_fixed_shape_capacity(
+                self._shape(),
+                [EC2TaskDemand("huge", cpu_units=4096, memory_mib=16384)],
+                desired_size=5,
+            )
+
+    def test_total_cpu_exceeds_fleet_capacity_raises(self):
+        with pytest.raises(ValueError, match="total CPU units"):
+            check_fixed_shape_capacity(
+                self._shape(),
+                [EC2TaskDemand("a", cpu_units=2048, memory_mib=512, replicas=2)],
+                desired_size=1,  # 1 * 2 vCPU (2048 units) < 2 * 2048 needed
+            )
+
+    def test_total_memory_exceeds_fleet_capacity_raises(self):
+        with pytest.raises(ValueError, match="total memory"):
+            check_fixed_shape_capacity(
+                self._shape(),
+                [EC2TaskDemand("a", cpu_units=256, memory_mib=6144, replicas=2)],
+                desired_size=1,  # 1 * 8192 MiB < 2 * 6144 needed
+            )
+
+    def test_eni_count_exceeds_fleet_capacity_raises(self):
+        # t3a.small: max_enis=2 -> 1 usable per instance.
+        with pytest.raises(ValueError, match="awsvpc task ENI slots"):
+            check_fixed_shape_capacity(
+                KNOWN_INSTANCE_SHAPES["t3a.small"],
+                [EC2TaskDemand("w", cpu_units=256, memory_mib=256, replicas=3)],
+                desired_size=1,  # 1 usable ENI slot < 3 tasks
+            )
+
+    def test_eni_dimension_skipped_when_shape_has_no_max_enis(self):
+        check_fixed_shape_capacity(
+            self._shape(max_enis=None),
+            [EC2TaskDemand("w", cpu_units=1, memory_mib=1, replicas=50)],
+            desired_size=1,
+        )
+
+    def test_zero_demand_tasks_only_checked_on_eni_dimension(self):
+        """cpu_units=0/memory_mib=0 tasks (EC2's task-level resources are
+        optional, unlike Fargate's) skip the cpu/memory dimensions but still
+        count toward the ENI dimension -- an awsvpc task always consumes
+        exactly one ENI regardless of its resource request."""
+        with pytest.raises(ValueError, match="awsvpc task ENI slots"):
+            check_fixed_shape_capacity(
+                KNOWN_INSTANCE_SHAPES["t3a.small"],
+                [EC2TaskDemand("w", cpu_units=0, memory_mib=0, replicas=3)],
+                desired_size=1,
+            )

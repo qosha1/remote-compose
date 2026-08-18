@@ -308,6 +308,70 @@ class TestAutoSizing:
         assert "max_size            = 20" in cap
 
 
+class TestExplicitInstanceTypeDensityValidation:
+    """rc-e5u.25.10: auto_size() never runs when ec2_capacity.instance_type
+    is set explicitly, so nothing else checked whether the declared EC2 task
+    demand actually fits -- infeasible config emitted clean terraform and
+    only failed later as tasks stuck PENDING in real ECS."""
+
+    def test_eni_demand_exceeds_explicit_shape_raises(self, tmp_path):
+        # t3a.small: max_enis=2 -> 1 usable ENI slot per instance.
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc(
+                    "worker", launch_type="EC2", cpu=128, memory=128, replicas=3
+                ),
+            },
+            ec2_capacity={"instance_type": "t3a.small", "desired": 1},
+        )
+        with pytest.raises(ProviderConfigError, match="awsvpc task ENI slots"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+    def test_memory_demand_exceeds_explicit_shape_raises(self, tmp_path):
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2", cpu=256, memory=6144)},
+            ec2_capacity={"instance_type": "t3.small", "desired": 1},
+        )
+        with pytest.raises(ProviderConfigError, match="cannot host a task"):
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+
+    def test_fitting_demand_on_explicit_shape_succeeds(self, tmp_path):
+        ctx = _ctx(
+            tmp_path,
+            {"worker": _svc("worker", launch_type="EC2", cpu=512, memory=1024)},
+            ec2_capacity={"instance_type": "m5.large", "desired": 1},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert 'instance_type = "m5.large"' in cap
+
+    def test_unverified_instance_type_skips_validation(self, tmp_path):
+        """An instance type rc has no verified ENI/cpu/mem data for is not
+        modeled -- same "not modeled" precedent as a custom auto_size()
+        ladder -- so it must NOT raise, even for demand that would clearly
+        never fit any real instance."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "worker": _svc(
+                    "worker",
+                    launch_type="EC2",
+                    cpu=999999,
+                    memory=999999,
+                    replicas=999,
+                ),
+            },
+            ec2_capacity={"instance_type": "not-a-real-instance-type", "desired": 1},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        cap = (out / "capacity.tf").read_text()
+        assert 'instance_type = "not-a-real-instance-type"' in cap
+
+
 class TestDefaultLaunchTypeValidation:
     def test_invalid_default_launch_type(self, tmp_path):
         ctx = _ctx(tmp_path, {"web": _svc("web")}, default_launch_type="SPOT")
