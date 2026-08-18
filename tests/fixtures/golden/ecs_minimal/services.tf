@@ -365,6 +365,19 @@ resource "aws_ecs_service" "worker" {
     base              = 1
   }
 
+  # The AWS provider rejects any update to a service with
+  # capacity_provider_strategy unless force_new_deployment is also true
+  # ("force_new_deployment should be true when capacity_provider_strategy
+  # is being updated") -- this fires on the very first apply that moves a
+  # service from FARGATE onto EC2 capacity, since that's exactly a
+  # capacity_provider_strategy change (launch_type -> capacity_provider_
+  # strategy are mutually exclusive fields). Left on permanently rather
+  # than only for that one transition: capacity_provider_strategy is a
+  # tracked argument on this resource for the service's entire EC2-launch
+  # lifetime, so any later change to it (rebalancing weight/base, e.g.)
+  # would hit the identical error again.
+  force_new_deployment = true
+
   # Bin-pack onto the fewest instances instead of ECS's default placement
   # (effectively random across eligible container instances). Without this,
   # EC2 launch type buys none of its cost advantage over Fargate -- tasks

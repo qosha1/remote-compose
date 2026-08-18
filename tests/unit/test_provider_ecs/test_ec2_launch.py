@@ -94,6 +94,25 @@ class TestEc2Only:
         assert "aws_ecs_capacity_provider.ec2.name" in services
         assert 'launch_type     = "FARGATE"' not in services
 
+    def test_ec2_service_sets_force_new_deployment(self, tmp_path):
+        """The AWS provider rejects updating a service with
+        capacity_provider_strategy unless force_new_deployment is also
+        true -- fires on the very Fargate->EC2 transition an existing_alb
+        pilot exercises (real repro: 'force_new_deployment should be true
+        when capacity_provider_strategy is being updated')."""
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        services = (out / "services.tf").read_text()
+        assert "force_new_deployment = true" in services
+
+    def test_fargate_service_has_no_force_new_deployment(self, tmp_path):
+        ctx = _ctx(tmp_path, {"web": _svc("web")})
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        services = (out / "services.tf").read_text()
+        assert "force_new_deployment" not in services
+
     def test_task_definition_requires_ec2_compatibility(self, tmp_path):
         ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
         out = tmp_path / "tf"
