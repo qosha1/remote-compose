@@ -874,9 +874,7 @@ class TestDestroyPreDrainEnumeratesLiveServices:
     def test_live_services_are_unioned_with_the_local_ones(
         self, provider, recorder, mock_session, tmp_path
     ):
-        ctx = _ctx(
-            tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2"
-        )
+        ctx = _ctx(tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2")
         provider.emit_terraform(ctx, ctx.working_dir / "terraform")
         recorder(ctx.working_dir / "terraform").calls.clear()
         ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
@@ -941,9 +939,7 @@ class TestDestroyPreDrainEnumeratesLiveServices:
 
         assert ecs.update_service.call_count == 0
 
-    def test_pagination_is_followed(
-        self, provider, recorder, mock_session, tmp_path
-    ):
+    def test_pagination_is_followed(self, provider, recorder, mock_session, tmp_path):
         """list_services caps at 100 per page; a stack big enough to page
         must not have its tail silently dropped."""
         ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
@@ -1046,9 +1042,7 @@ class TestDestroyPreDrainEnumeratesLiveServices:
     ):
         """Best-effort: if the cluster can't be listed, drain what we know
         about rather than draining nothing."""
-        ctx = _ctx(
-            tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2"
-        )
+        ctx = _ctx(tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2")
         provider.emit_terraform(ctx, ctx.working_dir / "terraform")
         recorder(ctx.working_dir / "terraform").calls.clear()
         ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())

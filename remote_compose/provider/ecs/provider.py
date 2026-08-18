@@ -3376,9 +3376,7 @@ class ECSProvider(Provider):
         return _ecs_cfg(ctx).get("default_launch_type", "FARGATE") != "EC2"
 
     @staticmethod
-    def _describe_services_all(
-        ecs: Any, cluster: str, names: list[str]
-    ) -> list[dict]:
+    def _describe_services_all(ecs: Any, cluster: str, names: list[str]) -> list[dict]:
         """describe_services over any number of names.
 
         The API takes at most 10 per call and rejects the whole request
