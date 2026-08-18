@@ -80,7 +80,9 @@ class TestRcYmlServiceCanDeclareAnImage:
 
         services_tf = (out / "services.tf").read_text()
         assert '"redis:7-alpine"' in services_tf
-        bogus = [f for f in out.glob("*.tf") if "repository_url}:latest" in f.read_text()]
+        bogus = [
+            f for f in out.glob("*.tf") if "repository_url}:latest" in f.read_text()
+        ]
         assert not bogus, (
             "emitted an ECR tag rc never builds or pushes: "
             f"{[str(f) for f in bogus]}"
@@ -222,7 +224,9 @@ class TestLiveStackCommandsAreUnaffected:
 
         assert "redis" in ctx.services
 
-    def test_destroy_dispatches_with_an_unresolvable_service(self, tmp_path, monkeypatch):
+    def test_destroy_dispatches_with_an_unresolvable_service(
+        self, tmp_path, monkeypatch
+    ):
         from remote_compose import cli_v2
 
         cfg = dict(RC_YML)
