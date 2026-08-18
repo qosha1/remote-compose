@@ -43,6 +43,9 @@ resource "aws_security_group" "ec2_instances" {
     from_port       = 0
     to_port         = 0
     protocol        = "-1"
+    # Same source the tasks SG admits (security_groups.tf.j2) -- rc's own
+    # aws_security_group.alb in create mode, or the adopted/existing ALB's
+    # own security groups when existing_alb / adopt_owned.alb is set.
     security_groups = [aws_security_group.alb.id]
   }
   ingress {

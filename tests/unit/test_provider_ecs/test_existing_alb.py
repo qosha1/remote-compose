@@ -124,6 +124,28 @@ class TestExistingAlbValidation:
                 _ctx(tmp_path, {"existing_alb": {"arn": _ALB_ARN}}), tmp_path / "tf"
             )
 
+    def test_ec2_launch_type_admits_existing_alb_security_groups(self, tmp_path):
+        svcs = {
+            "django": ServiceSpec(
+                name="django",
+                cpu=512,
+                memory=1024,
+                type="application",
+                public=True,
+                port=5000,
+                domain="browser-mgr.debugg.ai",
+                health_check_path="/api/health/",
+                launch_type="EC2",
+            ),
+        }
+        out = _emit(tmp_path, services=svcs)
+        capacity = (out / "capacity.tf").read_text()
+        # ec2_instances SG ingress admits the existing ALB's own security
+        # groups (read off the data source) -- there is no rc-created
+        # aws_security_group.alb to reference in existing_alb mode.
+        assert "security_groups = data.aws_lb.main.security_groups" in capacity
+        assert "aws_security_group.alb.id" not in capacity
+
     def test_public_service_without_domain_rejected(self, tmp_path):
         svcs = {
             "django": ServiceSpec(

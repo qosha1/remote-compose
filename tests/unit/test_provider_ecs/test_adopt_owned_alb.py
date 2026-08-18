@@ -218,7 +218,7 @@ class TestAdoptOwnedAlbValidation:
                 _ctx(tmp_path, {"adopt_owned": {"alb": cfg}}), tmp_path / "tf"
             )
 
-    def test_ec2_launch_type_rejected(self, tmp_path):
+    def test_ec2_launch_type_admits_adopted_alb_security_groups(self, tmp_path):
         services = {
             "django": ServiceSpec(
                 name="django",
@@ -232,15 +232,20 @@ class TestAdoptOwnedAlbValidation:
                 launch_type="EC2",
             ),
         }
-        with pytest.raises(ProviderConfigError, match="adopt_owned.alb"):
-            ECSProvider().emit_terraform(
-                _ctx(
-                    tmp_path,
-                    {"adopt_owned": {"alb": ADOPT_OWNED_ALB}},
-                    services=services,
-                ),
-                tmp_path / "tf",
-            )
+        out = ECSProvider().emit_terraform(
+            _ctx(
+                tmp_path,
+                {"adopt_owned": {"alb": ADOPT_OWNED_ALB}},
+                services=services,
+            ),
+            tmp_path / "tf",
+        )
+        capacity = (out / "capacity.tf").read_text()
+        # ec2_instances SG ingress admits the adopted ALB's own (literal,
+        # foreign) security groups -- there is no rc-created
+        # aws_security_group.alb to reference in adopt_owned mode.
+        assert f'security_groups = ["{_SG_IDS[0]}", "{_SG_IDS[1]}"]' in capacity
+        assert "aws_security_group.alb.id" not in capacity
 
 
 # ---------------------------------------------------------------------------

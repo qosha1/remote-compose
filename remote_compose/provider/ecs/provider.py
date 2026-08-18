@@ -1395,8 +1395,10 @@ class ECSProvider(Provider):
         has_ec2_service = len(ec2_demands) > 0
         # An adopted ALB keeps its own (rc-unmanaged) default listener action,
         # so rc can only add host-based rules — every public service must
-        # declare a domain. And the alb SG isn't rc-created, so EC2 capacity
-        # (which references it) can't be combined with an adopted ALB.
+        # declare a domain. EC2 capacity's SG admits ALB traffic via
+        # tasks_alb_ingress_ref (same source the tasks SG already uses),
+        # which resolves to the adopted ALB's own security groups here —
+        # no rc-created aws_security_group.alb needed.
         if existing_alb:
             public_without_domain = [
                 s["name"]
@@ -1409,17 +1411,9 @@ class ECSProvider(Provider):
                     "service to set 'domain' (host-based routing onto the "
                     f"existing listener); missing on: {public_without_domain}"
                 )
-            if has_ec2_service:
-                raise ProviderConfigError(
-                    "provider_config.ecs.existing_alb is not supported with EC2 "
-                    "launch-type services (they reference the rc-created ALB "
-                    "security group, which an adopted ALB does not emit)"
-                )
         # adopt_owned.alb DOES own the listener (a real, imported resource),
         # so unlike existing_alb it can set its own default_action — no
-        # domain-per-service restriction needed. It still emits no
-        # aws_security_group.alb (literal foreign ids instead), so the EC2
-        # capacity restriction still applies.
+        # domain-per-service restriction needed.
         if adopt_owned_alb:
             # Mirrors _resolve_domain's all_domains truthiness check —
             # domain_info itself isn't computed until later, but every
@@ -1436,13 +1430,6 @@ class ECSProvider(Provider):
                     "'https_listener_arn' when any service declares a "
                     "domain (TLS terminates on the adopted ALB's HTTPS "
                     "listener, which rc must own to add per-service rules)"
-                )
-            if has_ec2_service:
-                raise ProviderConfigError(
-                    "provider_config.ecs.adopt_owned.alb is not supported "
-                    "with EC2 launch-type services yet (they reference the "
-                    "rc-created ALB security group, which adopt_owned.alb "
-                    "replaces with literal foreign ids)"
                 )
         # has_efs drives the EFS template (security group, file system,
         # mount targets, access points). True for either persistent OR
