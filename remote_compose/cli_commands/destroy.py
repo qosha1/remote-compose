@@ -131,7 +131,10 @@ def _destroy_ephemeral_targets(targets, yes: bool, command_name: str) -> None:
             failures.append((r.project, "not v2"))
             continue
         try:
-            ctx = build_deploy_context(v2, raw, rc_path)
+            # Ephemeral stacks point at a generated compose file that is
+            # often deleted before teardown runs; a missing one must not
+            # strand the infrastructure it created.
+            ctx = build_deploy_context(v2, raw, rc_path, require_compose_file=False)
             provider = resolve_provider(v2)
             provider.destroy(ctx)
         except Exception as exc:

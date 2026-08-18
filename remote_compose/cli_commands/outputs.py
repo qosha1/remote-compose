@@ -162,7 +162,9 @@ def outputs_cmd(ctx, name, as_json, as_env, prefix):
         )
         raise click.exceptions.Exit(1)
 
-    deploy_ctx = build_deploy_context(v2, raw, path)
+    # Reads `terraform output` from an existing state dir — no terraform is
+    # emitted, so a missing compose file must not block it (startsim-wxb7).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     tf_dir = Path(deploy_ctx.working_dir) / "terraform"
     if not tf_dir.exists():
         click.echo(

@@ -76,7 +76,9 @@ def lifecycle_cmd(ctx, hook, service):
         target = declarers[0]
 
     spec = v2.services[target].lifecycle[hook]
-    deploy_ctx = build_deploy_context(v2, raw, path)
+    # Runs a hook inside a live container; emits no terraform, so a missing
+    # compose file must not block it (startsim-wxb7).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     # mode 'task' runs a one-off task on the service's task def (gets the task

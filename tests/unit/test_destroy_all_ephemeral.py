@@ -139,7 +139,7 @@ def test_failure_on_one_does_not_stop_others(runner, tmp_path):
 
     provider.destroy.side_effect = destroy_side
 
-    def bdc_side(v2, raw, path):
+    def bdc_side(v2, raw, path, **kwargs):
         m = MagicMock()
         m._proj = v2.project
         return m

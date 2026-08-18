@@ -66,6 +66,12 @@ def _scaffold(tmp_path: Path, public_service: str = "nginx") -> Path:
     rc_path.write_text(
         "# header line\n" "# another comment\n\n" + yaml.safe_dump(rc, sort_keys=False)
     )
+    # compose_file has to exist and declare services (startsim-wxb7).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  django:\n    image: busybox\n"
+        f"  {public_service}:\n    image: nginx\n"
+    )
     return rc_path
 
 

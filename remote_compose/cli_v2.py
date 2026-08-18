@@ -69,13 +69,103 @@ def load_rc_yml(path: str | Path) -> tuple[int, dict, RcConfigV2 | None]:
     return version, raw, None
 
 
+def resolve_compose_path(
+    v2: RcConfigV2, base_dir: str | Path, *, required: bool = True
+) -> Path:
+    """Resolve rc.yml's ``compose_file`` against ``base_dir``.
+
+    startsim-wxb7: a ``compose_file`` naming a path that does not exist used
+    to resolve to an empty service map with no error and no warning. Every
+    service then had no resolvable image, and the ECS templates fell through
+    to ``<ecr_repo>.repository_url:latest`` — terraform created an empty
+    repository and pointed the task definition at a tag nothing pushes. The
+    render succeeded; the failure surfaced much later as a task that could
+    not pull its image. So a missing compose file is an error here, named
+    with both the resolved path and the rc.yml key that pointed at it.
+
+    ``required=False`` is for the paths where nothing durable is derived from
+    compose: status, outputs, exec, run, lifecycle hooks and destroy either
+    read live state or act inside containers that are already running. (Destroy
+    does emit terraform when its working dir is gone, but only to give
+    ``terraform destroy`` a config to read — the image it renders never becomes
+    a running task.) Ephemeral stacks delete their generated compose file once
+    the deploy lands, so requiring it on those paths would strand every way of
+    inspecting or tearing down a live stack.
+
+    Note that "emits terraform" is the common case, not the rule itself:
+    secrets push emits nothing yet still requires the file, because compose's
+    ``env_file`` entries decide which keys it writes.
+    """
+    from .config._schema_types import ConfigError as _ConfigError
+
+    declared = v2.compose_file
+    compose_path = Path(declared)
+    if not compose_path.is_absolute():
+        compose_path = (Path(base_dir) / compose_path).resolve()
+    if compose_path.exists():
+        return compose_path
+    if required:
+        raise _ConfigError(
+            f"compose file {compose_path} not found (rc.yml "
+            f"`compose_file: {declared}`). Every service's image and build "
+            f"context is read from that file — without it rc would emit task "
+            f"definitions pointing at ECR tags it never builds or pushes."
+        )
+
+    import click
+
+    click.echo(
+        f"  WARN: compose file {compose_path} not found (rc.yml "
+        f"`compose_file: {declared}`) — continuing without compose data.",
+        err=True,
+    )
+    return compose_path
+
+
 def _parse_compose_services(compose_path: Path) -> dict[str, dict]:
-    """Extract build/image data from docker-compose.yml, keyed by service name."""
+    """Extract build/image data from docker-compose.yml, keyed by service name.
+
+    Raises ConfigError when the file is missing, unreadable, not a mapping,
+    or declares no services — see resolve_compose_path for why an empty
+    result cannot be allowed to pass silently. Callers that tolerate an
+    absent compose file must check ``compose_path.exists()`` themselves
+    instead of relying on an empty return.
+    """
+    from .config._schema_types import ConfigError as _ConfigError
+
     if not compose_path.exists():
-        return {}
-    with compose_path.open() as f:
-        data = yaml.safe_load(f) or {}
-    return data.get("services") or {}
+        raise _ConfigError(f"compose file {compose_path} not found.")
+    try:
+        with compose_path.open() as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        loc = ""
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            loc = f" (line {mark.line + 1}, column {mark.column + 1})"
+        raise _ConfigError(
+            f"compose file {compose_path}{loc}: YAML syntax error — {exc}"
+        ) from exc
+    except OSError as exc:
+        raise _ConfigError(f"compose file {compose_path}: cannot read — {exc}") from exc
+    if not isinstance(data, dict):
+        raise _ConfigError(
+            f"compose file {compose_path}: must be a mapping, got "
+            f"{type(data).__name__}"
+        )
+    services = data.get("services") or {}
+    if not isinstance(services, dict):
+        raise _ConfigError(
+            f"compose file {compose_path}: `services` must be a mapping, got "
+            f"{type(services).__name__}"
+        )
+    if not services:
+        raise _ConfigError(
+            f"compose file {compose_path} declares no services. rc reads every "
+            f"image and build context from it — with none, every service would "
+            f"be emitted pointing at an ECR tag nothing pushes."
+        )
+    return services
 
 
 def _service_build_info(
@@ -531,14 +621,35 @@ def build_deploy_context(
     v2: RcConfigV2,
     raw: dict,
     rc_yml_path: Path,
+    *,
+    require_compose_file: bool = True,
 ) -> DeployContext:
-    """Convert a validated RcConfigV2 into a Provider-ready DeployContext."""
+    """Convert a validated RcConfigV2 into a Provider-ready DeployContext.
+
+    ``require_compose_file=False`` is for the commands that emit no terraform
+    and only act on already-deployed infrastructure (status, outputs, exec,
+    run, lifecycle hooks, destroy): an unreadable or deleted compose file must
+    not block inspecting or tearing down a live stack. Every caller that can
+    reach ``emit_terraform`` wants the loud error (startsim-wxb7).
+    """
     project_dir = rc_yml_path.parent.resolve()
 
-    compose_path = Path(v2.compose_file)
-    if not compose_path.is_absolute():
-        compose_path = (project_dir / compose_path).resolve()
-    compose_services = _parse_compose_services(compose_path)
+    compose_path = resolve_compose_path(v2, project_dir, required=require_compose_file)
+    if require_compose_file:
+        # resolve_compose_path has already guaranteed the file is there.
+        compose_services = _parse_compose_services(compose_path)
+    else:
+        from .config._schema_types import ConfigError as _ConfigError
+
+        try:
+            compose_services = (
+                _parse_compose_services(compose_path) if compose_path.exists() else {}
+            )
+        except _ConfigError as exc:
+            import click
+
+            click.echo(f"  WARN: {exc} — continuing without compose data.", err=True)
+            compose_services = {}
 
     # Expand env_file_auto BEFORE building service envs so the suppression
     # set is available — without this, env_file values land in the task-def
@@ -935,10 +1046,12 @@ def _auto_push_empty_secrets_if_any(rc_path: Path, v2, raw: dict) -> None:
         return
 
     # Resolve compose path the same way build_deploy_context does so the
-    # env_file_auto expansion matches.
-    compose_path = Path(v2.compose_file)
-    if not compose_path.is_absolute():
-        compose_path = (Path(rc_path).parent / compose_path).resolve()
+    # env_file_auto expansion matches. This runs after a successful deploy,
+    # so a compose file that has since vanished warns and skips the check
+    # rather than turning a finished deploy into a failure.
+    compose_path = resolve_compose_path(v2, Path(rc_path).parent, required=False)
+    if not compose_path.exists():
+        return
     compose_services = _parse_compose_services(compose_path)
     expanded, _suppressed, _per_svc = _expand_env_file_auto(
         secrets,
@@ -1204,7 +1317,10 @@ def run_auto_on_deploy_hooks_for_path(
     if not has_auto:
         return
 
-    ctx = build_deploy_context(v2, raw, p)
+    # Hooks exec against containers that are already running and emit no
+    # terraform; the hook set comes from rc.yml, not compose. Warn and carry
+    # on rather than crashing a post-deploy step (startsim-wxb7).
+    ctx = build_deploy_context(v2, raw, p, require_compose_file=False)
     provider = resolve_provider(v2)
 
     # rc-e5u.36.6: wait+run is now folded into _run_auto_on_deploy_hooks.
@@ -1230,6 +1346,8 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     """
     import click
 
+    from .config._schema_types import ConfigError
+
     path = Path(config_path) if config_path else Path.cwd() / "rc.yml"
     if not path.exists():
         return False
@@ -1241,7 +1359,21 @@ def dispatch_if_v2(config_path: str | Path | None, command: str, **kwargs) -> bo
     if version != 2 or v2 is None:
         return False
 
-    ctx = build_deploy_context(v2, raw, path)
+    # plan and deploy emit terraform, so they need the compose file or the
+    # task definitions point at images rc never pushed. status and destroy
+    # only read/act on live infrastructure, and an ephemeral stack's compose
+    # file is routinely deleted once its deploy lands — requiring it there
+    # would make a deployed stack un-inspectable and un-destroyable.
+    try:
+        ctx = build_deploy_context(
+            v2,
+            raw,
+            path,
+            require_compose_file=command not in ("destroy", "status"),
+        )
+    except ConfigError as exc:
+        click.echo(f"rc.yml at {path}: {exc}", err=True)
+        raise click.exceptions.Exit(1)
     provider = resolve_provider(v2)
 
     click.echo(f"\nRemote Compose v2 — provider={v2.provider} project={v2.project}")

@@ -123,14 +123,22 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
         click.echo("rc.yml v2: provider_config.ecs.region is required.", err=True)
         raise click.exceptions.Exit(1)
 
-    from remote_compose.cli_v2 import _expand_env_file_auto, _parse_compose_services
-
-    compose_path = Path(v2.compose_file)
-    if not compose_path.is_absolute():
-        compose_path = (path.parent / compose_path).resolve()
-    compose_services = (
-        _parse_compose_services(compose_path) if compose_path.exists() else {}
+    from remote_compose.cli_v2 import (
+        _expand_env_file_auto,
+        _parse_compose_services,
+        resolve_compose_path,
     )
+    from remote_compose.config._schema_types import ConfigError
+
+    # env_file_auto reads compose's env_file entries, so a missing compose
+    # file here means secrets are pushed from a different set of keys than
+    # the deploy expects. Report it instead of silently pushing a subset.
+    try:
+        compose_path = resolve_compose_path(v2, path.parent)
+        compose_services = _parse_compose_services(compose_path)
+    except ConfigError as exc:
+        click.echo(f"rc.yml at {path}: {exc}", err=True)
+        raise click.exceptions.Exit(1)
     expanded_secrets, _, _ = _expand_env_file_auto(
         list(v2.secrets or []),
         compose_services,
@@ -394,7 +402,9 @@ def _db_push_v2(
         ExpiresIn=7200,
     )
 
-    deploy_ctx = build_deploy_context(v2, raw, path)
+    # Restores a dump inside a live container; emits no terraform, so a
+    # missing compose file must not block it (startsim-wxb7).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     restore_script = _build_restore_script(local.name, presigned, fmt)
@@ -607,7 +617,9 @@ def _exec_v2(config_path: Optional[str], service: str, command: list) -> bool:
         )
         raise click.exceptions.Exit(1)
 
-    ctx = build_deploy_context(v2, raw, path)
+    # Execs into a live container; emits no terraform, so a missing compose
+    # file must not block it (startsim-wxb7).
+    ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     interactive = sys.stdin.isatty()

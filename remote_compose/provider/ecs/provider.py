@@ -1298,6 +1298,13 @@ class ECSProvider(Provider):
                 "command": list(spec.command or []),
                 # Pre-built compose image; if set (and no build context), task
                 # def uses it verbatim instead of an ECR placeholder.
+                #
+                # Both None means services.tf.j2 emits an ECR tag rc never
+                # pushes. startsim-wxb7 closed the config-level route to that
+                # state (a missing or service-less compose_file is now an
+                # error); rc-2r1r covers the remaining one — rc.yml can declare
+                # a service compose doesn't have, but has no `image` field to
+                # give it.
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
                 # Shared-image dedup (rc-44i). Services sharing a build identity

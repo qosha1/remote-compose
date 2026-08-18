@@ -80,7 +80,9 @@ def run_cmd(ctx, service, command, no_wait, timeout, container):
         )
         raise click.exceptions.Exit(1)
 
-    deploy_ctx = build_deploy_context(v2, raw, path)
+    # One-off task on an existing task definition; emits no terraform, so a
+    # missing compose file must not block it (startsim-wxb7).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
 
     result = provider.run_one_off(
