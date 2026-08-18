@@ -365,6 +365,25 @@ resource "aws_ecs_service" "worker" {
     base              = 1
   }
 
+  # Bin-pack onto the fewest instances instead of ECS's default placement
+  # (effectively random across eligible container instances). Without this,
+  # EC2 launch type buys none of its cost advantage over Fargate -- tasks
+  # spread thin, the ASG scales out to cover them, and you end up paying for
+  # as many instances as Fargate would have run tasks. binpack by memory
+  # (not cpu) because memory is the harder-to-overcommit resource on typical
+  # web/worker containers; cpu bursts are usually fine to share.
+  #
+  # Trade-off: AZ rebalancing (ECS's automatic cross-AZ task redistribution)
+  # only applies to services whose first (or only) placement strategy is an
+  # AZ spread, or that declare none at all -- binpack-first makes this
+  # service ineligible. Deliberate: bin-packing for density and spreading
+  # for AZ resilience pull in opposite directions, and EC2 capacity here
+  # optimizes for the former.
+  ordered_placement_strategy {
+    type  = "binpack"
+    field = "memory"
+  }
+
   network_configuration {
     # Fargate in public subnets with public IPs so tasks can pull images from
     # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
