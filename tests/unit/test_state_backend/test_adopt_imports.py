@@ -319,3 +319,78 @@ class TestBuildImportPlan:
         assert addrs.index("aws_lb_listener.https") < addrs.index(
             "aws_lb_listener_rule.nginx"
         )
+
+
+class TestEc2CapacityResourcesSafelySkipped:
+    """rc-wji.3: capacity.tf.j2's EC2 capacity resources (launch template,
+    ASG, capacity provider, ec2_instances SG, ec2_instance IAM role/profile)
+    have no dedicated resolver here. Confirms that's SAFE for the forcing
+    case -- a --no-state stack newly declaring launch_type: EC2 on a service
+    that never had EC2 capacity before -- not a gap that blocks adoption.
+    An unrecognized resource TYPE (no dispatch entry) or an unrecognized
+    local NAME on a type that IS dispatched (aws_security_group.ec2_instances
+    vs. the known "alb"/"tasks") both land in ``skipped``, never ``imports``,
+    and build_import_plan never raises for them. terraform creates them
+    fresh on the next (non-`--no-state`) apply instead of rc adopt trying
+    (and failing) to import a resource that was never live.
+    """
+
+    _EC2_CAPACITY_TF = """
+resource "aws_ecs_cluster" "main" {}
+resource "aws_launch_template" "ec2" {}
+resource "aws_autoscaling_group" "ec2" {}
+resource "aws_ecs_capacity_provider" "ec2" {}
+resource "aws_security_group" "ec2_instances" {}
+resource "aws_iam_role" "ec2_instance" {}
+resource "aws_iam_role_policy_attachment" "ec2_instance_ecs" {}
+resource "aws_iam_role_policy_attachment" "ec2_instance_ssm" {}
+resource "aws_iam_instance_profile" "ec2_instance" {}
+"""
+
+    _EC2_CAPACITY_ADDRS = {
+        "aws_launch_template.ec2",
+        "aws_autoscaling_group.ec2",
+        "aws_ecs_capacity_provider.ec2",
+        "aws_security_group.ec2_instances",
+        "aws_iam_role.ec2_instance",
+        "aws_iam_role_policy_attachment.ec2_instance_ecs",
+        "aws_iam_role_policy_attachment.ec2_instance_ssm",
+        "aws_iam_instance_profile.ec2_instance",
+    }
+
+    def test_ec2_capacity_resources_skipped_not_errored(self, tmp_path):
+        from remote_compose.state_backend.adopt_imports import build_import_plan
+
+        (tmp_path / "docker-compose.yml").write_text(
+            yaml.safe_dump({"services": {"worker": {"image": "busybox"}}})
+        )
+        (tmp_path / "main.tf").write_text(self._EC2_CAPACITY_TF)
+        rc = {
+            "version": 2,
+            "project": "sentinal",
+            "compose_file": "docker-compose.yml",
+            "provider": "ecs",
+            "provider_config": {
+                "ecs": {"region": "us-west-2", "cluster": "sentinal-prod"}
+            },
+            "terraform": {"backend": {"type": "local"}},
+            "services": {
+                "worker": {
+                    "cpu": 256,
+                    "memory": 512,
+                    "type": "worker",
+                    "launch_type": "EC2",
+                },
+            },
+        }
+        rc_path = tmp_path / "rc.yml"
+        rc_path.write_text(yaml.safe_dump(rc, sort_keys=False))
+
+        plan = build_import_plan(rc_path, tmp_path, session=_FakeSession())
+
+        imported_addrs = {a for a, _ in plan.imports}
+        skipped_addrs = {a for a, _ in plan.skipped}
+        # None of these are live yet -- must be safely skipped, never
+        # imported, and never raise.
+        assert self._EC2_CAPACITY_ADDRS.isdisjoint(imported_addrs)
+        assert self._EC2_CAPACITY_ADDRS <= skipped_addrs

@@ -2049,8 +2049,12 @@ class ECSProvider(Provider):
                 "so it did not provision (and cannot verify) EC2 capacity "
                 "for them. They run however ECS already has them live; if "
                 "that capacity was never provisioned, tasks will sit "
-                "PENDING. Use the terraform-managed state backend to have "
-                "rc create/manage EC2 capacity for these services."
+                "PENDING. Run `rc adopt` to bring this stack under "
+                "terraform management (safe: resources that aren't live "
+                "yet, like new EC2 capacity, are simply created on the "
+                "next apply, not destroyed or replaced), then deploy "
+                "without --no-state so rc creates/manages EC2 capacity "
+                "for these services."
             )
             self._emit(f"  WARN: {msg}")
             warnings.append(msg)
