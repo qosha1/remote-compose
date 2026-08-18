@@ -2024,6 +2024,32 @@ class ECSProvider(Provider):
         start = time.monotonic()
         warnings: list[str] = []
 
+        # --no-state never runs emit_terraform, so it can never create the
+        # EC2 capacity provider / ASG / launch template capacity.tf.j2 emits
+        # -- it only force-rolls (update_service) whatever ECS already has
+        # live. A service declared launch_type: EC2 here is not silently
+        # deployed as Fargate (no-state never touches launch type at all);
+        # it runs however AWS already has it -- which is correct and
+        # expected when that service's EC2 capacity was provisioned earlier
+        # (a prior terraform apply, Copilot, CloudFormation, ...). Warn
+        # rather than block: raising here would break every already-working
+        # --no-state deploy of a service that legitimately runs on EC2.
+        ec2_services = sorted(
+            n for n, s in ctx.services.items() if s.launch_type == "EC2"
+        )
+        if ec2_services:
+            msg = (
+                f"launch_type: EC2 is declared on {ec2_services}, but this "
+                "is a --no-state deploy: rc never runs emit_terraform here, "
+                "so it did not provision (and cannot verify) EC2 capacity "
+                "for them. They run however ECS already has them live; if "
+                "that capacity was never provisioned, tasks will sit "
+                "PENDING. Use the terraform-managed state backend to have "
+                "rc create/manage EC2 capacity for these services."
+            )
+            self._emit(f"  WARN: {msg}")
+            warnings.append(msg)
+
         # rc-5h8.12: --no-build in no-state mode. Images are built+pushed out
         # of band (e.g. CodeBuild / CI), so rc builds nothing — but it must
         # still force-roll so ECS pulls the freshly-pushed :latest. The normal
