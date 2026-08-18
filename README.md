@@ -639,6 +639,25 @@ Fargate task (or an EC2 task's own `awsvpc` ENI) ever needs, because
 Fargate's control-plane traffic never transits your VPC. Use `egress: nat`
 or a public group for `ec2_capacity.subnet_group` instead.
 
+**Reverting an EC2 pilot isn't clean.** Moving a service back from
+`launch_type: EC2` to `FARGATE` — dropping `capacity_provider_strategy` and
+setting `launch_type` again — hits the identical AWS provider requirement
+in reverse (a real repro from a browser-mgr pilot): `Error:
+force_new_deployment should be true when capacity_provider_strategy is
+being updated`. rc does not emit `force_new_deployment = true` on the
+`FARGATE` branch to work around this — that branch is the default output
+for every non-EC2 service in every rc-managed stack, and setting it there
+would mean any ordinary Fargate service update (a replica-count bump with
+no other change, say) also force-cycles every running task, which is a
+real behavior change for users who have never touched EC2. Also observed
+in the same pilot: the transition forces a full `aws_ecs_service`
+replacement rather than an in-place update (`launch_type` is effectively
+immutable across this specific field combination), so reversing an EC2
+pilot is not a quick toggle either way. If you need to revert, coordinate
+with your team on the exact `terraform apply`/`plan` invocation for that
+one service rather than assuming a standard `rc deploy` handles it
+cleanly.
+
 ### IMDS hardening on EC2 container instances
 
 Only relevant when a service sets `launch_type: EC2`. Fargate tasks take their
