@@ -1258,6 +1258,103 @@ def detect_python_pyc_in_build_context(
     return warnings
 
 
+# rc-z0k.6: a compose named volume mounted by 2+ services LOOKS shared, but
+# rc-e5u.46.11's auto-EFS-for-singleton-schedulers only ever auto-promotes
+# the mount into a real EFS access point for a service that (a) looks like
+# a singleton scheduler (celery-beat/-scheduler/-cron) and (b) has no
+# explicit rc.yml services.<svc>.volumes override. Any OTHER service
+# mounting the SAME compose volume gets nothing unless it ALSO has its own
+# explicit rc.yml volumes entry naming it.
+def detect_partially_wired_shared_volume(
+    compose: dict,
+    rc_v2_raw: Optional[dict] = None,
+) -> list[str]:
+    """Warn when a compose named volume is mounted by 2+ services but rc
+    only wires a real EFS mount for a strict subset of them.
+
+    Real repro (browser-mgr, 2026-08-18): docker-compose.yml had both
+    celerybeat and django mounting the same named volume
+    (production_django_media), which looked shared. Only celerybeat is a
+    singleton scheduler, so only celerybeat ever got auto-promoted to a
+    real EFS access point — django's live task definition had zero mount
+    points for it (confirmed via describe-task-definition). Removing
+    celerybeat from the compose mount list then planned to DESTROY the
+    underlying aws_efs_file_system, because celerybeat was rc's only real
+    consumer all along. That's CORRECT per rc's model (efs_volumes is
+    keyed by which services rc actually wires, not by what compose
+    implies) — the bug was that nobody could tell from `rc plan` that
+    "shared" in docker-compose.yml didn't mean "shared" in the deployed
+    stack, until the destroy plan appeared.
+
+    Only fires when the split is genuinely mixed (at least one wired
+    service AND at least one unwired service) — a volume where NO service
+    gets a real EFS mount is a different, less dangerous shape (nothing
+    silently looks safer than it is) and is out of scope here.
+    """
+    from .provider.ecs.provider import _looks_like_singleton_scheduler
+
+    warnings: list[str] = []
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+    rc_services = (rc_v2_raw or {}).get("services") or {}
+
+    volume_users: dict[str, set[str]] = {}
+    for svc_name, svc_compose in services.items():
+        if not isinstance(svc_compose, dict):
+            continue
+        for entry in _iter_volume_entries(svc_compose):
+            kind, source, _target = _classify_volume_entry(entry)
+            if kind != "named" or not source:
+                continue
+            volume_users.setdefault(source, set()).add(svc_name)
+
+    for vol_name, users in sorted(volume_users.items()):
+        if len(users) < 2:
+            continue
+        wired: set[str] = set()
+        unwired: set[str] = set()
+        for svc_name in users:
+            svc_compose = services.get(svc_name) or {}
+            rc_svc = (
+                rc_services.get(svc_name) if isinstance(rc_services, dict) else None
+            )
+            rc_vols = rc_svc.get("volumes") if isinstance(rc_svc, dict) else None
+            has_any_explicit = isinstance(rc_vols, list) and len(rc_vols) > 0
+            explicit_names = {
+                str(v["name"])
+                for v in (rc_vols or [])
+                if isinstance(v, dict) and v.get("name")
+            }
+            if vol_name in explicit_names:
+                wired.add(svc_name)
+                continue
+            cmd_str = _command_to_string(svc_compose.get("command"))
+            if not has_any_explicit and _looks_like_singleton_scheduler(
+                svc_name, [cmd_str] if cmd_str else []
+            ):
+                wired.add(svc_name)
+            else:
+                unwired.add(svc_name)
+        if wired and unwired:
+            warnings.append(
+                f"named volume {vol_name!r} is mounted in compose by "
+                f"{sorted(users)}, but rc only wires a real EFS mount for "
+                f"{sorted(wired)} — {sorted(unwired)} will NOT actually "
+                f"share this data in ECS (no rc.yml "
+                f"services.<svc>.volumes entry for it, and rc's "
+                f"singleton-scheduler auto-promotion only applies to "
+                f"celery-beat/-scheduler/-cron-shaped services). If "
+                f"{sorted(wired)} is ever dropped from this volume, rc "
+                f"will plan to DESTROY the underlying EFS file system — "
+                f"the other service(s) never had a real claim on it. Add "
+                f"an explicit 'volumes: [{{name: {vol_name}, mount: "
+                f"...}}]' entry in rc.yml for {sorted(unwired)} if they "
+                f"are meant to actually share this data."
+            )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -1281,4 +1378,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_unmatched_health_check_path(compose, compose_path, rc_v2_raw))
     out.extend(detect_dev_mode_command(compose))
     out.extend(detect_python_pyc_in_build_context(compose, compose_path))
+    out.extend(detect_partially_wired_shared_volume(compose, rc_v2_raw))
     return out

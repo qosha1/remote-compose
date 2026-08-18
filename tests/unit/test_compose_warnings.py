@@ -19,6 +19,7 @@ from remote_compose.compose_warnings import (
     detect_external_volumes,
     detect_multi_port_alb,
     detect_nginx_upstream_resolver,
+    detect_partially_wired_shared_volume,
 )
 
 
@@ -152,6 +153,137 @@ class TestExternalVolumeDetector:
         }
         rc_v2 = {"services": {"db": {"cpu": 256, "memory": 512}}}
         assert detect_external_volumes(compose, rc_v2) == []
+
+
+# ---------------------------------------------------------------------------
+# rc-z0k.6 — partially-wired shared volume detector
+# ---------------------------------------------------------------------------
+
+
+class TestPartiallyWiredSharedVolumeDetector:
+    def _compose(self, django_command=None):
+        django_svc = {"image": "django-app", "volumes": ["media:/media"]}
+        if django_command is not None:
+            django_svc["command"] = django_command
+        return {
+            "services": {
+                "django": django_svc,
+                "celerybeat": {
+                    "image": "django-app",
+                    "command": ["celery", "-A", "proj", "beat"],
+                    "volumes": ["media:/media"],
+                },
+            },
+        }
+
+    def test_singleton_wired_other_service_unwired_warns(self):
+        """The browser-mgr repro shape: celerybeat (singleton, no explicit
+        rc.yml volumes) auto-promotes; django (not a singleton, no explicit
+        rc.yml volumes) gets nothing, despite compose making 'media' look
+        shared by both."""
+        compose = self._compose()
+        rc_v2 = {
+            "services": {
+                "django": {"cpu": 512, "memory": 1024},
+                "celerybeat": {"cpu": 256, "memory": 512},
+            }
+        }
+        warns = detect_partially_wired_shared_volume(compose, rc_v2)
+        assert len(warns) == 1
+        assert "'media'" in warns[0]
+        assert "['celerybeat']" in warns[0]
+        assert "['django']" in warns[0]
+        assert "DESTROY" in warns[0]
+
+    def test_both_explicitly_wired_in_rc_yml_does_not_warn(self):
+        compose = self._compose()
+        rc_v2 = {
+            "services": {
+                "django": {
+                    "cpu": 512,
+                    "memory": 1024,
+                    "volumes": [{"name": "media", "mount": "/media"}],
+                },
+                "celerybeat": {
+                    "cpu": 256,
+                    "memory": 512,
+                    "volumes": [{"name": "media", "mount": "/media"}],
+                },
+            }
+        }
+        assert detect_partially_wired_shared_volume(compose, rc_v2) == []
+
+    def test_solo_mount_does_not_warn(self):
+        """Only one service mounts the volume -- nothing to be silently
+        inconsistent about."""
+        compose = {
+            "services": {
+                "celerybeat": {
+                    "image": "django-app",
+                    "command": ["celery", "-A", "proj", "beat"],
+                    "volumes": ["media:/media"],
+                },
+            },
+        }
+        rc_v2 = {"services": {"celerybeat": {"cpu": 256, "memory": 512}}}
+        assert detect_partially_wired_shared_volume(compose, rc_v2) == []
+
+    def test_neither_wired_does_not_warn(self):
+        """Two non-singleton services share a volume that neither has
+        explicit rc.yml coverage for -- ephemeral for both equally, not the
+        dangerous "looks safer than it is" shape this detector targets."""
+        compose = {
+            "services": {
+                "web": {"image": "app", "volumes": ["cache:/cache"]},
+                "worker": {"image": "app", "volumes": ["cache:/cache"]},
+            },
+        }
+        rc_v2 = {
+            "services": {
+                "web": {"cpu": 256, "memory": 512},
+                "worker": {"cpu": 256, "memory": 512},
+            }
+        }
+        assert detect_partially_wired_shared_volume(compose, rc_v2) == []
+
+    def test_django_has_unrelated_explicit_volume_still_unwired(self):
+        """django has SOME explicit rc.yml volumes (a different volume),
+        which disables singleton auto-promotion consideration for it (it's
+        not a singleton anyway) but does NOT itself wire 'media' -- still
+        counts as unwired since 'media' specifically isn't named."""
+        compose = self._compose()
+        rc_v2 = {
+            "services": {
+                "django": {
+                    "cpu": 512,
+                    "memory": 1024,
+                    "volumes": [{"name": "other-vol", "mount": "/other"}],
+                },
+                "celerybeat": {"cpu": 256, "memory": 512},
+            }
+        }
+        warns = detect_partially_wired_shared_volume(compose, rc_v2)
+        assert len(warns) == 1
+        assert "['django']" in warns[0]
+
+    def test_explicit_rc_yml_volume_suppresses_auto_promotion_correctly(self):
+        """celerybeat has ITS OWN explicit rc.yml volumes list -- disables
+        auto-promotion for it (cli_v2.py's own gate). If that explicit list
+        doesn't name 'media', celerybeat itself becomes unwired too, and
+        with no wired service at all the detector stays silent (out of
+        scope -- see test_neither_wired_does_not_warn)."""
+        compose = self._compose()
+        rc_v2 = {
+            "services": {
+                "django": {"cpu": 512, "memory": 1024},
+                "celerybeat": {
+                    "cpu": 256,
+                    "memory": 512,
+                    "volumes": [{"name": "other-vol", "mount": "/other"}],
+                },
+            }
+        }
+        assert detect_partially_wired_shared_volume(compose, rc_v2) == []
 
 
 # ---------------------------------------------------------------------------
