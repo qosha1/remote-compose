@@ -202,6 +202,10 @@ provider_config:
     #       http_listener_arn: arn:aws:elasticloadbalancing:...:listener/.../...
     #       https_listener_arn: arn:aws:elasticloadbalancing:...:listener/.../...  # only required if any service sets domain:
     #       security_group_ids: [sg-abc, sg-def]  # the SGs already on the live ALB
+    # Both modes work with `launch_type: EC2` services too — the EC2 capacity
+    # instances' security group admits ALB traffic from the same source the
+    # `tasks` SG already uses (the adopted/existing ALB's own security
+    # groups), no rc-created `aws_security_group.alb` required.
     # Mutually exclusive with each other. adopt_owned.alb sets
     # `lifecycle { ignore_changes = all }` on the adopted resources — rc holds
     # delete/update authority but deliberately never diffs their live attributes
@@ -689,6 +693,18 @@ awsvpc tasks a container instance can actually host is `max_enis - 1`, not
 however many fit by CPU/memory math alone. A pile of small, high-replica-count
 services can hit this ceiling long before CPU or memory does.
 
+**Bin-packing.** Every `launch_type: EC2` service gets
+`ordered_placement_strategy { type = "binpack", field = "memory" }` on its
+`aws_ecs_service`. Without a placement strategy, ECS spreads tasks with no
+particular packing goal, so the ASG scales out to cover them and EC2 launch
+type loses its cost advantage over Fargate — bin-packing by memory is what
+lets several services' tasks actually land on the same instances. Trade-off:
+ECS's automatic AZ rebalancing only applies to a service whose first (or
+only) placement strategy is an AZ spread, or that declares none at all —
+binpack-first makes an EC2-launch service ineligible for it. Deliberate:
+bin-packing for density and spreading for AZ resilience pull in opposite
+directions, and EC2 capacity here optimizes for the former.
+
 rc's default t3 ladder, verified against the live AWS API
 (`aws ec2 describe-instance-types`, `NetworkInfo.MaximumNetworkInterfaces`):
 
@@ -731,6 +747,30 @@ c5, r5, and their newer generations), on top of the account-wide opt-in — a
 meaningfully bigger, riskier feature than sizing around the ceiling. Revisit
 if a workload's replica-count-driven instance sprawl becomes a real cost
 problem that a bigger `instance_type` doesn't fix.
+
+**Setting `ec2_capacity.instance_type` explicitly is validated too.**
+`auto_size()` never runs when `instance_type` is given directly — rc used to
+take `min`/`desired`/`max` straight from config with no check that the
+declared EC2 task demand (CPU, memory, or ENI count) actually fits, so
+infeasible config emitted clean terraform and only failed later as tasks
+stuck `PENDING` in real ECS. rc now validates against the same three
+dimensions for every instance type it carries verified numbers for:
+
+| Family | Sizes covered |
+| --- | --- |
+| `t3` / `t3a` / `t4g` (burstable) | nano → 2xlarge |
+| `m5` / `m6i` (general purpose) | large → 24xlarge, metal |
+| `c5` / `c6i` (compute optimized) | large → 24xlarge, metal |
+
+Verified live against `describe-instance-types` (2026-08-18) — not derived
+from a per-family/per-size formula. Two concrete reasons why: `t3a.small` has
+**half** the usable ENI slots of its identically-shaped `t3.small`/`t4g.small`
+siblings (max ENIs 2 vs. 3), and `c5`/`c6i` carry **half** the memory of a
+same-labeled `m5`/`m6i`/`t3` size at the same vCPU count (`c5.xlarge` = 8 GiB,
+`m5.xlarge`/`t3.xlarge` = 16 GiB). A table generalized from either family
+would get these wrong. Setting `instance_type` to anything outside this list
+is simply not modeled — rc skips the check rather than guess, the same way a
+caller-supplied auto-sizing ladder with no ENI data skips the ENI dimension.
 
 ### Worked example: Django + Celery, web on Fargate, workers on EC2
 
@@ -822,6 +862,9 @@ What's built and live-verified on the `portable-deploy` branch:
 - **`default_launch_type: EC2`** — environment-wide switch to schedule every service through an EC2-backed `aws_autoscaling_group` capacity provider instead of Fargate; per-service `launch_type:` always overrides it. `ec2_capacity` tunes instance type, on-demand/spot mix, and ASG sizing, auto-sized from declared task demand when `instance_type` is omitted ([details](#default_launch_type--run-every-service-on-ec2-instead-of-fargate))
 - **IMDS hardening on EC2 capacity** — IMDSv2 required on `aws_launch_template.ec2` by default, container-compatible hop limit, opt-in `ECS_AWSVPC_BLOCK_IMDS` ([details](#imds-hardening-on-ec2-container-instances))
 - **ENI-aware EC2 auto-sizing** — `autosize.py` treats awsvpc's one-ENI-per-task ceiling (`max_enis - 1` usable per instance, verified against the AWS API) as a third sizing dimension alongside CPU/memory, so a high-replica-count stack of small tasks can't under-provision instance count ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
+- **EC2 bin-packing** — every `launch_type: EC2` service gets `ordered_placement_strategy { type = "binpack", field = "memory" }`, so multiple services actually share instances instead of each nudging the ASG to add another one ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
+- **Explicit `ec2_capacity.instance_type` density validation** — CPU/memory/ENI feasibility checked against a verified table (t3/t3a/t4g/m5/m6i/c5/c6i) even when auto-sizing is bypassed, so an infeasible shape+demand combo fails at `emit_terraform` instead of leaving tasks `PENDING` in real ECS ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
+- **`existing_alb`/`adopt_owned.alb` + `launch_type: EC2`** — EC2 capacity instances admit ALB traffic from the adopted/existing ALB's own security groups, same source the `tasks` SG already uses; no rc-created ALB security group required
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
 - Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
