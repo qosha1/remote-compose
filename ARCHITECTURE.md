@@ -354,6 +354,12 @@ services:
     security_groups: [isolated]        # REPLACES the shared ${project}-tasks SG
     subnets: tasks-private             # placement; assign_public_ip derived
     iam_role: media-writer             # REPLACES the shared ${project}-task role
+  redis:
+    cpu: 256
+    memory: 512
+    type: infrastructure
+    image: redis:7-alpine              # required when compose has no such
+                                       #   service; overrides compose `build:`
 
 secrets:
   - { name: django, source: file, path: .envs/.production/.django }

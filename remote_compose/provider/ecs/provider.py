@@ -1301,15 +1301,20 @@ class ECSProvider(Provider):
                 "stateful": stateful,
                 "env": dict(spec.env or {}),
                 "command": list(spec.command or []),
-                # Pre-built compose image; if set (and no build context), task
-                # def uses it verbatim instead of an ECR placeholder.
+                # Pre-built image, from compose `image:` or from rc.yml
+                # `services.<svc>.image` (rc.yml wins and clears the build
+                # context). If set, the task def uses it verbatim instead of
+                # an ECR placeholder. Named compose_image for its original
+                # source; the field is the same either way.
                 #
-                # Both None means services.tf.j2 emits an ECR tag rc never
-                # pushes. startsim-wxb7 closed the config-level route to that
-                # state (a missing or service-less compose_file is now an
-                # error); rc-2r1r covers the remaining one — rc.yml can declare
-                # a service compose doesn't have, but has no `image` field to
-                # give it.
+                # Both None would mean services.tf.j2 emits an ECR tag rc
+                # never pushes. No validated config reaches that state any
+                # more: startsim-wxb7 made a missing or service-less
+                # compose_file an error, and rc-2r1r closed the last route —
+                # an rc.yml service that compose doesn't define must now
+                # declare its own image. The template's final else branch
+                # survives only as a backstop for ServiceSpecs built directly
+                # in code, bypassing build_deploy_context.
                 "compose_image": spec.image if not spec.build_context else None,
                 "has_build_context": bool(spec.build_context),
                 # Shared-image dedup (rc-44i). Services sharing a build identity
