@@ -16,6 +16,26 @@ from click.testing import CliRunner
 
 from remote_compose.cli import cli
 from remote_compose.provider.ecs import provider as ecs_provider
+from remote_compose.provider.ecs import deploy_preflight as pf
+
+
+# rc-8ikz: the "clean environment" tests must control EVERY input, including
+# whether a terraform binary exists. They stub AWS but not this, so they passed
+# on a developer laptop with terraform installed and failed on a CI runner
+# without one -- the check reported "terraform binary not found on PATH" and the
+# preflight correctly exited 1. That is the same machine-dependence that made
+# main's CI red; it just came in through a second door.
+#
+# Autouse so no clean-environment test can forget it. Tests that want the
+# MISSING case can monkeypatch it back to (None, None) themselves and still win.
+@pytest.fixture(autouse=True)
+def _stub_terraform_binary(monkeypatch):
+    monkeypatch.setattr(
+        pf,
+        "local_terraform_version",
+        lambda *_a, **_k: ("/usr/bin/terraform", (1, 15, 5)),
+    )
+
 
 _RC = {
     "version": 2,
