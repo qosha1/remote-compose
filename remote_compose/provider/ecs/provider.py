@@ -54,7 +54,9 @@ from .iam_plan import IamPlan, build_iam_plan
 from .deploy_preflight import FAIL as _PREFLIGHT_FAIL
 from .deploy_preflight import run_preflight
 from .plan_analysis import (
+    detect_binpack_az_rebalancing_conflicts,
     detect_task_definition_replacements,
+    render_binpack_conflict_warning,
     render_replacement_warning,
 )
 from .network_plan import (
@@ -2285,12 +2287,12 @@ class ECSProvider(Provider):
         # exactly as before — no plan file, no extra terraform round trip.
         plan_file = (
             self._preapply_plan_path(out_dir)
-            if self._task_defs_are_owned_out_of_band(ctx)
+            if self._needs_preapply_plan(ctx)
             else None
         )
         summary = runner.plan(out_file=plan_file)
         if plan_file is not None:
-            self._warn_on_task_def_replacement(runner, plan_file)
+            self._inspect_plan(runner, plan_file)
         # Compose-file detectors (rc-e5u.44.6/.7/.8/.9) flag silently-
         # dropped bind mounts, ephemeral data, dev-only DNS, and
         # unreachable secondary ports. Run here so any caller of
@@ -2374,12 +2376,12 @@ class ECSProvider(Provider):
         # introduced the strictness on purpose: re-run the deploy.
         plan_file = (
             self._preapply_plan_path(out_dir)
-            if self._task_defs_are_owned_out_of_band(ctx)
+            if self._needs_preapply_plan(ctx)
             else None
         )
         if plan_file is not None:
             runner.plan(out_file=plan_file)
-            for message in self._warn_on_task_def_replacement(runner, plan_file):
+            for message in self._inspect_plan(runner, plan_file):
                 warnings.append(message)
                 self._emit(f"  warning: {message}")
         runner.apply(plan_file=plan_file)
@@ -3242,11 +3244,52 @@ class ECSProvider(Provider):
         this stack's task definitions."""
         return bool(_ecs_cfg(ctx).get("ignore_task_definition_changes", False))
 
+    def _needs_preapply_plan(self, ctx: DeployContext) -> bool:
+        """Whether to save + inspect the plan before applying.
+
+        Two triggers, both about failures only visible against LIVE state:
+
+        * ignore_task_definition_changes (rc-avcr) -- a forced task-def
+          replacement silently drops out-of-band secrets.
+        * any EC2-launch service (rc-5a4g) -- binpack placement is rejected
+          while the service's live availability_zone_rebalancing is ENABLED,
+          and whether it is depends on how the service was first created.
+
+        Nearly free: the saved plan is reused as the apply's input, so this
+        costs no extra terraform cycle -- apply would plan anyway.
+        """
+        if self._task_defs_are_owned_out_of_band(ctx):
+            return True
+        default_launch_type = _ecs_cfg(ctx).get("default_launch_type", "FARGATE")
+        return any(
+            (spec.launch_type or default_launch_type) == "EC2"
+            for spec in (ctx.services or {}).values()
+        )
+
     @staticmethod
     def _preapply_plan_path(out_dir: Path) -> Path:
         """Where the inspected plan is saved. ``*.tfplan`` is already in the
         emitted .gitignore, so this never lands in a user's repo."""
         return Path(out_dir) / "rc-preapply.tfplan"
+
+    def _inspect_plan(self, runner: Any, plan_file: Path) -> list[str]:
+        """Run every live-state detector over the saved plan.
+
+        Findings are recorded in the sink and returned so the deploy path can
+        surface them before terraform touches anything.
+        """
+        messages = self._warn_on_task_def_replacement(runner, plan_file)
+        try:
+            plan_json = runner.show_json(plan_file)
+        except Exception:  # noqa: BLE001 — already reported by the call above
+            return messages
+        conflict_msg = render_binpack_conflict_warning(
+            detect_binpack_az_rebalancing_conflicts(plan_json)
+        )
+        if conflict_msg:
+            self._warn(conflict_msg)
+            messages.append(conflict_msg)
+        return messages
 
     def _warn_on_task_def_replacement(self, runner: Any, plan_file: Path) -> list[str]:
         """Report task definitions this plan REPLACES rather than updates.

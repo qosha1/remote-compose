@@ -13,6 +13,8 @@ it doesn't rot.
 Beads:
   rc-avcr — ignore_task_definition_changes fails open on a FORCED task
             definition replacement, silently dropping out-of-band secrets.
+  rc-5a4g — binpack placement is rejected by ECS while the service's live
+            availability_zone_rebalancing is ENABLED.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 TASK_DEFINITION_TYPE = "aws_ecs_task_definition"
+SERVICE_TYPE = "aws_ecs_service"
 
 # A replacement is delete+create in either order — plain replacement is
 # ["delete", "create"]; create_before_destroy inverts it. Anything else
@@ -243,3 +246,112 @@ def render_replacement_warning(
         "own.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# rc-5a4g: binpack vs. Availability Zone rebalancing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BinpackRebalancingConflict:
+    """A service the plan gives binpack while leaving AZ rebalancing on."""
+
+    address: str
+    service: str
+
+    @property
+    def label(self) -> str:
+        return self.service or self.address
+
+
+def _has_binpack(attrs: Any) -> bool:
+    if not isinstance(attrs, dict):
+        return False
+    strategies = attrs.get("ordered_placement_strategy")
+    if not isinstance(strategies, list):
+        return False
+    return any(
+        isinstance(s, dict) and str(s.get("type", "")).lower() == "binpack"
+        for s in strategies
+    )
+
+
+def detect_binpack_az_rebalancing_conflicts(
+    plan_json: dict,
+) -> list[BinpackRebalancingConflict]:
+    """Services this plan would leave in a self-contradicting state.
+
+    ECS refuses a service that combines a binpack placement strategy with
+    ``availabilityZoneRebalancing = ENABLED``, and the default is
+    history-dependent rather than config-dependent: CreateService with no
+    value yields ENABLED, while UpdateService with no value KEEPS whatever
+    the live service already has. So a service first created on Fargate
+    carries ENABLED, and an apply that adds binpack without also setting
+    DISABLED produces a 400 at UpdateService -- reachable only against live
+    service state, which is why plan and preflight both pass clean.
+
+    rc renders DISABLED alongside every binpack it emits, so this should
+    never fire on rc-rendered terraform. It exists to catch the case coming
+    back: drift, an adopted service, or a future template change that emits
+    binpack without owning the field again.
+    """
+    changes = plan_json.get("resource_changes")
+    if not isinstance(changes, list):
+        return []
+
+    out: list[BinpackRebalancingConflict] = []
+    for rc in changes:
+        if not isinstance(rc, dict) or rc.get("type") != SERVICE_TYPE:
+            continue
+        change = rc.get("change")
+        if not isinstance(change, dict):
+            continue
+        actions = change.get("actions")
+        if not isinstance(actions, list) or set(actions) <= {"no-op", "read"}:
+            continue
+        after = change.get("after")
+        before = change.get("before")
+        if not _has_binpack(after):
+            continue
+        planned = (after or {}).get("availability_zone_rebalancing")
+        if str(planned or "").upper() == "DISABLED":
+            continue  # the plan fixes it
+        live = (before or {}).get("availability_zone_rebalancing")
+        # Unset on a CREATE is also a conflict: ECS defaults new services to
+        # ENABLED, so binpack + unspecified is rejected there too.
+        creating = "create" in actions and "delete" not in actions
+        if str(live or "").upper() == "ENABLED" or (creating and not planned):
+            out.append(
+                BinpackRebalancingConflict(
+                    address=str(rc.get("address") or ""),
+                    service=str((after or {}).get("name") or rc.get("name") or ""),
+                )
+            )
+    return out
+
+
+def render_binpack_conflict_warning(
+    conflicts: list[BinpackRebalancingConflict],
+) -> str:
+    """Prose warning for services that would be rejected at UpdateService."""
+    if not conflicts:
+        return ""
+    names = ", ".join(c.label for c in conflicts)
+    return (
+        f"ECS will REJECT this apply for {names}: the plan gives these "
+        f"service(s) a binpack placement strategy while their Availability "
+        f"Zone rebalancing stays ENABLED, and ECS does not accept that "
+        f"combination (UpdateService returns 400).\n"
+        f"    This is invisible until apply because it depends on LIVE "
+        f"service state, not on config: ECS defaults a newly created service "
+        f"to ENABLED, but on update it keeps whatever the service already "
+        f"has. A service first created on FARGATE therefore carries ENABLED "
+        f"into its move to EC2, while one that was already DISABLED migrates "
+        f"cleanly -- same config, opposite outcomes.\n"
+        f'    rc normally renders availability_zone_rebalancing = "DISABLED" '
+        f"next to every binpack strategy it emits, so seeing this means the "
+        f"service's placement strategy is coming from somewhere rc does not "
+        f"own (an adopted service, or drift). Set it to DISABLED on those "
+        f"services before applying."
+    )

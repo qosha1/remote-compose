@@ -397,6 +397,28 @@ resource "aws_ecs_service" "worker" {
     field = "memory"
   }
 
+  # rc-5a4g: because rc asks for binpack above, it must also OWN this field.
+  # ECS rejects the combination, so leaving the argument unrendered (the
+  # AWS provider treats it as Optional+Computed and keeps whatever the live
+  # service has) makes the outcome depend on history rather than on config:
+  #
+  #   CreateService with no value  -> ECS defaults to ENABLED
+  #   UpdateService with no value  -> ECS keeps the service's existing value
+  #                                   (API_CreateService, availabilityZoneRebalancing)
+  #
+  # So a service first created on FARGATE carries ENABLED, and the apply that
+  # moves it to EC2 adds binpack while leaving ENABLED in place -- a config
+  # that contradicts itself, and UpdateService 400s. Verified in the field on
+  # debuggai-api: 6 of 7 services failed exactly this way, and the one that
+  # migrated cleanly did so only because it is a singleton scheduler and had
+  # therefore already been pinned DISABLED by the stateful branch above.
+  # Same rc.yml, same apply, opposite outcomes -- which reads as flakiness
+  # rather than as a config error, and is why rc must set this explicitly.
+  #
+  # Stateful services already pin it above (for the separate maximumPercent
+  # <= 100 conflict); rendering it here too would be a duplicate argument.
+  availability_zone_rebalancing = "DISABLED"
+
   network_configuration {
     # Fargate in public subnets with public IPs so tasks can pull images from
     # ECR without requiring a NAT gateway (~$0.045/hr saved). The tasks SG
