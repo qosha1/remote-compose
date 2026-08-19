@@ -423,6 +423,13 @@ def _default_runner_factory(out_dir: Path) -> TerraformRunner:
     return TerraformRunner(out_dir)
 
 
+# Default first listener-rule priority; rules step by 10 from here so operators
+# can hand-write rules in between. Overridable per project via
+# existing_alb.listener_rule_priority_base when several projects share ONE
+# adopted listener — priorities are unique per listener, not per project
+# (rc-4tkc.2).
+LISTENER_RULE_PRIORITY_BASE = 100
+
 _SINGLETON_NAME_SUFFIXES = ("-beat", "-scheduler", "-cron")
 _SINGLETON_COMMAND_RE = re.compile(
     r"\b(celery\s+(?:-A\s+\S+\s+)?beat\b|celerybeat\b)",
@@ -968,6 +975,29 @@ class ECSProvider(Provider):
             raise ProviderConfigError(
                 "provider_config.ecs.existing_alb requires both 'arn' and "
                 "'https_listener_arn' (the live ALB + its HTTPS listener)"
+            )
+        # rc-4tkc.2: listener-rule priorities are unique per LISTENER, but rc
+        # numbers them per PROJECT (100, 110, ...). That is fine while rc owns
+        # the listener — each project has its own. The moment two projects adopt
+        # the SAME listener, both emit 100 and the second apply dies on
+        # PriorityInUse. An explicit band per project is the fix; deliberately
+        # NOT a hash of the project name, because a hash collision here is silent
+        # and priorities are a scarce ordered resource (1..50000).
+        listener_rule_priority_base = existing_alb_cfg.get(
+            "listener_rule_priority_base", LISTENER_RULE_PRIORITY_BASE
+        )
+        if not isinstance(listener_rule_priority_base, int) or isinstance(
+            listener_rule_priority_base, bool
+        ):
+            raise ProviderConfigError(
+                "provider_config.ecs.existing_alb.listener_rule_priority_base must "
+                f"be an integer, got {listener_rule_priority_base!r}"
+            )
+        if not 1 <= listener_rule_priority_base <= 50000:
+            raise ProviderConfigError(
+                "provider_config.ecs.existing_alb.listener_rule_priority_base must "
+                "be within AWS's listener-rule priority range 1..50000, got "
+                f"{listener_rule_priority_base}"
             )
 
         # Adopt-and-own ALB (rc-v4c): unlike existing_alb (pure read-only
@@ -1710,10 +1740,12 @@ class ECSProvider(Provider):
         for sv in services_view:
             for a in sv.get("aliases", []) or []:
                 alias_hostnames.append(a)
-        # Listener rules need distinct priorities. Start at 100 and step
-        # by 10 so users can hand-write rules in between later.
+        # Listener rules need distinct priorities. Step by 10 so users can
+        # hand-write rules in between later. The base is 100 unless this project
+        # shares an adopted listener with others, in which case each project gets
+        # its own band via existing_alb.listener_rule_priority_base (rc-4tkc.2).
         for i, dsvc in enumerate(domained_services):
-            dsvc["listener_rule_priority"] = 100 + i * 10
+            dsvc["listener_rule_priority"] = listener_rule_priority_base + i * 10
         has_domained_services = len(domained_services) > 0
         has_ec2_service = len(ec2_demands) > 0
         # An adopted ALB keeps its own (rc-unmanaged) default listener action,
