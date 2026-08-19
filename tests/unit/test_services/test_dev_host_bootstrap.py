@@ -1666,6 +1666,28 @@ class TestNoTokenPersistedOnDisk:
                 "password=$GH_TOKEN" in boot
             ), f"{src.type}: helper does not read the token from the env"
 
+    def test_helper_does_not_depend_on_the_callers_environment(self):
+        """git runs the helper as a fresh child; the caller may have no GH_TOKEN.
+
+        The in-box agent's tmux server is started by cloud-init, which HAS the
+        token in its environment. Anything that later recreates that session
+        outside cloud-init — a human, a repair script — produces a session with
+        no GH_TOKEN, and every subsequent `git push` then fails with no
+        credential while `git config` still claims to be wired for it. Observed
+        exactly that on a live box: the agent reported "no GitHub credential
+        reachable from this session" with a correctly-configured helper.
+
+        Sourcing the 0600 ~/.rc-dev-env makes auth independent of who started
+        what. (PR #43 delivers the token to that same file over SSH, so this
+        holds for the vault path too.)
+        """
+        for src in self._both():
+            boot = self._bootstrap(src)
+            assert ". $HOME/.rc-dev-env" in boot, (
+                f"{src.type}: helper trusts the caller's env; a session started "
+                "outside cloud-init will be unable to push"
+            )
+
     def test_helper_does_not_bake_the_token_at_render_time(self):
         # The helper must reference $GH_TOKEN literally; rendering it with a
         # concrete value would put the secret straight back into user-data.

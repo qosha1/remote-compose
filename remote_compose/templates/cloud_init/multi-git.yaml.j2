@@ -61,7 +61,15 @@ write_files:
       # check. Instead: reset origin to the clean URL and answer git's auth
       # prompts from $GH_TOKEN in the environment, which is already present via
       # .rc-dev-env. Nothing secret touches disk.
-      sudo -u ec2-user git config --global credential.helper '!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f'
+      # The helper SOURCES ~/.rc-dev-env rather than trusting the caller's
+      # environment. git runs it as a fresh child process, and the process that
+      # invoked git may not carry GH_TOKEN at all — the in-box agent's tmux
+      # server is started by cloud-init, so anything that later recreates that
+      # session outside cloud-init (a human, a repair script) leaves every
+      # subsequent `git push` failing with no credential and a confusing
+      # 'wired to expect $GH_TOKEN but it isn't set' error. Reading the 0600
+      # file makes auth independent of who started what.
+      sudo -u ec2-user git config --global credential.helper '!f() { . $HOME/.rc-dev-env 2>/dev/null; echo username=x-access-token; echo password=$GH_TOKEN; }; f'
       # Clone each repo to its target dir.
       {% for repo in repos %}
       if [ -n "${GH_TOKEN:-}" ]; then
