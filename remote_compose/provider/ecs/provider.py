@@ -2286,6 +2286,14 @@ class ECSProvider(Provider):
         # before them would describe a different apply) and reused as the
         # apply's input, which makes the warning describe exactly what runs
         # and costs no extra terraform cycle — apply would plan anyway.
+        #
+        # Reusing the plan file DOES change one failure mode, deliberately:
+        # `terraform apply <saved-plan>` refuses a plan whose state moved
+        # underneath it ("Saved plan is stale"), where a bare apply would
+        # silently replan and proceed. That only happens when something else
+        # wrote the state between these two calls — i.e. a concurrent apply —
+        # and failing is the right answer there. If you land here, rc
+        # introduced the strictness on purpose: re-run the deploy.
         plan_file = (
             self._preapply_plan_path(out_dir)
             if self._task_defs_are_owned_out_of_band(ctx)
