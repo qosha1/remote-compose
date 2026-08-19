@@ -45,6 +45,10 @@ from .autosize import (
     check_fixed_shape_capacity,
 )
 from .iam_plan import IamPlan, build_iam_plan
+from .plan_analysis import (
+    detect_task_definition_replacements,
+    render_replacement_warning,
+)
 from .network_plan import (
     NetworkPlan,
     build_network_plan,
@@ -2091,7 +2095,18 @@ class ECSProvider(Provider):
         self.emit_terraform(ctx, out_dir)
         runner = self.runner_factory(out_dir)
         runner.init()
-        summary = runner.plan()
+        # rc-avcr: on an ignore_task_definition_changes stack, save the plan
+        # so it can be inspected for FORCED task-definition replacements
+        # (see _warn_on_task_def_replacement). Every other stack plans
+        # exactly as before — no plan file, no extra terraform round trip.
+        plan_file = (
+            self._preapply_plan_path(out_dir)
+            if self._task_defs_are_owned_out_of_band(ctx)
+            else None
+        )
+        summary = runner.plan(out_file=plan_file)
+        if plan_file is not None:
+            self._warn_on_task_def_replacement(runner, plan_file)
         # Compose-file detectors (rc-e5u.44.6/.7/.8/.9) flag silently-
         # dropped bind mounts, ephemeral data, dev-only DNS, and
         # unreachable secondary ports. Run here so any caller of
@@ -2157,7 +2172,24 @@ class ECSProvider(Provider):
         self._reconcile_orphan_log_groups(ctx, runner)
         self._reconcile_orphan_backup_bucket(ctx, runner)
         self._reconcile_adopt_owned_alb(ctx, runner)
-        runner.apply()
+        # rc-avcr: an ignore_task_definition_changes stack gets an explicit
+        # plan before the apply, so a FORCED task-definition replacement is
+        # reported while it can still be aborted. Deliberately AFTER the
+        # reconcile-import steps above (they mutate state, so a plan taken
+        # before them would describe a different apply) and reused as the
+        # apply's input, which makes the warning describe exactly what runs
+        # and costs no extra terraform cycle — apply would plan anyway.
+        plan_file = (
+            self._preapply_plan_path(out_dir)
+            if self._task_defs_are_owned_out_of_band(ctx)
+            else None
+        )
+        if plan_file is not None:
+            runner.plan(out_file=plan_file)
+            for message in self._warn_on_task_def_replacement(runner, plan_file):
+                warnings.append(message)
+                self._emit(f"  warning: {message}")
+        runner.apply(plan_file=plan_file)
         outputs = runner.output()
 
         # rc-44z: --no-build skips _build_and_push_images entirely. Force-
@@ -2859,6 +2891,62 @@ class ECSProvider(Provider):
         import sys
 
         print(message, file=sys.stderr)
+
+    def _task_defs_are_owned_out_of_band(self, ctx: DeployContext) -> bool:
+        """True when rc.yml declares terraform is not the source of truth for
+        this stack's task definitions."""
+        return bool(_ecs_cfg(ctx).get("ignore_task_definition_changes", False))
+
+    @staticmethod
+    def _preapply_plan_path(out_dir: Path) -> Path:
+        """Where the inspected plan is saved. ``*.tfplan`` is already in the
+        emitted .gitignore, so this never lands in a user's repo."""
+        return Path(out_dir) / "rc-preapply.tfplan"
+
+    def _warn_on_task_def_replacement(self, runner: Any, plan_file: Path) -> list[str]:
+        """Report task definitions this plan REPLACES rather than updates.
+
+        rc-avcr. ``ignore_task_definition_changes: true`` exists so a stack
+        whose task defs are reconciled out of band (secrets wired on by a
+        post-deploy script) can run a stateful apply without terraform
+        re-registering revisions that strip those values. It does not hold
+        when the task def is REPLACED instead of updated: changing
+        ``launch_type`` flips ``requires_compatibilities`` FARGATE -> EC2,
+        which is ForceNew, and ``lifecycle ignore_changes`` suppresses
+        diff-driven updates only — it cannot suppress a replacement forced by
+        a different attribute. The rendered replacement carries none of the
+        reconciled secrets, and the service is repointed at it in the same
+        apply.
+
+        Never fatal: the plan may be exactly what the operator intends (they
+        may be about to re-run the reconcile). The value is that it is no
+        longer silent. Returns the warnings raised, and records them in the
+        sink for PlanResult.
+
+        A failure to read or parse the plan is swallowed — this is a
+        detector, and a detector that breaks a working deploy is worse than
+        one that misses a case. It does report that it couldn't look.
+        """
+        try:
+            plan_json = runner.show_json(plan_file)
+        except Exception as exc:  # noqa: BLE001 — never break a deploy to warn
+            message = (
+                "ignore_task_definition_changes is on, but rc could not read "
+                f"the terraform plan to check for forced task-definition "
+                f"replacements ({type(exc).__name__}: {exc}). If this apply "
+                "replaces a task definition, out-of-band secrets/env on the "
+                "live revision will be dropped — re-run your task-definition "
+                "reconcile afterwards."
+            )
+            self._warn(message)
+            return [message]
+
+        replacements = detect_task_definition_replacements(plan_json)
+        message = render_replacement_warning(replacements)
+        if not message:
+            return []
+        self._warn(message)
+        return [message]
 
     def _check_local_state_lock(
         self,

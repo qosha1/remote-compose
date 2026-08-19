@@ -12,6 +12,7 @@ import pytest
 from remote_compose.terraform.runner import (
     PlanSummary,
     RecordingTerraformRunner,
+    TerraformRunner,
     _parse_plan_summary,
 )
 
@@ -74,6 +75,39 @@ class TestRecordingRunner:
     def test_output_empty_returns_empty_dict(self, runner):
         result = runner.output()
         assert result == {}
+
+    def test_show_json_parses_a_saved_plan(self, runner, tmp_path):
+        """rc-avcr reads resource_changes[] rather than grepping the human
+        plan output, which is a rendering and not an interface."""
+        runner.script(
+            "show",
+            '{"format_version": "1.2", "resource_changes": [{"type": "x"}]}',
+        )
+        result = runner.show_json(tmp_path / "p.tfplan")
+        assert result["resource_changes"] == [{"type": "x"}]
+        assert runner.calls[0].args[:2] == ["show", "-json"]
+        assert str(tmp_path / "p.tfplan") in runner.calls[0].args
+
+    def test_show_json_empty_returns_empty_dict(self, runner, tmp_path):
+        assert runner.show_json(tmp_path / "p.tfplan") == {}
+
+    def test_show_json_does_not_stream_the_payload_to_progress(self, tmp_path):
+        """A real stack's plan JSON is hundreds of KB on one line — streaming
+        it would bury the output the user is reading."""
+        seen: list[str] = []
+        real = TerraformRunner(
+            working_dir=tmp_path, terraform_bin="/bin/echo", progress=seen.append
+        )
+        # /bin/echo stands in for terraform: it prints its args back, so
+        # anything that leaked into `seen` came from the output stream.
+        assert real._run(["show", "-json"], quiet=True).strip() == "show -json"
+        assert seen == ["$ terraform show -json"]
+
+        loud: list[str] = []
+        TerraformRunner(
+            working_dir=tmp_path, terraform_bin="/bin/echo", progress=loud.append
+        )._run(["plan"])
+        assert "plan" in loud[1:]
 
 
 class TestPlanSummaryParser:

@@ -125,6 +125,23 @@ class TerraformRunner:
         with heartbeat(self.progress, "terraform destroy"):
             self._run(args)
 
+    def show_json(self, plan_file: Path) -> dict:
+        """Return a saved plan file as terraform's documented JSON structure.
+
+        ``terraform show -json <planfile>`` is the machine-readable form of
+        the plan: ``resource_changes[]`` with per-resource ``actions``,
+        ``before``/``after`` attribute maps and ``replace_paths``. Callers
+        inspect that instead of grepping the human plan output, which is a
+        rendering (terminal-width wrapped, reworded between versions) and not
+        an interface.
+
+        Run quiet: a real stack's plan JSON is hundreds of KB on one line,
+        and streaming it through the progress callback would bury the output
+        the user is actually reading.
+        """
+        stdout = self._run(["show", "-json", str(plan_file)], quiet=True)
+        return json.loads(stdout) if stdout.strip() else {}
+
     def output(self, name: Optional[str] = None) -> dict:
         """Return terraform outputs as a dict (parsed from ``terraform output -json``)."""
         args = ["output", "-json"]
@@ -147,7 +164,14 @@ class TerraformRunner:
     # Internal
     # -----------------------------------------------------------------
 
-    def _run(self, args: list[str]) -> str:
+    def _run(self, args: list[str], quiet: bool = False) -> str:
+        """Run terraform and return stdout.
+
+        ``quiet`` suppresses per-line streaming to ``progress`` (stdout is
+        still captured and returned) — for commands whose output is a machine
+        payload rather than something a human is following, e.g. ``show
+        -json``.
+        """
         cmd = [self.terraform_bin] + args
         if self.progress:
             self.progress(f"$ terraform {' '.join(args)}")
@@ -165,7 +189,7 @@ class TerraformRunner:
         assert proc.stdout is not None and proc.stderr is not None
         for line in proc.stdout:
             stdout_lines.append(line)
-            if self.progress:
+            if self.progress and not quiet:
                 self.progress(line.rstrip())
         for line in proc.stderr:
             stderr_lines.append(line)
@@ -219,7 +243,7 @@ class RecordingTerraformRunner(TerraformRunner):
         self.calls: list[_Recorded] = []
         self.scripted_outputs: dict[str, str] = {}
 
-    def _run(self, args: list[str]) -> str:  # type: ignore[override]
+    def _run(self, args: list[str], quiet: bool = False) -> str:  # type: ignore[override]
         self.calls.append(_Recorded(args=list(args)))
         key = args[0] if args else ""
         return self.scripted_outputs.get(key, "")

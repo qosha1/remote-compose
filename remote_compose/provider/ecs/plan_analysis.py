@@ -1,0 +1,245 @@
+"""Structured reads of ``terraform show -json <planfile>`` output.
+
+Pure functions over the parsed plan document — no I/O, no AWS, no terraform
+invocation — so the interesting cases are unit-testable from a fixture
+instead of from a live stack.
+
+Why JSON and not stdout: the human plan output ("-/+ must be replaced",
+"# forces replacement") is a rendering, not an interface. It changes between
+terraform versions and wraps at terminal width. ``resource_changes[]`` is a
+documented, versioned structure (``format_version``), so detection built on
+it doesn't rot.
+
+Beads:
+  rc-avcr — ignore_task_definition_changes fails open on a FORCED task
+            definition replacement, silently dropping out-of-band secrets.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+TASK_DEFINITION_TYPE = "aws_ecs_task_definition"
+
+# A replacement is delete+create in either order — plain replacement is
+# ["delete", "create"]; create_before_destroy inverts it. Anything else
+# (["update"], ["create"], ["no-op"], ["delete"]) is not a replacement.
+_REPLACE_ACTIONS = ({"delete", "create"},)
+
+
+@dataclass
+class TaskDefReplacement:
+    """One ``aws_ecs_task_definition`` terraform intends to replace."""
+
+    address: str
+    family: str
+    # Names of the secrets/env vars present on the LIVE revision that the
+    # rendered replacement does not carry. This is the damage: the live
+    # values were wired on out-of-band, and the new revision is born without
+    # them.
+    dropped_secrets: list[str] = field(default_factory=list)
+    dropped_env: list[str] = field(default_factory=list)
+    # Attribute paths terraform names as forcing the replacement, e.g.
+    # ["requires_compatibilities"] for a FARGATE -> EC2 launch type change.
+    forced_by: list[str] = field(default_factory=list)
+    # True when the rendered side of the diff isn't fully known at plan time
+    # (container_definitions computed from a not-yet-created resource). The
+    # dropped_* lists are then a floor, not an exact count.
+    after_unknown: bool = False
+
+    @property
+    def is_lossy(self) -> bool:
+        return bool(self.dropped_secrets or self.dropped_env or self.after_unknown)
+
+
+def _container_definitions(attrs: Any) -> list[dict]:
+    """Parse a resource's ``container_definitions`` into a list of dicts.
+
+    Terraform carries this attribute as a JSON *string*. Anything
+    unparseable (null, already-a-list, malformed) yields [] rather than
+    raising: a detector that crashes on an unexpected plan shape is worse
+    than one that reports nothing.
+    """
+    if not isinstance(attrs, dict):
+        return []
+    raw = attrs.get("container_definitions")
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [c for c in parsed if isinstance(c, dict)]
+
+
+def _named_keys(containers: list[dict], key: str) -> set[str]:
+    """Collect ``name`` values from every container's ``key`` list.
+
+    Qualified by container name, because two containers in one task
+    definition legitimately carry the same env var name and losing it from
+    one but not the other still matters.
+    """
+    out: set[str] = set()
+    for c in containers:
+        cname = str(c.get("name") or "?")
+        entries = c.get(key)
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict) and e.get("name"):
+                out.add(f"{cname}.{e['name']}")
+    return out
+
+
+def _is_replacement(actions: Any) -> bool:
+    if not isinstance(actions, list):
+        return False
+    return set(actions) in _REPLACE_ACTIONS
+
+
+def _forced_by(change: dict) -> list[str]:
+    """Flatten terraform's ``replace_paths`` into dotted attribute names."""
+    paths = change.get("replace_paths")
+    if not isinstance(paths, list):
+        return []
+    out: list[str] = []
+    for path in paths:
+        if isinstance(path, list):
+            out.append(".".join(str(seg) for seg in path))
+        elif path is not None:
+            out.append(str(path))
+    return sorted(set(out))
+
+
+def detect_task_definition_replacements(
+    plan_json: dict,
+) -> list[TaskDefReplacement]:
+    """Find every task definition the plan replaces, and what it would drop.
+
+    Only REPLACEMENTS are reported. An in-place update of a task definition
+    is exactly what ``lifecycle { ignore_changes = [container_definitions] }``
+    already suppresses; a replacement is the case it cannot suppress, because
+    ignore_changes governs diff-driven updates and a ForceNew attribute
+    change is not one.
+
+    Returns entries in plan order, including non-lossy ones — a caller that
+    only wants the dangerous subset filters on ``is_lossy``, and a caller
+    reporting "N task definitions will be replaced" needs the full count.
+    """
+    changes = plan_json.get("resource_changes")
+    if not isinstance(changes, list):
+        return []
+
+    out: list[TaskDefReplacement] = []
+    for rc in changes:
+        if not isinstance(rc, dict) or rc.get("type") != TASK_DEFINITION_TYPE:
+            continue
+        change = rc.get("change")
+        if not isinstance(change, dict) or not _is_replacement(change.get("actions")):
+            continue
+
+        before = change.get("before")
+        after = change.get("after")
+        before_containers = _container_definitions(before)
+        after_containers = _container_definitions(after)
+
+        after_unknown = bool(
+            isinstance(change.get("after_unknown"), dict)
+            and change["after_unknown"].get("container_definitions")
+        )
+
+        before_secrets = _named_keys(before_containers, "secrets")
+        after_secrets = _named_keys(after_containers, "secrets")
+        before_env = _named_keys(before_containers, "environment")
+        after_env = _named_keys(after_containers, "environment")
+
+        family = ""
+        if isinstance(before, dict):
+            family = str(before.get("family") or "")
+        if not family and isinstance(after, dict):
+            family = str(after.get("family") or "")
+
+        out.append(
+            TaskDefReplacement(
+                address=str(rc.get("address") or ""),
+                family=family or str(rc.get("name") or ""),
+                dropped_secrets=sorted(before_secrets - after_secrets),
+                dropped_env=sorted(before_env - after_env),
+                forced_by=_forced_by(change),
+                after_unknown=after_unknown,
+            )
+        )
+    return out
+
+
+def render_replacement_warning(
+    replacements: list[TaskDefReplacement],
+) -> str:
+    """Prose warning for a plan that replaces ignore-managed task definitions.
+
+    Self-contained by the compose_warnings.py convention: names the services,
+    the count of values being dropped, the attribute that forced the
+    replacement, and what to do — the reader should not have to look anything
+    up to act on it.
+
+    Returns "" when nothing lossy was found, so callers can warn
+    unconditionally on the result.
+    """
+    lossy = [r for r in replacements if r.is_lossy]
+    if not lossy:
+        return ""
+
+    lines = [
+        "provider_config.ecs.ignore_task_definition_changes is on, which means "
+        "terraform is NOT the source of truth for these task definitions' "
+        "container definitions — but this plan REPLACES them, and "
+        "ignore_changes cannot suppress a replacement. lifecycle "
+        "ignore_changes suppresses diff-driven updates; a ForceNew attribute "
+        "change is not one. The replacement revisions are rendered from "
+        "rc.yml alone, so every value wired on out-of-band (a "
+        "reconcile_task_secrets.py-style script, a manual "
+        "register-task-definition) is dropped the moment the service is "
+        "pointed at them:",
+        "",
+    ]
+    for r in lossy:
+        forced = (
+            f" (forced by {', '.join(r.forced_by)})"
+            if r.forced_by
+            else " (forced by a ForceNew attribute change)"
+        )
+        counts = []
+        if r.dropped_secrets:
+            counts.append(f"{len(r.dropped_secrets)} secret(s)")
+        if r.dropped_env:
+            counts.append(f"{len(r.dropped_env)} env var(s)")
+        summary = " and ".join(counts) if counts else "out-of-band values"
+        lines.append(f"    {r.family or r.address}{forced}")
+        lines.append(f"      drops {summary} present on the live revision")
+        if r.dropped_secrets:
+            shown = r.dropped_secrets[:8]
+            more = len(r.dropped_secrets) - len(shown)
+            tail = f", +{more} more" if more > 0 else ""
+            lines.append(f"      secrets: {', '.join(shown)}{tail}")
+        if r.after_unknown:
+            lines.append(
+                "      (the rendered side is not fully known at plan time — "
+                "treat these counts as a floor)"
+            )
+    lines += [
+        "",
+        "    Services pointed at a secretless revision crashloop until the "
+        "out-of-band reconcile runs again. In CI that window is short because "
+        "build and reconcile are adjacent steps; running this apply by hand "
+        "without immediately re-running the reconcile leaves the service "
+        "down. Re-run your task-definition reconcile immediately after this "
+        "apply, or split the change so the forcing attribute lands on its "
+        "own.",
+    ]
+    return "\n".join(lines)
