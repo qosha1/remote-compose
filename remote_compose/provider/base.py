@@ -200,6 +200,14 @@ class DeployContext:
     # change. Force-roll still rolls the existing :latest image.
     skip_build: bool = False
 
+    # rc-rigk: set by the provider's own preflight, not by a CLI flag. True
+    # means provider_config.ecs.aws_profile names a profile that does not
+    # exist here while the environment supplies credentials anyway (the CI /
+    # OIDC shape), so the rendered terraform provider must NOT pin it —
+    # `profile = "default"` on a runner with no shared config file fails
+    # every apply with "failed to get shared config profile, default".
+    omit_aws_profile: bool = False
+
 
 @dataclass
 class ServiceStatus:

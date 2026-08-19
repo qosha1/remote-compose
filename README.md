@@ -142,9 +142,27 @@ provider_config:
   ecs:
     cluster: my-app-prod
     region: us-west-1
-    aws_profile: myprofile
+    aws_profile: myprofile              # LOCAL DEVELOPMENT ONLY — see below
     vpc_cidr: 10.0.0.0/16               # CIDR for the VPC rc creates (default mode)
     route53_zone: rctest.example.com   # override if zone != domain[-2:]
+
+    # --- aws_profile is a workstation concept --------------------------------
+    # A named profile only exists where a shared AWS config file does. On a CI
+    # runner credentials arrive as environment variables (GitHub OIDC, an
+    # assumed role, container credentials) and no profile exists at all, so
+    # rendering `profile = "..."` into the terraform provider fails the apply
+    # with terraform's own opaque:
+    #
+    #     Error: failed to get shared config profile, default
+    #
+    # rc resolves this at preflight (rc-rigk) rather than letting terraform
+    # discover it mid-apply:
+    #   * profile resolves            -> rendered as configured.
+    #   * absent, ambient creds set   -> omitted + warned; the deploy uses the
+    #                                    ambient credentials and succeeds.
+    #   * absent, no ambient creds    -> hard error naming the profile and the
+    #                                    config files searched.
+    # Prefer omitting aws_profile entirely for any stack that deploys from CI.
 
     # --- Deploy into an EXISTING VPC (optional) -------------------------------
     # By default rc creates its own VPC. Set vpc_id to deploy INTO an existing

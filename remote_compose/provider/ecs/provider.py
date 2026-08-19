@@ -373,6 +373,72 @@ def _default_session_factory(ctx: DeployContext) -> Any:
     return boto3.Session(region_name=region)
 
 
+# Environment variables that mean "this process already has credentials
+# without any named profile" — the CI/OIDC/container shape. Ordered
+# most-specific-first so the reported name is the informative one.
+#
+# AWS_PROFILE is deliberately NOT here: it names a profile, it does not
+# supply credentials, so a set-but-unresolvable AWS_PROFILE is the same
+# broken state rc-rigk is about, not a rescue from it.
+_AMBIENT_CREDENTIAL_ENV_VARS = (
+    "AWS_WEB_IDENTITY_TOKEN_FILE",  # OIDC (GitHub Actions, IRSA)
+    "AWS_ROLE_ARN",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",  # ECS task / CodeBuild
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_ACCESS_KEY_ID",  # static keys in the environment
+)
+
+# Tri-state results of _aws_profile_status(). "unknown" follows the module's
+# existing "not modeled" convention (InstanceShape.max_enis=None,
+# KNOWN_INSTANCE_SHAPES misses): when rc cannot determine the answer it must
+# not act as though it had, in EITHER direction.
+PROFILE_UNSET = "unset"
+PROFILE_PRESENT = "present"
+PROFILE_ABSENT = "absent"
+PROFILE_UNKNOWN = "unknown"
+
+
+def _ambient_aws_credentials() -> list[str]:
+    """Names of ambient AWS credential env vars set in this process."""
+    return [v for v in _AMBIENT_CREDENTIAL_ENV_VARS if os.environ.get(v)]
+
+
+def _aws_config_search_paths() -> list[str]:
+    """The shared-config files botocore would read, for error messages.
+
+    Reported as paths rather than "your AWS config" because the single most
+    common cause of a missing profile is that the file rc looked in is not
+    the file the user edited (AWS_CONFIG_FILE set, different $HOME under
+    sudo/CI, ...). Naming both files removes that guess.
+    """
+    return [
+        os.environ.get("AWS_CONFIG_FILE") or os.path.expanduser("~/.aws/config"),
+        os.environ.get("AWS_SHARED_CREDENTIALS_FILE")
+        or os.path.expanduser("~/.aws/credentials"),
+    ]
+
+
+def _aws_profile_status(profile: Optional[str]) -> str:
+    """Whether ``profile`` resolves in the shared AWS config (tri-state).
+
+    Returns PROFILE_UNSET / PROFILE_PRESENT / PROFILE_ABSENT /
+    PROFILE_UNKNOWN. PROFILE_UNKNOWN means the probe itself failed — no
+    botocore installed, an unreadable/malformed config file — and callers
+    must treat it as "no information", never as absent.
+    """
+    if not profile:
+        return PROFILE_UNSET
+    try:
+        import botocore.session  # noqa: WPS433
+
+        config = botocore.session.Session().full_config or {}
+    except Exception:  # noqa: BLE001 — a failed probe is not evidence
+        return PROFILE_UNKNOWN
+    return (
+        PROFILE_PRESENT if profile in (config.get("profiles") or {}) else PROFILE_ABSENT
+    )
+
+
 def _profile_is_resolvable(profile: Optional[str]) -> bool:
     """True only if a named AWS profile actually exists in the shared config.
 
@@ -383,16 +449,58 @@ def _profile_is_resolvable(profile: Optional[str]) -> bool:
     be found" under OIDC / env-only credentials. Mirror the session fallback
     so exec/run subprocesses only pin a profile that's really there; otherwise
     they inherit the ambient credential chain (env vars, assumed role, ...).
-    """
-    if not profile:
-        return False
-    try:
-        import botocore.session  # noqa: WPS433
 
-        config = botocore.session.Session().full_config or {}
-        return profile in (config.get("profiles") or {})
-    except Exception:  # noqa: BLE001 — never let a probe break exec/run
-        return False
+    Collapses _aws_profile_status()'s tri-state to "present or not": a probe
+    that couldn't answer means don't pin a profile on the subprocess, which
+    is the safe direction for exec/run specifically (the ambient chain still
+    works; a bogus AWS_PROFILE does not).
+    """
+    return _aws_profile_status(profile) == PROFILE_PRESENT
+
+
+def check_aws_profile_for_terraform(profile: Optional[str]) -> tuple[bool, str]:
+    """Decide what the terraform provider block should do with ``aws_profile``.
+
+    Returns ``(omit, message)``. ``omit`` True means "render no profile line
+    and let terraform use the ambient credential chain"; ``message`` is a
+    warning to surface when non-empty.
+
+    rc-rigk: ``profile = "..."`` renders into providers.tf whenever
+    provider_config.ecs.aws_profile is set, but a named profile is a LAPTOP
+    concept. On an OIDC runner credentials arrive as environment variables
+    and no named profile exists, so terraform dies with "failed to get
+    shared config profile, default" — an error that names neither rc.yml nor
+    the fact that a profile was never needed here. Three cases:
+
+      * profile resolves          -> render it. It is explicit and it works,
+                                     ambient credentials or not.
+      * absent + ambient creds    -> omit + warn. This is CI. The stack has
+                                     working credentials; the profile line is
+                                     the only thing that would break it.
+      * absent + no ambient creds -> caller's decision (raise). Nothing here
+                                     can save the deploy, so the value is in
+                                     saying WHICH thing is missing, early.
+
+    A PROFILE_UNKNOWN probe renders the profile unchanged — rc has no
+    evidence and must not silently drop a setting the user wrote down.
+    """
+    status = _aws_profile_status(profile)
+    if status in (PROFILE_UNSET, PROFILE_PRESENT, PROFILE_UNKNOWN):
+        return False, ""
+    ambient = _ambient_aws_credentials()
+    if not ambient:
+        return False, ""
+    return True, (
+        f"provider_config.ecs.aws_profile: {profile!r} is not a profile in "
+        f"{' or '.join(_aws_config_search_paths())}, but this environment "
+        f"already carries AWS credentials ({', '.join(ambient)}) — the CI / "
+        f'OIDC shape. rc is omitting `profile = "{profile}"` from the '
+        f"terraform provider so it uses those credentials instead; leaving "
+        f"it in would fail the apply with terraform's "
+        f'"failed to get shared config profile, {profile}". A named '
+        f"profile only exists on a workstation: drop aws_profile from rc.yml "
+        f"if this stack deploys from CI."
+    )
 
 
 def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -595,6 +703,34 @@ class ECSProvider(Provider):
         self.runner_factory = runner_factory or _default_runner_factory
         self.session_factory = session_factory or _default_session_factory
         self.progress = progress
+        # Plan-time findings raised from inside emit_terraform (and the
+        # helpers it calls) -- see _warn() / _drain_warnings(). Kept on the
+        # instance because emit_terraform returns a Path, and the resolvers
+        # that notice these things (_resolve_ec2_capacity, aws_profile
+        # resolution, the per-service EC2 loop) sit several frames down with
+        # no return channel of their own.
+        self._warnings: list[str] = []
+
+    # -----------------------------------------------------------------
+    # Plan-time warning sink
+    # -----------------------------------------------------------------
+
+    def _warn(self, message: str) -> None:
+        """Record a non-fatal plan-time finding.
+
+        Same prose convention as compose_warnings.py: each message is
+        self-contained, so the user reading `rc plan` output never has to
+        chase a code or look anything up to act on it. Drained by plan()
+        into PlanResult.warnings and by deploy() into DeployResult.warnings.
+        """
+        if message not in self._warnings:
+            self._warnings.append(message)
+
+    def _drain_warnings(self) -> list[str]:
+        """Return the accumulated warnings and reset the sink."""
+        out = list(self._warnings)
+        self._warnings = []
+        return out
 
     # -----------------------------------------------------------------
     # emit_terraform
@@ -612,7 +748,17 @@ class ECSProvider(Provider):
             )
         cluster_name = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         vpc_cidr = ecs_cfg.get("vpc_cidr", VPC_CIDR_DEFAULT)
-        aws_profile = ecs_cfg.get("aws_profile")
+        # rc-rigk: preflight() may have determined this profile does not
+        # resolve while the environment supplies credentials anyway (CI /
+        # OIDC). Rendering `profile = "..."` there fails every apply, so the
+        # line is dropped. Default False, so emit_terraform() called on its
+        # own — tests, golden fixtures — renders exactly what rc.yml says and
+        # never depends on the host's ~/.aws.
+        aws_profile = (
+            None
+            if getattr(ctx, "omit_aws_profile", False)
+            else ecs_cfg.get("aws_profile")
+        )
 
         # Existing-VPC support (rc-a57): a GENERAL, opt-in capability. With
         # vpc_id set, rc deploys INTO an existing VPC instead of creating one —
@@ -1871,12 +2017,61 @@ class ECSProvider(Provider):
     # Plan / Deploy / Destroy / Redeploy
     # -----------------------------------------------------------------
 
+    def _preflight_aws_profile(self, ctx: DeployContext, ecs_cfg: dict) -> None:
+        """Resolve provider_config.ecs.aws_profile before anything uses it.
+
+        Sets ``ctx.omit_aws_profile`` so emit_terraform() renders the right
+        provider block. Raises when the profile is definitively absent AND
+        nothing else can supply credentials — that deploy cannot succeed, and
+        failing here costs the user a second instead of a full apply cycle
+        ending in terraform's "failed to get shared config profile".
+
+        Skipped entirely on a --no-state deploy: that path never renders a
+        terraform provider block, and its boto3 session already falls back to
+        the ambient chain (see _default_session_factory).
+        """
+        if getattr(ctx, "skip_terraform", False):
+            return
+        profile = ecs_cfg.get("aws_profile")
+        omit, message = check_aws_profile_for_terraform(profile)
+        if omit:
+            ctx.omit_aws_profile = True
+            self._warn(message)
+            return
+        if _aws_profile_status(profile) == PROFILE_ABSENT:
+            raise ProviderConfigError(
+                f"provider_config.ecs.aws_profile is {profile!r}, but no such "
+                f"profile exists in "
+                f"{' or '.join(_aws_config_search_paths())}, and this "
+                f"environment carries no ambient AWS credentials "
+                f"({'/'.join(_AMBIENT_CREDENTIAL_ENV_VARS)} are all unset). "
+                f'terraform would fail the apply with "failed to get shared '
+                f'config profile, {profile}". Create the profile '
+                f"(`aws configure --profile {profile}`), point aws_profile at "
+                f"one that exists, or drop it and supply credentials in the "
+                f"environment."
+            )
+
     def preflight(self, ctx: DeployContext) -> None:
-        """AWS pre-flight for adopted-VPC configs (rc-a57). No-op unless
-        provider_config.ecs.vpc_id is set; otherwise verifies the VPC + subnets
-        against live AWS so a bad id fails as a clear rc error, not a terraform
-        stack trace."""
+        """AWS pre-flight run at the head of plan() and deploy().
+
+        Two checks today:
+
+        * aws_profile resolution (rc-rigk) — decides whether the rendered
+          terraform provider should pin the configured profile, omit it in
+          favour of ambient credentials, or fail here with a message that
+          names the profile instead of letting terraform fail mid-apply with
+          its own opaque wording.
+        * adopted-VPC ids (rc-a57) — no-op unless provider_config.ecs.vpc_id
+          is set; otherwise verifies the VPC + subnets against live AWS so a
+          bad id fails as a clear rc error, not a terraform stack trace.
+
+        Deliberately ordered cheapest-and-most-local first: the profile check
+        makes no AWS calls, and a stack whose credentials can't resolve
+        cannot answer the VPC lookup anyway.
+        """
         ecs_cfg = _ecs_cfg(ctx)
+        self._preflight_aws_profile(ctx, ecs_cfg)
         if not ecs_cfg.get("vpc_id"):
             return
         session = self.session_factory(ctx)
@@ -1884,6 +2079,13 @@ class ECSProvider(Provider):
         preflight_existing_vpc(ecs_cfg, ec2)
 
     def plan(self, ctx: DeployContext) -> PlanResult:
+        # Fresh sink per run: a provider instance is reused across
+        # plan-then-deploy in `rc up`, and stale findings from the previous
+        # pass would be reported as if they belonged to this one. Reset HERE
+        # rather than in emit_terraform() — preflight() raises findings of
+        # its own and runs first, so a reset inside the render would wipe
+        # them before anyone read them.
+        self._warnings = []
         self.preflight(ctx)
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
@@ -1896,7 +2098,10 @@ class ECSProvider(Provider):
         # provider.plan(ctx) — not only the CLI dispatcher — gets them.
         from ...compose_warnings import collect_compose_warnings
 
-        warnings = collect_compose_warnings(ctx.compose_path, ctx.rc_yml_v2)
+        warnings = self._drain_warnings()
+        for w in collect_compose_warnings(ctx.compose_path, ctx.rc_yml_v2):
+            if w not in warnings:
+                warnings.append(w)
         return PlanResult(
             create=summary.create,
             update=summary.update,
@@ -1920,6 +2125,7 @@ class ECSProvider(Provider):
                     f"Known: {sorted(ctx.services.keys())}"
                 )
 
+        self._warnings = []  # see plan() — reset before preflight, not in emit
         self.preflight(ctx)
 
         # No-state deploy mode (rc-5h8.11): when ctx.skip_terraform is True,
@@ -1934,6 +2140,14 @@ class ECSProvider(Provider):
         start = time.monotonic()
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
+        # Plan-time findings raised during the render (rc-anl6 sizing,
+        # rc-hbjb root volume, rc-rigk profile). Surfaced HERE, before
+        # terraform touches anything, rather than only in the returned
+        # DeployResult -- a warning the user reads after the apply has
+        # already run is a post-mortem, not a warning.
+        warnings: list[str] = self._drain_warnings()
+        for _w in warnings:
+            self._emit(f"  warning: {_w}")
         # rc-ysh: detect held local state lock BEFORE invoking terraform so
         # we surface the holder PID in <1s instead of inheriting terraform's
         # subprocess-output buffering and retry loops.
@@ -1946,7 +2160,6 @@ class ECSProvider(Provider):
         runner.apply()
         outputs = runner.output()
 
-        warnings: list[str] = []
         # rc-44z: --no-build skips _build_and_push_images entirely. Force-
         # roll still rolls services so they pick up any task-def changes
         # terraform just applied (e.g. new env var, new secret reference,
