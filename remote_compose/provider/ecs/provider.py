@@ -4150,7 +4150,13 @@ class ECSProvider(Provider):
     def _ec2_service_names(self, ctx: DeployContext) -> list[str]:
         """Service names that resolve to EC2 launch_type -- local/pure,
         no AWS calls, so callers can decide whether to touch AWS at all
-        (a Fargate-only stack must make zero SDK calls here)."""
+        (a Fargate-only stack must make zero SDK calls here).
+
+        May UNDER-report on the destroy path: ctx.services is built with
+        require_compose_file=False there, so a compose-only service is
+        absent from it entirely once the compose file is gone. See
+        _local_ec2_list_is_complete for when that can bite.
+        """
         ecs_cfg = _ecs_cfg(ctx)
         default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
         return [
@@ -4158,6 +4164,99 @@ class ECSProvider(Provider):
             for name, spec in sorted(ctx.services.items())
             if (spec.launch_type or default_launch_type) == "EC2"
         ]
+
+    def _local_ec2_list_is_complete(self, ctx: DeployContext) -> bool:
+        """Whether _ec2_service_names can be trusted to name every EC2
+        service in the stack (rc-915l).
+
+        The gate is exact, not a heuristic, and rests on two facts:
+
+        1. ``launch_type`` is an rc.yml-only field -- docker-compose has no
+           way to express it. So a service that is EC2 *without* an rc.yml
+           entry can only have got there via ``default_launch_type: EC2``.
+        2. ``build_deploy_context`` resolves the deploy set as
+           ``compose_names | rc_names``, and only the compose half can go
+           empty (a missing compose file is tolerated on the destroy path).
+           rc.yml-declared services never drop out.
+
+        Therefore with default_launch_type != EC2, every EC2 service must
+        be rc.yml-declared, and every rc.yml-declared service is present:
+        the local list is provably complete and asking AWS would be a
+        pointless call on every Fargate destroy. With it set to EC2, a
+        compose-only service is EC2 too -- and that is exactly the service
+        that vanishes when the compose file does.
+        """
+        return _ecs_cfg(ctx).get("default_launch_type", "FARGATE") != "EC2"
+
+    @staticmethod
+    def _describe_services_all(ecs: Any, cluster: str, names: list[str]) -> list[dict]:
+        """describe_services over any number of names.
+
+        The API takes at most 10 per call and rejects the whole request
+        past that ("Member must have length less than or equal to 10"), so
+        a caller that passes its full service list works right up until a
+        stack has eleven services. Returns the merged services[]; anything
+        in failures[] is dropped, which is what every caller here wants
+        (a service AWS can't describe is one that no longer exists).
+        """
+        out: list[dict] = []
+        for i in range(0, len(names), 10):
+            desc = ecs.describe_services(cluster=cluster, services=names[i : i + 10])
+            out.extend(desc.get("services") or [])
+        return out
+
+    def _live_ec2_service_names(
+        self, ecs: Any, cluster: str, project: str
+    ) -> list[str]:
+        """Services in the live cluster running on THIS project's EC2
+        capacity provider (rc-915l). Best-effort: returns [] on any error,
+        because every caller treats it as an addition to the local list,
+        never as a replacement for it.
+
+        Scoping. Cluster-wide enumeration is safe here because rc always
+        creates its own cluster (cluster.tf.j2 emits
+        ``resource "aws_ecs_cluster" "main"`` unconditionally; adopt_owned
+        covers the ALB, not the cluster), so a foreign stack cannot be
+        sharing it. The capacity-provider filter is the second line: rc's
+        EC2 services carry a capacity_provider_strategy naming
+        ``${project}-ec2-cp`` and NO launchType (services.tf.j2), while
+        Fargate ones carry launch_type = "FARGATE", so keying on the
+        strategy scopes the drain to this project's EC2 capacity even if
+        something else did end up in the cluster.
+        """
+        capacity_provider = f"{project}-ec2-cp"
+        try:
+            arns: list[str] = []
+            token: Optional[str] = None
+            while True:
+                kwargs: dict[str, Any] = {"cluster": cluster, "maxResults": 100}
+                if token:
+                    kwargs["nextToken"] = token
+                page = ecs.list_services(**kwargs)
+                arns.extend(page.get("serviceArns") or [])
+                token = page.get("nextToken")
+                if not token:
+                    break
+
+            # Anything that lands in failures[] vanished between the list
+            # and the describe -- already gone, which is the end state the
+            # drain is trying to reach, so dropping it is correct.
+            names: list[str] = []
+            for svc in self._describe_services_all(ecs, cluster, arns):
+                strategy = svc.get("capacityProviderStrategy") or []
+                on_our_ec2 = any(
+                    e.get("capacityProvider") == capacity_provider for e in strategy
+                )
+                if on_our_ec2 and svc.get("serviceName"):
+                    names.append(svc["serviceName"])
+            return sorted(names)
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                f"  WARN: destroy pre-drain: could not enumerate live "
+                f"services in cluster {cluster!r} ({exc!s}); draining only "
+                f"the services named in rc.yml."
+            )
+            return []
 
     def _predrain_ec2_capacity(self, ctx: DeployContext) -> None:
         """rc-e5u.25.9: drain EC2-launch-type services and scale their
@@ -4226,7 +4325,15 @@ class ECSProvider(Provider):
         the bead for the tracked follow-up.
         """
         ec2_services = self._ec2_service_names(ctx)
-        if not ec2_services:
+        # rc-915l: ctx.services is built with require_compose_file=False on
+        # this path, so a compose-only service is missing from it entirely
+        # once the compose file is gone (ephemeral stacks delete theirs the
+        # moment the deploy lands). Such a service is still deployed, still
+        # holds the EC2 instance, and was silently never drained -- the exact
+        # deadlock the pre-drain exists to prevent, reintroduced by a deleted
+        # file. When the local list can't be trusted, ask the cluster.
+        local_is_complete = self._local_ec2_list_is_complete(ctx)
+        if not ec2_services and local_is_complete:
             return  # Fargate-only (or plan-only) stack -- no AWS calls.
 
         try:
@@ -4240,6 +4347,23 @@ class ECSProvider(Provider):
                 f"client ({exc!s}); skipping pre-drain -- terraform "
                 f"destroy will attempt teardown directly."
             )
+            return
+
+        if not local_is_complete:
+            live = self._live_ec2_service_names(ecs, cluster, ctx.project)
+            missed = sorted(set(live) - set(ec2_services))
+            if missed:
+                self._emit(
+                    f"  destroy: {len(missed)} deployed EC2 service(s) are "
+                    f"not in the local config (compose file gone?) but are "
+                    f"live in {cluster!r}; draining them too: "
+                    f"{', '.join(missed)}"
+                )
+            ec2_services = sorted(set(ec2_services) | set(live))
+
+        if not ec2_services:
+            # Nothing declared locally and nothing live -- e.g. an EC2-default
+            # stack that was already torn down. Still let terraform run.
             return
 
         self._emit(
@@ -4277,8 +4401,8 @@ class ECSProvider(Provider):
             # budget is 0 (tests short-circuit the wait this way).
             while True:
                 try:
-                    desc = ecs.describe_services(
-                        cluster=cluster, services=sorted(remaining)
+                    described = self._describe_services_all(
+                        ecs, cluster, sorted(remaining)
                     )
                 except Exception as exc:  # noqa: BLE001
                     self._emit(
@@ -4288,13 +4412,11 @@ class ECSProvider(Provider):
                     )
                     return
                 reported = {
-                    s.get("serviceName")
-                    for s in (desc.get("services") or [])
-                    if s.get("serviceName")
+                    s.get("serviceName") for s in described if s.get("serviceName")
                 }
                 still_running = {
                     s.get("serviceName")
-                    for s in (desc.get("services") or [])
+                    for s in described
                     if int(s.get("runningCount", 0) or 0) > 0
                 }
                 # Anything ECS no longer reports at all is treated as

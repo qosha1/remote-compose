@@ -1097,7 +1097,7 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc plan` | terraform plan summary |
 | `rc bootstrap [--apply]` | emit + plan the committed GitHub-OIDC CI deploy-role stack from `bootstrap:` ([details](#ci-bootstrap--committed-deploy-role-stack)); `--apply` opt-in, never destroys |
 | `rc deploy [--no-build]` | build, push, terraform apply, force-roll, run auto_on_deploy hooks |
-| `rc destroy --yes` | terraform destroy |
+| `rc destroy --yes` | terraform destroy. On EC2-launch stacks, first drains every deployed service to `desiredCount=0` and scales the capacity ASG to zero via the SDK — including services the local config no longer names (an ephemeral stack's compose file is gone by then), which are found by enumerating the cluster. Fargate-only stacks make zero AWS calls here. |
 | `rc status` | ECS service health table |
 | `rc outputs [--json\|--env] [<name>]` | resource ids from the deployed stack — cluster, ALB, ECR repos, plus every declared security group / subnet / VPC endpoint / repository. `--env` emits `KEY=value` for piping into a `.env` |
 | `rc exec <service> -- <cmd...>` | run a one-off command inside a live task; reliable stdout via sentinels; full TTY when stdin is a tty |

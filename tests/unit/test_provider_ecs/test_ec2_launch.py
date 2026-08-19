@@ -835,3 +835,285 @@ class TestDestroyPreDrainEc2:
         provider.destroy(ctx)  # must complete without looping/hanging
 
         assert ecs.update_service.call_count == 1
+
+
+# ---------------------------------------------------------------------
+# rc-915l: the pre-drain's service list comes from ctx.services, which on
+# the destroy path is built with require_compose_file=False — so when the
+# compose file is gone (ephemeral stacks delete theirs after deploying),
+# every compose-only service silently drops out of it and never gets
+# drained. See _predrain_ec2_capacity / _live_ec2_service_names.
+# ---------------------------------------------------------------------
+
+
+class TestDestroyPreDrainEnumeratesLiveServices:
+    """A compose-only service can only be EC2 via default_launch_type: EC2
+    (launch_type is an rc.yml-only field), and rc.yml services never drop
+    out of ctx.services. So that one setting is an exact test for "the
+    local list may be incomplete" — not a heuristic.
+    """
+
+    def _live(self, ecs, names, *, cp="myapp-ec2-cp"):
+        ecs.list_services.return_value = {
+            "serviceArns": [f"arn:aws:ecs:us-west-2:1:service/c/{n}" for n in names]
+        }
+        ecs.describe_services.return_value = {
+            "services": [
+                {
+                    "serviceName": n,
+                    "runningCount": 0,
+                    "capacityProviderStrategy": [{"capacityProvider": cp}],
+                }
+                for n in names
+            ],
+        }
+
+    def test_drains_a_deployed_service_missing_from_the_context(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """The bug: compose is gone, so 'worker' isn't in ctx.services at
+        all — but it is still running on EC2 capacity in the cluster."""
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2", cluster="myclust")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        self._live(ecs, ["worker"])
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        ecs.update_service.assert_called_once_with(
+            cluster="myclust", service="worker", desiredCount=0
+        )
+
+    def test_live_services_are_unioned_with_the_local_ones(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        self._live(ecs, ["worker", "beat"])
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        drained = {c.kwargs["service"] for c in ecs.update_service.call_args_list}
+        assert drained == {"beat", "worker"}
+
+    def test_a_foreign_service_on_fargate_capacity_is_left_alone(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """rc always creates its own cluster (cluster.tf.j2), and adopt_owned
+        covers the ALB only — so a foreign stack can't be in here. The
+        capacity-provider filter is the belt to that suspenders: only
+        services running on THIS project's EC2 capacity provider are
+        drained, never a Fargate service that happens to share the cluster.
+        """
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.list_services.return_value = {
+            "serviceArns": ["arn:aws:ecs:us-west-2:1:service/c/other"]
+        }
+        ecs.describe_services.return_value = {
+            "services": [
+                {"serviceName": "other", "runningCount": 0, "launchType": "FARGATE"},
+            ],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        assert ecs.update_service.call_count == 0
+
+    def test_another_projects_ec2_capacity_provider_is_left_alone(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        self._live(ecs, ["theirs"], cp="someone-else-ec2-cp")
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        assert ecs.update_service.call_count == 0
+
+    def test_pagination_is_followed(self, provider, recorder, mock_session, tmp_path):
+        """list_services caps at 100 per page; a stack big enough to page
+        must not have its tail silently dropped."""
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.list_services.side_effect = [
+            {"serviceArns": ["arn:.../svc-a"], "nextToken": "t1"},
+            {"serviceArns": ["arn:.../svc-b"]},
+        ]
+        ecs.describe_services.side_effect = lambda **kw: {
+            "services": [
+                {
+                    "serviceName": s.rsplit("/", 1)[-1],
+                    "runningCount": 0,
+                    "capacityProviderStrategy": [{"capacityProvider": "myapp-ec2-cp"}],
+                }
+                for s in kw["services"]
+            ],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        drained = {c.kwargs["service"] for c in ecs.update_service.call_args_list}
+        assert drained == {"svc-a", "svc-b"}
+
+    def test_describe_is_chunked_to_the_api_limit(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """describe_services accepts at most 10 service names per call."""
+        names = [f"s{i}" for i in range(23)]
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.list_services.return_value = {
+            "serviceArns": [f"arn:.../{n}" for n in names]
+        }
+        seen_batches = []
+
+        def _describe(**kw):
+            seen_batches.append(len(kw["services"]))
+            return {
+                "services": [
+                    {
+                        "serviceName": s.rsplit("/", 1)[-1],
+                        "runningCount": 0,
+                        "capacityProviderStrategy": [
+                            {"capacityProvider": "myapp-ec2-cp"}
+                        ],
+                    }
+                    for s in kw["services"]
+                ],
+            }
+
+        ecs.describe_services.side_effect = _describe
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)
+
+        assert max(seen_batches) <= 10
+        assert ecs.update_service.call_count == 23
+
+    def test_a_vanished_service_in_failures_is_ignored(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """A service deleted between list_services and describe_services
+        comes back under failures[], not services[] — it's already gone,
+        which is the desired end state, so it must not blow up the drain."""
+        ctx = _ctx(tmp_path, {}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.list_services.return_value = {"serviceArns": ["arn:.../ghost"]}
+        ecs.describe_services.return_value = {
+            "services": [],
+            "failures": [{"arn": "arn:.../ghost", "reason": "MISSING"}],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)  # must not raise
+
+        assert ecs.update_service.call_count == 0
+
+    def test_enumeration_failure_falls_back_to_the_local_list(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        """Best-effort: if the cluster can't be listed, drain what we know
+        about rather than draining nothing."""
+        ctx = _ctx(tmp_path, {"beat": _svc("beat")}, default_launch_type="EC2")
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        ecs.list_services.side_effect = RuntimeError("ClusterNotFoundException")
+        ecs.describe_services.return_value = {
+            "services": [{"serviceName": "beat", "runningCount": 0}],
+        }
+        autoscaling.describe_auto_scaling_groups.return_value = {
+            "AutoScalingGroups": [{"Instances": []}],
+        }
+        ecs.list_container_instances.return_value = {"containerInstanceArns": []}
+
+        provider.destroy(ctx)  # must not raise
+
+        ecs.update_service.assert_called_once_with(
+            cluster="test-cluster", service="beat", desiredCount=0
+        )
+
+
+class TestDestroyPreDrainStillMakesZeroCallsWhenItCan:
+    """The gate has to stay exact in the other direction too: with
+    default_launch_type left at FARGATE, an EC2 service must have said so
+    in rc.yml, and rc.yml services never drop out of ctx.services — so the
+    local list is provably complete and enumerating live would be a
+    pointless AWS call on every Fargate destroy.
+    """
+
+    def test_fargate_default_with_no_ec2_services_lists_nothing(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, {"web": _svc("web", launch_type="FARGATE")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+
+        provider.destroy(ctx)
+
+        assert mock_session.client.call_count == 0
+
+    def test_fargate_default_with_an_explicit_ec2_service_does_not_enumerate(
+        self, provider, recorder, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, {"worker": _svc("worker", launch_type="EC2")})
+        provider.emit_terraform(ctx, ctx.working_dir / "terraform")
+        recorder(ctx.working_dir / "terraform").calls.clear()
+        ecs = mock_session.clients.setdefault("ecs", mock.MagicMock())
+        autoscaling = mock_session.clients.setdefault("autoscaling", mock.MagicMock())
+        _already_drained(ecs, autoscaling)
+
+        provider.destroy(ctx)
+
+        ecs.list_services.assert_not_called()
+        ecs.update_service.assert_called_once_with(
+            cluster="test-cluster", service="worker", desiredCount=0
+        )
