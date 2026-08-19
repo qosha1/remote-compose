@@ -253,6 +253,10 @@ class TestDeriveRequiredActions:
     def test_baseline_actions_always_present(self):
         actions, _ = pf.derive_required_actions([])
         assert "sts:GetCallerIdentity" in actions
+        # rc-hguq: without this rc cannot read awsvpcTrunking, silently sizes
+        # as though trunking were off, and rejects a valid EC2 config for a
+        # reason unrelated to the config.
+        assert "ecs:ListAccountSettings" in actions
 
     def test_scan_reads_emitted_hcl(self, tmp_path):
         (tmp_path / "a.tf").write_text(

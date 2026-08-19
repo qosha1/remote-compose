@@ -478,8 +478,16 @@ DATA_SOURCE_ACTIONS: dict[str, list[str]] = {
 }
 
 # Always needed, regardless of what the module declares: terraform reads the
-# caller identity and the region on every run.
+# caller identity and the region on every run, and rc's own preflight reads
+# the account's awsvpcTrunking setting to size EC2 capacity (rc-hguq).
+#
+# ecs:ListAccountSettings matters more than it looks. Without it rc cannot
+# tell whether ENI trunking is on, falls back to sizing as though it were off,
+# and a valid EC2 config is REJECTED for a reason that has nothing to do with
+# the config -- so it belongs in the reported action set rather than being
+# discovered as a mystery rejection on a CI runner.
 BASELINE_ACTIONS = [
+    "ecs:ListAccountSettings",
     "sts:GetCallerIdentity",
 ]
 
