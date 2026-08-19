@@ -3153,20 +3153,36 @@ class ECSProvider(Provider):
 
         fragment = report.policy_fragment()
         detail = report.render_table()
+        # rc-u0wr: RC_SKIP_PREFLIGHT=1 was the only way past a blocking
+        # finding, which turns the feature OFF on the stack that most needs
+        # it -- a false positive then costs you the 22 true findings as well.
+        # Advisory mode keeps every check running and every finding reported,
+        # and only drops the block.
+        if os.environ.get("RC_PREFLIGHT_ADVISORY"):
+            self._emit(
+                "  warning: deploy preflight found blocking issues "
+                "(RC_PREFLIGHT_ADVISORY set — reporting, not blocking):\n" + detail
+            )
+            self._warn(
+                "deploy preflight found blocking issues but RC_PREFLIGHT_ADVISORY "
+                "is set, so the deploy proceeded unblocked."
+            )
+            return report
         message = (
             "deploy preflight failed — every problem found, not just the "
             "first:\n" + detail
         )
         if fragment:
             message += (
-                "\n\n  Paste this statement into the deploy role's policy "
-                '(Resource is "*" for speed; narrow it once the deploy '
-                "runs):\n" + fragment
+                '\n\n  Grant these to the deploy role (Resource is "*" for '
+                "speed; narrow it once the deploy runs):\n" + fragment
             )
         message += (
             "\n\n  These checks are advisory: iam:SimulatePrincipalPolicy "
-            "does not evaluate SCPs or permission boundaries. Set "
-            "RC_SKIP_PREFLIGHT=1 to proceed anyway."
+            "does not evaluate SCPs or permission boundaries, so a denial can "
+            "be rc's error rather than yours. To proceed while keeping the "
+            "report, set RC_PREFLIGHT_ADVISORY=1; RC_SKIP_PREFLIGHT=1 turns "
+            "the checks off entirely."
         )
         raise ProviderConfigError(message)
 

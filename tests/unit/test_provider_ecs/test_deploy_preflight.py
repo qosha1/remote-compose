@@ -547,7 +547,7 @@ class TestProviderWiring:
         # Both failures, not just the first.
         assert "state backend" in message
         assert "route53:ChangeResourceRecordSets" in message
-        assert "RemoteComposeDeployMissingActions" in message
+        assert "RemoteComposeDeploy" in message
         assert "RC_SKIP_PREFLIGHT=1" in message
 
     def test_a_broken_checker_never_breaks_the_deploy(self, tmp_path):
@@ -778,3 +778,244 @@ class TestPrincipalSelection:
         check = next(c for c in report.checks if c.name == "deploy principal IAM")
         assert check.status == pf.WARN
         assert report.ok is True
+
+
+class TestFalseDenialsFromTheField:
+    """rc-u0wr: preflight reported 7 FALSE denials on a COMPLETE deploy role.
+
+    Since preflight blocks, a false positive is a hard blocker -- and the
+    only workaround disabled the feature wholesale on the stack that most
+    needed it, costing the 22 true findings too. Each case verified by hand
+    with simulate-principal-policy before being fixed here.
+    """
+
+    BACKEND_CROSS_REGION = {
+        "type": "s3",
+        "bucket": "rc-tfstate",
+        "key": "debuggai-api/ecs.tfstate",
+        # The backend lives in a DIFFERENT region from the infrastructure.
+        "region": "us-west-2",
+        "dynamodb_table": "rc-tfstate-locks",
+    }
+
+    def test_lock_table_arn_uses_the_backend_region_not_the_infra_region(self):
+        """#1: 4 dynamodb actions falsely denied. The report contradicted
+        itself -- check_state_lock passed in the same run because it reads
+        the backend region correctly."""
+        arns = pf.project_resource_arns(
+            account_id="033937118837",
+            region="us-east-2",  # infra region
+            project="debuggai-api",
+            backend_cfg=self.BACKEND_CROSS_REGION,
+        )
+        assert arns["dynamodb_lock"] == [
+            "arn:aws:dynamodb:us-west-2:033937118837:table/rc-tfstate-locks"
+        ]
+
+    def test_lock_arn_falls_back_to_infra_region_when_backend_omits_one(self):
+        arns = pf.project_resource_arns(
+            account_id="1",
+            region="us-east-2",
+            project="p",
+            backend_cfg={"type": "s3", "bucket": "b", "dynamodb_table": "t"},
+        )
+        assert arns["dynamodb_lock"] == ["arn:aws:dynamodb:us-east-2:1:table/t"]
+
+    def test_list_instance_profiles_for_role_acts_on_a_role(self):
+        """#2: name contains 'InstanceProfile' but the resource is a ROLE.
+        Verified live: allowed against role/..., implicitDeny against
+        instance-profile/... . Inference got this wrong; the table doesn't."""
+        assert pf.classify_action("iam:ListInstanceProfilesForRole") == "iam_role"
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "iam:AddRoleToInstanceProfile",
+            "iam:CreateInstanceProfile",
+            "iam:DeleteInstanceProfile",
+            "iam:GetInstanceProfile",
+            "iam:RemoveRoleFromInstanceProfile",
+            "iam:TagInstanceProfile",
+        ],
+    )
+    def test_genuine_instance_profile_actions_stay_scoped_to_the_profile(self, action):
+        assert pf.classify_action(action) == "iam_instance_profile"
+
+    def test_every_scoped_iam_action_is_explicitly_classified(self):
+        """Guard against the inference trap returning: any iam action rc
+        scopes must appear in the explicit table or be a plain role action.
+
+        The general rule this encodes: an action's resource type is NOT
+        always the resource that made rc emit it.
+        """
+        actions, _ = pf.derive_required_actions(pf.RESOURCE_TYPE_ACTIONS.keys())
+        for action in actions:
+            if not action.startswith("iam:"):
+                continue
+            klass = pf.classify_action(action)
+            if "InstanceProfile" in action:
+                # Must have been decided explicitly, never by substring.
+                assert action in pf._ACTION_RESOURCE_CLASS, action
+            assert klass in ("iam_role", "iam_instance_profile", "wildcard")
+
+    def test_destroy_only_actions_are_split_out_of_the_remedy(self):
+        """#3: the paste-ready fragment granted route53:DeleteHostedZone on
+        "*" to a CI role, to converge a stack that never deletes a zone --
+        the exact blast-radius widening the resource-ARN work prevents."""
+        report = pf.PreflightReport(
+            missing_actions=[
+                "ecs:CreateService",
+                "route53:DeleteHostedZone",
+                "ec2:DeleteVpc",
+            ]
+        )
+        fragment = report.policy_fragment()
+        converge, destroy = fragment.split("RemoteComposeDestroy")
+        assert "ecs:CreateService" in converge
+        assert "route53:DeleteHostedZone" not in converge
+        assert "REVIEW BEFORE GRANTING" in fragment
+        assert "route53:DeleteHostedZone" in destroy and "ec2:DeleteVpc" in destroy
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            # Ordinary update verbs -- terraform calls these to converge, so
+            # withholding them would break a normal deploy.
+            "ec2:RevokeSecurityGroupIngress",
+            "iam:DetachRolePolicy",
+            "ecs:DeregisterTaskDefinition",
+            "ec2:DisassociateRouteTable",
+            # Backend operations are never "destroy only".
+            "s3:DeleteObject",
+            "dynamodb:DeleteItem",
+        ],
+    )
+    def test_update_verbs_are_not_treated_as_destructive(self, action):
+        assert pf.is_destroy_only(action) is False
+
+    def test_no_destructive_actions_means_a_single_statement(self):
+        report = pf.PreflightReport(missing_actions=["ecs:CreateService"])
+        assert "RemoteComposeDestroy" not in report.policy_fragment()
+
+
+class TestReportProvenance:
+    """The suggestion attached to rc-u0wr: naming the ARN per group and the
+    origin per action would have made all three bugs self-evident from the
+    output instead of requiring manual simulation to find."""
+
+    def test_report_names_the_arn_used_for_each_group(self):
+        iam = _FakeIAM(denied=["dynamodb:PutItem"])
+        check, _ = pf.check_iam_actions(
+            _FakeSession(iam=iam),
+            "arn:aws:iam::1:role/deploy",
+            ["dynamodb:PutItem"],
+            "us-east-2",
+            principal_arn="arn:aws:iam::1:role/deploy",
+            is_deploy_principal=True,
+            resource_arns=pf.project_resource_arns(
+                account_id="1",
+                region="us-east-2",
+                project="p",
+                backend_cfg=TestFalseDenialsFromTheField.BACKEND_CROSS_REGION,
+            ),
+        )
+        # The wrong-region bug would be visible right here.
+        assert "arn:aws:dynamodb:us-west-2:1:table/rc-tfstate-locks" in check.remedy
+
+    def test_report_names_what_pulled_each_action_in(self):
+        iam = _FakeIAM(denied=["route53:DeleteHostedZone"])
+        check, _ = pf.check_iam_actions(
+            _FakeSession(iam=iam),
+            "arn:aws:iam::1:role/deploy",
+            ["route53:DeleteHostedZone"],
+            "us-east-2",
+            principal_arn="arn:aws:iam::1:role/deploy",
+            is_deploy_principal=True,
+            action_provenance=pf.action_sources(
+                ["aws_service_discovery_private_dns_namespace"]
+            ),
+        )
+        assert "aws_service_discovery_private_dns_namespace" in check.remedy
+        assert "[destroy/replace only]" in check.remedy
+
+    def test_data_sources_contribute_read_actions_only(self):
+        """A data source must never pull in a managed-resource action set."""
+        for dtype, actions in pf.DATA_SOURCE_ACTIONS.items():
+            for action in actions:
+                assert not pf.is_destroy_only(action), f"{dtype}: {action}"
+                verb = action.split(":", 1)[-1]
+                assert verb.startswith(
+                    ("Describe", "Get", "List")
+                ), f"{dtype}: {action}"
+
+    def test_data_source_origins_are_marked_as_data(self):
+        sources = pf.action_sources([], ["aws_route53_zone"])
+        assert sources["route53:GetHostedZone"] == ["data.aws_route53_zone"]
+
+    def test_backend_and_preflight_origins_are_named(self):
+        sources = pf.action_sources(
+            [], [], TestFalseDenialsFromTheField.BACKEND_CROSS_REGION
+        )
+        assert sources["s3:PutObject"] == ["terraform s3 backend"]
+        assert sources["dynamodb:PutItem"] == ["terraform state lock"]
+        assert sources["ecs:ListAccountSettings"] == ["rc preflight"]
+
+
+class TestAdvisoryMode:
+    """RC_SKIP_PREFLIGHT=1 was the only way past a blocking finding, which
+    turns the feature off on the stack that most needs it -- a false positive
+    then costs the true findings too."""
+
+    def _ctx(self, tmp_path):
+        from remote_compose.provider import DeployContext, ServiceSpec
+
+        return DeployContext(
+            project="app",
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={},
+            provider_config={"ecs": {"region": "us-west-2", "cluster": "c"}},
+            tf_backend_config=S3_BACKEND,
+            working_dir=tmp_path,
+            services={"api": ServiceSpec(name="api", cpu=256, memory=512)},
+        )
+
+    def _provider(self, session):
+        from remote_compose.provider.ecs import ECSProvider
+
+        return ECSProvider(session_factory=lambda _c: session)
+
+    def _failing_session(self):
+        return _FakeSession(
+            sts=_FakeSTS(),
+            s3=_FakeS3(error=_ClientError("AccessDenied")),
+            dynamodb=_FakeDDB(),
+            iam=_FakeIAM(),
+        )
+
+    def test_advisory_reports_everything_but_does_not_block(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("RC_PREFLIGHT_ADVISORY", "1")
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        emitted: list[str] = []
+        from remote_compose.provider.ecs import ECSProvider
+
+        provider = ECSProvider(
+            session_factory=lambda _c: self._failing_session(),
+            progress=emitted.append,
+        )
+        report = provider.deploy_preflight(self._ctx(tmp_path), tmp_path, force=True)
+        assert report is not None and report.ok is False
+        assert any("state backend" in line for line in emitted)
+        assert any("RC_PREFLIGHT_ADVISORY" in line for line in emitted)
+
+    def test_without_advisory_it_still_blocks(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("RC_PREFLIGHT_ADVISORY", raising=False)
+        from remote_compose.provider.base import ProviderConfigError
+
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        with pytest.raises(ProviderConfigError) as exc:
+            self._provider(self._failing_session()).deploy_preflight(
+                self._ctx(tmp_path), tmp_path, force=True
+            )
+        assert "RC_PREFLIGHT_ADVISORY=1" in str(exc.value)

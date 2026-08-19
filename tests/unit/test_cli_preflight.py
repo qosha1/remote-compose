@@ -211,7 +211,7 @@ class TestPreflightCommand:
         # Grouped by service so the reader can act service by service.
         assert "ecs (1)" in res.output and "logs (1)" in res.output
         # And a fragment the user can paste straight into the deploy role.
-        assert "RemoteComposeDeployMissingActions" in res.output
+        assert "RemoteComposeDeploy" in res.output
 
     def test_only_checks_actions_the_rendered_module_actually_needs(
         self, rc_yml, stub_aws

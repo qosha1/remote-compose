@@ -103,22 +103,52 @@ class PreflightReport:
     def policy_fragment(self) -> str:
         """A paste-ready IAM policy statement granting the missing actions.
 
-        Resource "*" deliberately: this is the fastest path from "my deploy
-        is broken" to "my deploy runs", and narrowing it is a judgement call
-        about the account's other principals that rc cannot make. The comment
-        in the rendered fragment says so.
+        Resource "*" for the converge statement: that is the fastest path
+        from "my deploy is broken" to "my deploy runs", and narrowing it is a
+        judgement call about the account's other principals rc cannot make.
+
+        Destroy-only actions go in a SECOND, clearly-labelled statement
+        rather than being bundled in (rc-u0wr #3). Bundled, this fragment
+        handed a CI role route53:DeleteHostedZone on "*" -- the power to
+        delete the production hosted zone -- in order to converge a stack
+        that never deletes one. A remedy that quietly widens blast radius is
+        worse than the gap it closes, so the destructive half is separate and
+        says what it is for.
         """
         if not self.missing_actions:
             return ""
-        return json.dumps(
-            {
-                "Sid": "RemoteComposeDeployMissingActions",
-                "Effect": "Allow",
-                "Action": sorted(self.missing_actions),
-                "Resource": "*",
-            },
-            indent=2,
-        )
+        converge = sorted(a for a in self.missing_actions if not is_destroy_only(a))
+        destroy = sorted(a for a in self.missing_actions if is_destroy_only(a))
+        blocks = []
+        if converge:
+            blocks.append(
+                json.dumps(
+                    {
+                        "Sid": "RemoteComposeDeploy",
+                        "Effect": "Allow",
+                        "Action": converge,
+                        "Resource": "*",
+                    },
+                    indent=2,
+                )
+            )
+        if destroy:
+            blocks.append(
+                "  # Needed ONLY to destroy or REPLACE these resources, not to\n"
+                "  # converge the stack. REVIEW BEFORE GRANTING: several are\n"
+                '  # account-wide destructive on "*". Scope the Resource, or\n'
+                "  # omit this statement entirely if CI never destroys.\n"
+                + json.dumps(
+                    {
+                        "Sid": "RemoteComposeDestroy",
+                        "Effect": "Allow",
+                        "Action": destroy,
+                        "Resource": "*",
+                    },
+                    indent=2,
+                )
+            )
+        return "\n\n".join(blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -638,13 +668,34 @@ BACKEND_LOCK_ACTIONS = [
     "dynamodb:PutItem",
 ]
 
-# Action -> resource class, by explicit membership rather than by service
-# prefix. Prefix matching would be wrong in both directions here: s3 actions
-# for the BACKUP bucket (aws_s3_bucket in the module) must not be evaluated
-# against the STATE bucket's ARN, and iam:CreateServiceLinkedRole acts on a
-# service-linked role rc does not name.
-_INSTANCE_PROFILE_MARKER = "InstanceProfile"
-_UNSCOPED_IAM_ACTIONS = {"iam:CreateServiceLinkedRole"}
+# Action -> resource class, by EXPLICIT membership. rc-u0wr #2: this was
+# inferred from the action name, and inference got it wrong in the field --
+# `iam:ListInstanceProfilesForRole` contains "InstanceProfile" but operates on
+# a ROLE, so simulating it against the instance-profile ARN reported a denial
+# on a role that was allowed (verified live: allowed against role/...,
+# implicitDeny against instance-profile/...).
+#
+# The general trap, worth remembering when extending this: AN ACTION'S
+# RESOURCE TYPE IS NOT ALWAYS THE RESOURCE THAT MADE rc EMIT IT.
+# `aws_iam_role` needs ListInstanceProfilesForRole (acts on a role),
+# `aws_ecs_task_definition` needs iam:PassRole (acts on the role being
+# passed, not the task def), and `aws_autoscaling_group` needs
+# iam:CreateServiceLinkedRole (acts on a role AWS owns, which rc cannot
+# name). So this table is keyed by ACTION, never derived from the resource
+# type that pulled the action in.
+_ACTION_RESOURCE_CLASS: dict[str, str] = {
+    # Act on an instance profile.
+    "iam:AddRoleToInstanceProfile": "iam_instance_profile",
+    "iam:CreateInstanceProfile": "iam_instance_profile",
+    "iam:DeleteInstanceProfile": "iam_instance_profile",
+    "iam:GetInstanceProfile": "iam_instance_profile",
+    "iam:RemoveRoleFromInstanceProfile": "iam_instance_profile",
+    "iam:TagInstanceProfile": "iam_instance_profile",
+    # Acts on a ROLE despite the name. Verified live 2026-08-19.
+    "iam:ListInstanceProfilesForRole": "iam_role",
+    # Acts on a service-linked role rc does not name -- must stay unscoped.
+    "iam:CreateServiceLinkedRole": "wildcard",
+}
 
 
 def classify_action(action: str) -> str:
@@ -655,10 +706,9 @@ def classify_action(action: str) -> str:
     and instance profiles) or from the backend config (state object, lock
     table) are ever scoped.
     """
-    if action in _UNSCOPED_IAM_ACTIONS:
-        return "wildcard"
-    if _INSTANCE_PROFILE_MARKER in action:
-        return "iam_instance_profile"
+    explicit = _ACTION_RESOURCE_CLASS.get(action)
+    if explicit is not None:
+        return explicit
     if action.startswith("iam:"):
         return "iam_role"
     if action in BACKEND_STATE_ACTIONS:
@@ -670,6 +720,63 @@ def classify_action(action: str) -> str:
     if action in BACKEND_LOCK_ACTIONS:
         return "dynamodb_lock"
     return "wildcard"
+
+
+# Actions only reached by a DESTROY or a resource REPLACEMENT. rc-u0wr #3:
+# the paste-ready remedy previously bundled these with everything else at
+# Resource "*", so following rc's own advice granted a CI role
+# route53:DeleteHostedZone -- i.e. the power to delete the production hosted
+# zone -- to converge a stack that never deletes one. That is precisely the
+# blast-radius widening the resource-ARN work exists to prevent.
+#
+# Deliberately narrow: Revoke/Detach/Disassociate/Deregister are NOT here,
+# because terraform calls them during ordinary updates (an SG rule change is
+# a revoke + authorize, a policy change is a detach + attach). Only Delete
+# and Terminate, and never the backend's own operational actions.
+_DESTROY_ONLY_VERBS = ("Delete", "Terminate")
+
+
+def is_destroy_only(action: str) -> bool:
+    """True when an action is only needed to destroy or replace a resource."""
+    if action in BACKEND_STATE_ACTIONS or action in BACKEND_LOCK_ACTIONS:
+        return False
+    verb = action.split(":", 1)[-1]
+    return verb.startswith(_DESTROY_ONLY_VERBS)
+
+
+def action_sources(
+    resource_types: Iterable[str],
+    data_source_types: Iterable[str] = (),
+    backend_cfg: Optional[dict] = None,
+) -> dict[str, list[str]]:
+    """Which declaration pulled each action in, for the report.
+
+    rc-u0wr: "why does rc want route53:DeleteHostedZone?" cost a manual
+    investigation to answer, and the answer (a managed
+    aws_service_discovery_private_dns_namespace, which really does create a
+    hosted zone) was not guessable from the output. Naming the contributing
+    declaration makes that self-evident -- and makes a genuine mapping bug
+    reportable instead of merely suspicious.
+
+    Data sources are tagged ``data.<type>`` so a read-only origin is visible
+    as such.
+    """
+    sources: dict[str, set[str]] = {}
+    for rtype in resource_types:
+        for action in RESOURCE_TYPE_ACTIONS.get(rtype) or []:
+            sources.setdefault(action, set()).add(rtype)
+    for dtype in data_source_types:
+        for action in DATA_SOURCE_ACTIONS.get(dtype) or []:
+            sources.setdefault(action, set()).add(f"data.{dtype}")
+    for action in BASELINE_ACTIONS:
+        sources.setdefault(action, set()).add("rc preflight")
+    if (backend_cfg or {}).get("type") == "s3":
+        for action in BACKEND_STATE_ACTIONS:
+            sources.setdefault(action, set()).add("terraform s3 backend")
+        if backend_cfg.get("dynamodb_table"):
+            for action in BACKEND_LOCK_ACTIONS:
+                sources.setdefault(action, set()).add("terraform state lock")
+    return {a: sorted(v) for a, v in sources.items()}
 
 
 @dataclass
@@ -723,9 +830,17 @@ def project_resource_arns(
             state.append(f"arn:aws:s3:::{bucket}/{key}")
         arns["s3_state"] = state
     table = (backend_cfg or {}).get("dynamodb_table")
-    if table and account_id and region:
+    # rc-u0wr #1: the lock table lives in the BACKEND's region, which is
+    # routinely NOT the infrastructure region -- debuggai-api runs in
+    # us-east-2 against a lock table in us-west-2. Building this ARN from
+    # provider_config.ecs.region made all four dynamodb actions report as
+    # denied while check_state_lock(), which reads the backend region
+    # correctly, passed in the SAME run. A report that contradicts itself is
+    # worse than one that says nothing.
+    lock_region = (backend_cfg or {}).get("region") or region
+    if table and account_id and lock_region:
         arns["dynamodb_lock"] = [
-            f"arn:aws:dynamodb:{region}:{account_id}:table/{table}"
+            f"arn:aws:dynamodb:{lock_region}:{account_id}:table/{table}"
         ]
     return arns
 
@@ -1116,6 +1231,7 @@ def check_iam_actions(
     principal_arn: Optional[str] = None,
     is_deploy_principal: bool = False,
     resource_arns: Optional[dict[str, list[str]]] = None,
+    action_provenance: Optional[dict[str, list[str]]] = None,
 ) -> tuple[PreflightCheck, list[str]]:
     """Simulate every action terraform will call, and report ALL that fail.
 
@@ -1170,6 +1286,11 @@ def check_iam_actions(
         )
 
     scoped_count = sum(1 for g in groups if g.scoped)
+    group_lines = [
+        f"  {g.label}: "
+        + (", ".join(g.resource_arns) if g.resource_arns else '"*" (no ARN derivable)')
+        for g in groups
+    ]
     if not denials:
         detail = f"{len(actions)} action(s) allowed — {provenance}"
         remedy = ""
@@ -1197,12 +1318,24 @@ def check_iam_actions(
     )
     lines = [f"{provenance}."]
     if scoped_count:
+        # rc-u0wr: naming the ARN per group turns "why is this denied?" from a
+        # manual simulate-principal-policy investigation into something
+        # readable straight off the report -- and makes a wrong ARN (wrong
+        # region, wrong resource type) visible AS a wrong ARN.
         lines.append(
-            f"{scoped_count} action group(s) were evaluated against the "
-            f'concrete ARNs rc will create; the rest against "*".'
+            f"{scoped_count} of {len(groups)} action group(s) were evaluated "
+            f"against concrete ARNs:"
         )
+        lines.extend(group_lines)
     for service, items in sorted(grouped.items()):
-        lines.append(f"{service}: {', '.join(items)}")
+        annotated = []
+        for action in items:
+            why = (action_provenance or {}).get(action) or []
+            suffix = f" (from {', '.join(why)})" if why else ""
+            if is_destroy_only(action):
+                suffix += " [destroy/replace only]"
+            annotated.append(f"{action}{suffix}")
+        lines.append(f"{service}: " + "; ".join(annotated))
     unscoped_denials = sorted({a for a, scoped in denials if not scoped})
     if unscoped_denials:
         lines.append(
@@ -1297,6 +1430,7 @@ def run_preflight(
             region,
             principal_arn=deploy_principal_arn,
             is_deploy_principal=bool(deploy_principal_arn),
+            action_provenance=action_sources(resources, data_sources, backend_cfg),
             resource_arns=project_resource_arns(
                 account_id=account_id
                 or _account_from_arn(deploy_principal_arn or caller_arn),
