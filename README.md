@@ -160,6 +160,45 @@ It renders the terraform first, then checks:
   with `iam:SimulatePrincipalPolicy`, reported **all at once** grouped by
   service, with a paste-ready policy statement for whatever's missing.
 
+### Which principal gets checked
+
+The identity that matters is the role CI assumes — which is exactly the
+identity a laptop run is *not*. Running as an admin user and getting "all
+prerequisites satisfied" is true and irrelevant, so rc says which principal
+it checked and whether that's the one that deploys:
+
+```yaml
+provider_config:
+  ecs:
+    deploy_role_arn: arn:aws:iam::123456789012:role/myapp-prod-github-deploy
+```
+
+With that set, `rc preflight` checks the deploy role by default (and running
+as anyone else is the thing you have to ask for). It also makes that role a
+**versioned fact** — these `*-github-deploy` roles are otherwise hand-made
+bootstrap artifacts that exist nowhere in git. `rc preflight --principal
+<arn>` overrides it per-run. Without either, a fully-passing report is
+reported as a **warning**, not a pass.
+
+### Resource-scoped policies are simulated against real ARNs
+
+`SimulatePrincipalPolicy` defaults the resource to `*`, and a correctly
+least-privileged policy fails that way: a role scoped to
+`role/myapp-*` and its own state bucket returns `implicitDeny` for
+`iam:CreateRole`, `iam:CreateInstanceProfile`, `s3:PutObject` and
+`dynamodb:PutItem` against `*`, and `allowed` against the ARNs it will really
+touch. Reporting those would push operators to widen statements to
+`Resource: "*"` — worse than the gap it replaces.
+
+So rc groups actions by resource class and simulates each against the
+concrete ARNs its own templates produce (`${project}-task`,
+`${project}-ec2-instance`, the configured state object and lock table). Note
+`ResourceArns` applies to *every* action in a call, so wildcard-only actions
+(`ecs:RegisterTaskDefinition`, `ecr:GetAuthorizationToken`) are deliberately
+kept in their own unscoped call — and any denial from an unscoped group is
+labelled as a possible false negative with the command to verify it, rather
+than presented as fact.
+
 The action set is derived from the `.tf` rc just rendered — not from a
 terraform plan, which would need the state access preflight is checking, and
 not from a fixed list, so the report is about *this* deploy. A stack with no
@@ -191,6 +230,9 @@ provider_config:
     cluster: my-app-prod
     region: us-west-1
     aws_profile: myprofile              # LOCAL DEVELOPMENT ONLY — see below
+    deploy_role_arn: arn:aws:iam::123456789012:role/my-app-github-deploy
+                                        # the principal CI assumes; `rc preflight`
+                                        # checks THIS rather than whoever is logged in
     vpc_cidr: 10.0.0.0/16               # CIDR for the VPC rc creates (default mode)
     route53_zone: rctest.example.com   # override if zone != domain[-2:]
 

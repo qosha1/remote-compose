@@ -78,7 +78,7 @@ class _IAM:
     def __init__(self, denied=()):
         self.denied = set(denied)
 
-    def simulate_principal_policy(self, PolicySourceArn, ActionNames):
+    def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kwargs):
         return {
             "EvaluationResults": [
                 {
@@ -145,7 +145,54 @@ class TestPreflightCommand:
         assert res.exit_code == 0, res.output
         for name in ("terraform binary", "aws identity", "state backend", "state lock"):
             assert name in res.output
+
+    def test_green_run_against_the_wrong_principal_does_not_claim_all_clear(
+        self, rc_yml, stub_aws
+    ):
+        """rc-zu1x: 'All prerequisites satisfied' from an admin laptop is true
+        and irrelevant — the deploy runs as a CI role this never touched, and
+        an operator reasonably reads that line as 'the deploy will work'."""
+        stub_aws(_Session())
+        res = _invoke(rc_yml)
+        assert res.exit_code == 0, res.output
+        assert "All prerequisites satisfied" not in res.output
+        assert "probably not the principal that deploys" in res.output
+        assert "deploy_role_arn" in res.output
+
+    def test_configured_deploy_role_is_checked_and_reported_as_such(
+        self, rc_yml, stub_aws
+    ):
+        import yaml as _yaml
+
+        cfg = dict(_RC)
+        cfg["provider_config"] = {
+            "ecs": dict(
+                _RC["provider_config"]["ecs"],
+                deploy_role_arn="arn:aws:iam::033937118837:role/app-github-deploy",
+            )
+        }
+        rc_yml.write_text(_yaml.safe_dump(cfg))
+        stub_aws(_Session())
+        res = _invoke(rc_yml)
+        assert res.exit_code == 0, res.output
         assert "All prerequisites satisfied" in res.output
+        assert "app-github-deploy" in res.output
+        assert "the configured deploy principal" in res.output
+
+    def test_principal_flag_overrides_the_caller(self, rc_yml, stub_aws):
+        seen: list[str] = []
+
+        class _RecordingIAM(_IAM):
+            def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kw):
+                seen.append(PolicySourceArn)
+                return super().simulate_principal_policy(
+                    PolicySourceArn, ActionNames, **kw
+                )
+
+        stub_aws(_Session(iam=_RecordingIAM()))
+        res = _invoke(rc_yml, "--principal", "arn:aws:iam::1:role/ci-role")
+        assert res.exit_code == 0, res.output
+        assert set(seen) == {"arn:aws:iam::1:role/ci-role"}
 
     def test_reports_every_problem_at_once_and_exits_nonzero(self, rc_yml, stub_aws):
         """Three failed deploys became one report."""
@@ -176,9 +223,11 @@ class TestPreflightCommand:
         seen: list[str] = []
 
         class _RecordingIAM(_IAM):
-            def simulate_principal_policy(self, PolicySourceArn, ActionNames):
+            def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kw):
                 seen.extend(ActionNames)
-                return super().simulate_principal_policy(PolicySourceArn, ActionNames)
+                return super().simulate_principal_policy(
+                    PolicySourceArn, ActionNames, **kw
+                )
 
         stub_aws(_Session(iam=_RecordingIAM()))
         assert _invoke(rc_yml).exit_code == 0
@@ -215,9 +264,11 @@ class TestPreflightCommand:
         seen: list[str] = []
 
         class _RecordingIAM(_IAM):
-            def simulate_principal_policy(self, PolicySourceArn, ActionNames):
+            def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kw):
                 seen.extend(ActionNames)
-                return super().simulate_principal_policy(PolicySourceArn, ActionNames)
+                return super().simulate_principal_policy(
+                    PolicySourceArn, ActionNames, **kw
+                )
 
         stub_aws(_Session(iam=_RecordingIAM()))
         res = _invoke(rc_yml)

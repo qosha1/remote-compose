@@ -13,8 +13,6 @@ its checks and report everything, never stop at the first failure.
 from __future__ import annotations
 
 import json
-import re
-from pathlib import Path
 
 import pytest
 
@@ -91,11 +89,13 @@ class _FakeIAM:
         self.denied = set(denied)
         self.error = error
         self.simulated: list[str] = []
+        self.resource_arns: list = []
 
-    def simulate_principal_policy(self, PolicySourceArn, ActionNames):
+    def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kwargs):
         if self.error:
             raise self.error
         self.simulated.extend(ActionNames)
+        self.resource_arns.append(kwargs.get("ResourceArns"))
         return {
             "EvaluationResults": [
                 {
@@ -126,19 +126,96 @@ S3_BACKEND = {
 }
 
 
-class TestActionMapStaysInSyncWithTemplates:
-    def test_every_emitted_resource_type_is_mapped(self):
-        """A template that grows a resource type rc can't check silently
-        reopens the exact gap this feature closes."""
-        tpl_dir = Path(pf.__file__).parent / "templates"
-        emitted: set[str] = set()
-        data: set[str] = set()
-        for f in sorted(tpl_dir.glob("*.j2")):
-            text = f.read_text()
-            emitted.update(re.findall(r'^resource\s+"([a-z0-9_]+)"', text, re.M))
-            data.update(re.findall(r'^data\s+"([a-z0-9_]+)"', text, re.M))
-        assert emitted - set(pf.RESOURCE_TYPE_ACTIONS) == set()
-        assert data - set(pf.DATA_SOURCE_ACTIONS) == set()
+class TestActionMapStaysInSyncWithRenderedTerraform:
+    """The map must cover what rc actually EMITS, not what its templates
+    literally spell.
+
+    The first version of this test scanned the .j2 files with the same regex
+    the runtime scanner uses. That was wrong in a way that passed: one
+    template writes `resource "aws_vpc_security_group_{{ rule.direction }}_rule"`,
+    so the type name only exists after rendering, and the two SG-rule types
+    never entered the compared set at all. The assertion held vacuously while
+    a real, commonly-hit path went unchecked -- found in the field, not here
+    (rc-zu1x). The runtime scanner was always correct; only the test was not.
+
+    Rendering across the feature paths and scanning the .tf is the honest
+    version.
+    """
+
+    def _render_all_paths(self, tmp_path):
+        from remote_compose.provider import DeployContext, SecretRef, ServiceSpec
+        from remote_compose.provider.ecs import ECSProvider
+
+        env_dir = tmp_path / ".envs"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        (env_dir / ".prod").write_text("SECRET_KEY=x\n")
+        ctx = DeployContext(
+            project="cover",
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={
+                "version": 2,
+                "project": "cover",
+                "domain": "api.example.com",
+                "tls": {"mode": "acm"},
+                # Declared network exercises the interpolated SG-rule types,
+                # NAT/route/endpoint resources and the declared-subnet path.
+                "network": {
+                    # egress: nat also pulls in the NAT gateway, EIP,
+                    # route table and route resources.
+                    "subnets": {"priv": {"public": False, "egress": "nat"}},
+                    "security_groups": {
+                        "mesh": {
+                            "description": "Coverage fixture.",
+                            "ingress": [{"from": "alb", "ports": [5432]}],
+                            "egress": [{"to": "cidr:0.0.0.0/0"}],
+                        }
+                    },
+                },
+                "backup": {"bucket": "cover-backups"},
+            },
+            provider_config={
+                "ecs": {
+                    "region": "us-east-2",
+                    "cluster": "cover",
+                    "vpc_cidr": "10.0.0.0/16",
+                    "default_launch_type": "EC2",
+                    "ec2_capacity": {
+                        "instance_type": "m5.xlarge",
+                        "desired": 2,
+                        "max": 4,
+                    },
+                }
+            },
+            tf_backend_config={"type": "local"},
+            working_dir=tmp_path,
+            services={
+                "web": ServiceSpec(
+                    name="web", cpu=256, memory=512, public=True, port=80
+                ),
+                "db": ServiceSpec(
+                    name="db",
+                    cpu=256,
+                    memory=512,
+                    volumes=[{"name": "data", "mount": "/var/lib/x"}],
+                ),
+            },
+            secrets=[SecretRef(name="app", source="file", path=str(env_dir / ".prod"))],
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        return pf.scan_terraform_dir(out)
+
+    def test_every_rendered_resource_type_is_mapped(self, tmp_path):
+        resources, data_sources = self._render_all_paths(tmp_path)
+        assert resources - set(pf.RESOURCE_TYPE_ACTIONS) == set()
+        assert data_sources - set(pf.DATA_SOURCE_ACTIONS) == set()
+
+    def test_the_interpolated_sg_rule_types_are_actually_exercised(self, tmp_path):
+        """Guard the guard: if this fixture stops rendering them, the test
+        above goes vacuous again exactly as before."""
+        resources, _ = self._render_all_paths(tmp_path)
+        assert "aws_vpc_security_group_ingress_rule" in resources
+        assert "aws_vpc_security_group_egress_rule" in resources
 
     def test_every_mapped_action_is_service_qualified(self):
         for rtype, actions in pf.RESOURCE_TYPE_ACTIONS.items():
@@ -298,6 +375,7 @@ class TestIamCheck:
             _FakeSession(iam=iam),
             "arn:aws:sts::123456789012:assumed-role/rc-deploy/gh",
             actions,
+            is_deploy_principal=True,
         )
         assert check.status == pf.FAIL
         assert set(missing) == set(denied)
@@ -317,13 +395,28 @@ class TestIamCheck:
         assert "not evidence that anything is wrong" in check.remedy
         assert missing == []
 
-    def test_all_allowed_passes(self):
+    def test_all_allowed_against_the_deploy_principal_passes(self):
         check, missing = pf.check_iam_actions(
             _FakeSession(iam=_FakeIAM()),
             "arn:aws:iam::123456789012:role/rc-deploy",
             ["ecs:CreateCluster", "ecs:DeleteCluster"],
+            principal_arn="arn:aws:iam::123456789012:role/rc-deploy",
+            is_deploy_principal=True,
         )
         assert check.status == pf.OK and missing == []
+        assert "the configured deploy principal" in check.detail
+
+    def test_all_allowed_against_the_WRONG_principal_is_only_a_warning(self):
+        """rc-zu1x: an admin laptop user passing everything says nothing
+        about whether CI can deploy, and must not read as if it did."""
+        check, missing = pf.check_iam_actions(
+            _FakeSession(iam=_FakeIAM()),
+            "arn:aws:iam::123456789012:user/qosha",
+            ["ecs:CreateCluster"],
+        )
+        assert check.status == pf.WARN and missing == []
+        assert "NOT a configured deploy role" in check.detail
+        assert "says nothing about whether CI can deploy" in check.remedy
 
 
 class TestRunPreflightCompleteness:
@@ -478,3 +571,206 @@ class TestProviderWiring:
             self._ctx(tmp_path, S3_BACKEND), tmp_path
         )
         assert report is not None and report.ok is True
+
+
+class TestResourceScopedSimulation:
+    """rc-zu1x third finding: simulating a resource-scoped policy against "*"
+    reports denials that are not real.
+
+    Verified live against a least-privileged deploy role (2026-08-19):
+    iam:CreateRole, iam:CreateInstanceProfile, iam:AddRoleToInstanceProfile,
+    iam:DeleteInstanceProfile, s3:PutObject and dynamodb:PutItem all returned
+    implicitDeny against "*" and allowed against the concrete ARNs. The
+    natural fix an operator reaches for on seeing those is widening the
+    statements to Resource: "*" -- so a tool that reports them would actively
+    push people from scoped policies toward admin-shaped ones.
+    """
+
+    BACKEND = dict(S3_BACKEND)
+
+    def _arns(self):
+        return pf.project_resource_arns(
+            account_id="033937118837",
+            region="us-west-2",
+            project="debuggai-api",
+            backend_cfg=self.BACKEND,
+        )
+
+    @pytest.mark.parametrize(
+        "action,expected",
+        [
+            ("iam:CreateRole", "iam_role"),
+            ("iam:PassRole", "iam_role"),
+            ("iam:CreateInstanceProfile", "iam_instance_profile"),
+            ("iam:AddRoleToInstanceProfile", "iam_instance_profile"),
+            ("s3:PutObject", "s3_state"),
+            ("dynamodb:PutItem", "dynamodb_lock"),
+            # Wildcard-only actions must NOT be scoped: supplying a resource
+            # makes them evaluate against a nonsense ARN and falsely deny.
+            ("ecs:RegisterTaskDefinition", "wildcard"),
+            ("ecr:GetAuthorizationToken", "wildcard"),
+            ("ec2:DescribeVpcs", "wildcard"),
+            ("iam:CreateServiceLinkedRole", "wildcard"),
+            # Backup-bucket actions must not be scoped to the STATE bucket.
+            ("s3:CreateBucket", "wildcard"),
+            ("s3:PutBucketVersioning", "wildcard"),
+        ],
+    )
+    def test_action_classification(self, action, expected):
+        assert pf.classify_action(action) == expected
+
+    def test_backend_actions_are_in_the_derived_set(self):
+        """They come from no resource type -- the state bucket is not
+        something the module creates -- so the first version omitted them
+        even though every stateful deploy needs them."""
+        actions, _ = pf.derive_required_actions(["aws_ecs_cluster"], [], self.BACKEND)
+        assert "s3:PutObject" in actions
+        assert "dynamodb:PutItem" in actions
+
+    def test_no_backend_no_backend_actions(self):
+        actions, _ = pf.derive_required_actions(
+            ["aws_ecs_cluster"], [], {"type": "local"}
+        )
+        assert "s3:PutObject" not in actions
+
+    def test_groups_carry_the_concrete_arns_rc_renders(self):
+        arns = self._arns()
+        assert arns["iam_instance_profile"] == [
+            "arn:aws:iam::033937118837:instance-profile/debuggai-api-ec2-instance"
+        ]
+        assert "arn:aws:iam::033937118837:role/debuggai-api-task" in arns["iam_role"]
+        assert "arn:aws:s3:::tf-state/app/prod.tfstate" in arns["s3_state"]
+        assert arns["dynamodb_lock"] == [
+            "arn:aws:dynamodb:us-west-2:033937118837:table/tf-locks"
+        ]
+
+    def test_each_group_is_simulated_against_its_own_resources(self):
+        """One call per group -- ResourceArns applies to EVERY action in a
+        call, so a mixed batch poisons the wildcard-only actions."""
+        recorded: list[tuple] = []
+
+        class _Recording:
+            def simulate_principal_policy(self, PolicySourceArn, ActionNames, **kw):
+                recorded.append((tuple(ActionNames), kw.get("ResourceArns")))
+                return {
+                    "EvaluationResults": [
+                        {"EvalActionName": a, "EvalDecision": "allowed"}
+                        for a in ActionNames
+                    ]
+                }
+
+        actions = [
+            "iam:CreateInstanceProfile",
+            "ecs:RegisterTaskDefinition",
+            "s3:PutObject",
+        ]
+        groups = pf.build_simulation_groups(actions, self._arns())
+        pf.simulate_groups(_Recording(), "arn:aws:iam::1:role/r", groups)
+
+        by_action = {a: res for batch, res in recorded for a in batch}
+        assert by_action["ecs:RegisterTaskDefinition"] is None
+        assert "instance-profile/debuggai-api-ec2-instance" in "".join(
+            by_action["iam:CreateInstanceProfile"]
+        )
+        assert any("tfstate" in x for x in by_action["s3:PutObject"])
+
+    def test_unscoped_denials_are_flagged_as_possible_false_negatives(self):
+        """The report must not push an operator toward Resource: "*"."""
+        iam = _FakeIAM(denied=["ec2:CreateVpc"])
+        check, missing = pf.check_iam_actions(
+            _FakeSession(iam=iam),
+            "arn:aws:iam::033937118837:role/deploy",
+            ["ec2:CreateVpc"],
+            "us-west-2",
+            principal_arn="arn:aws:iam::033937118837:role/deploy",
+            is_deploy_principal=True,
+            resource_arns=self._arns(),
+        )
+        assert check.status == pf.FAIL
+        assert "ec2:CreateVpc" in missing
+        assert 'checked against "*"' in check.remedy
+        assert "before widening any statement" in check.remedy
+
+    def test_scoped_denials_carry_no_false_negative_caveat(self):
+        iam = _FakeIAM(denied=["iam:CreateInstanceProfile"])
+        check, _ = pf.check_iam_actions(
+            _FakeSession(iam=iam),
+            "arn:aws:iam::033937118837:role/deploy",
+            ["iam:CreateInstanceProfile"],
+            "us-west-2",
+            principal_arn="arn:aws:iam::033937118837:role/deploy",
+            is_deploy_principal=True,
+            resource_arns=self._arns(),
+        )
+        assert check.status == pf.FAIL
+        assert 'checked against "*"' not in check.remedy
+
+
+class TestPrincipalSelection:
+    """rc-zu1x first finding: a green local run said nothing about CI."""
+
+    def _session(self, iam=None):
+        return _FakeSession(
+            sts=_FakeSTS("arn:aws:iam::033937118837:user/qosha"),
+            s3=_FakeS3(payload=json.dumps({"terraform_version": "1.0.0"}).encode()),
+            dynamodb=_FakeDDB(),
+            iam=iam or _FakeIAM(),
+        )
+
+    def test_defaults_to_the_caller_and_says_so_loudly(self, tmp_path):
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        report = pf.run_preflight(
+            tmp_path, S3_BACKEND, self._session(), project="debuggai-api"
+        )
+        check = next(c for c in report.checks if c.name == "deploy principal IAM")
+        assert check.status == pf.WARN
+        assert "NOT a configured deploy role" in check.detail
+        assert report.checked_deploy_principal is False
+
+    def test_simulates_the_configured_deploy_principal(self, tmp_path):
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        iam = _FakeIAM()
+        report = pf.run_preflight(
+            tmp_path,
+            S3_BACKEND,
+            self._session(iam),
+            region="us-west-2",
+            project="debuggai-api",
+            deploy_principal_arn=(
+                "arn:aws:iam::033937118837:role/debuggai-api-prod-github-deploy"
+            ),
+        )
+        check = next(c for c in report.checks if c.name == "deploy principal IAM")
+        assert check.status == pf.OK
+        assert "the configured deploy principal" in check.detail
+        assert report.checked_deploy_principal is True
+        assert report.checked_principal.endswith("debuggai-api-prod-github-deploy")
+
+    def test_identity_line_names_both_identities(self, tmp_path):
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        report = pf.run_preflight(
+            tmp_path,
+            S3_BACKEND,
+            self._session(),
+            project="p",
+            deploy_principal_arn="arn:aws:iam::033937118837:role/ci",
+        )
+        identity = next(c for c in report.checks if c.name == "aws identity")
+        assert "user/qosha" in identity.detail
+        assert "simulating against" in identity.detail
+
+    def test_unsimulatable_deploy_role_degrades_to_warn_not_fail(self, tmp_path):
+        """A laptop that cannot simulate the CI role must not turn a working
+        preflight red -- same degradation rc-g3jy already relies on."""
+        (tmp_path / "main.tf").write_text('resource "aws_ecs_cluster" "c" {}\n')
+        iam = _FakeIAM(error=_ClientError("AccessDenied"))
+        report = pf.run_preflight(
+            tmp_path,
+            S3_BACKEND,
+            self._session(iam),
+            project="p",
+            deploy_principal_arn="arn:aws:iam::033937118837:role/ci",
+        )
+        check = next(c for c in report.checks if c.name == "deploy principal IAM")
+        assert check.status == pf.WARN
+        assert report.ok is True

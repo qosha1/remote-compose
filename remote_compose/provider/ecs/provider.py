@@ -3086,7 +3086,11 @@ class ECSProvider(Provider):
         print(message, file=sys.stderr)
 
     def deploy_preflight(
-        self, ctx: DeployContext, out_dir: Path, force: bool = False
+        self,
+        ctx: DeployContext,
+        out_dir: Path,
+        force: bool = False,
+        principal_arn: Optional[str] = None,
     ) -> Optional[Any]:
         """Verify the deploy principal BEFORE terraform touches anything.
 
@@ -3126,6 +3130,13 @@ class ECSProvider(Provider):
                 backend_cfg=backend_cfg,
                 session=session,
                 region=ecs_cfg.get("region"),
+                project=ctx.project,
+                # rc-zu1x: the principal that matters is the one the deploy
+                # will really run as. An explicit --principal wins; otherwise
+                # rc.yml's deploy_role_arn, which also makes that role a
+                # VERSIONED fact instead of a hand-made bootstrap artifact
+                # that exists nowhere in git.
+                deploy_principal_arn=principal_arn or ecs_cfg.get("deploy_role_arn"),
             )
         except Exception as exc:  # noqa: BLE001 — the checker is not the job
             self._warn(

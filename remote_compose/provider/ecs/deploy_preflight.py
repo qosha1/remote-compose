@@ -66,6 +66,11 @@ class PreflightReport:
     missing_actions: list[str] = field(default_factory=list)
     # Resource types rc emits but has no action mapping for.
     unmodeled_resource_types: list[str] = field(default_factory=list)
+    # Which principal the IAM simulation actually ran against, and whether it
+    # is the configured deploy principal rather than whoever happens to be
+    # logged in (rc-zu1x).
+    checked_principal: str = ""
+    checked_deploy_principal: bool = False
 
     def add(self, check: PreflightCheck) -> None:
         self.checks.append(check)
@@ -239,6 +244,23 @@ RESOURCE_TYPE_ACTIONS: dict[str, list[str]] = {
         "ec2:DescribeSecurityGroups",
         "ec2:RevokeSecurityGroupEgress",
         "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateTags",
+    ],
+    # Emitted by network_declared.tf.j2 as
+    # `aws_vpc_security_group_{{ rule.direction }}_rule` -- the type NAME is
+    # Jinja-interpolated, which is why a scan of the .j2 templates never saw
+    # these two (rc-zu1x). Same actions as the inline ingress/egress blocks on
+    # aws_security_group.
+    "aws_vpc_security_group_ingress_rule": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateTags",
+    ],
+    "aws_vpc_security_group_egress_rule": [
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:RevokeSecurityGroupEgress",
         "ec2:CreateTags",
     ],
     "aws_vpc_endpoint": [
@@ -485,7 +507,9 @@ def scan_terraform_dir(tf_dir: Path) -> tuple[set[str], set[str]]:
 
 
 def derive_required_actions(
-    resource_types: Iterable[str], data_source_types: Iterable[str] = ()
+    resource_types: Iterable[str],
+    data_source_types: Iterable[str] = (),
+    backend_cfg: Optional[dict] = None,
 ) -> tuple[list[str], list[str]]:
     """Map declared types to the IAM actions terraform will call.
 
@@ -503,6 +527,12 @@ def derive_required_actions(
         actions.update(mapped)
     for dtype in data_source_types:
         actions.update(DATA_SOURCE_ACTIONS.get(dtype, []))
+    # The s3 backend's own state + lock access. Not derivable from any
+    # resource type -- the state bucket is not something the module creates.
+    if (backend_cfg or {}).get("type") == "s3":
+        actions.update(BACKEND_STATE_ACTIONS)
+        if backend_cfg.get("dynamodb_table"):
+            actions.update(BACKEND_LOCK_ACTIONS)
     return sorted(actions), sorted(unmodeled)
 
 
@@ -550,33 +580,212 @@ def canonical_principal_arn(caller_arn: str) -> Optional[str]:
     return None
 
 
-def simulate_actions(
-    iam_client: Any, principal_arn: str, actions: list[str]
-) -> tuple[list[str], Optional[str]]:
-    """Return ``(denied_actions, error)`` for ``principal_arn``.
+# ---------------------------------------------------------------------------
+# Resource-scoped simulation (rc-zu1x)
+# ---------------------------------------------------------------------------
+#
+# SimulatePrincipalPolicy applies ``ResourceArns`` to EVERY action in the
+# call. Verified live against a real least-privileged deploy role
+# (2026-08-19):
+#
+#   --action-names iam:CreateInstanceProfile ecs:RegisterTaskDefinition \
+#     --resource-arns arn:...:instance-profile/debuggai-api-ec2-instance
+#   -> iam:CreateInstanceProfile   allowed
+#      ecs:RegisterTaskDefinition  implicitDeny   <- evaluated against an
+#                                                    instance-profile ARN
+#
+# So actions cannot be batched freely once a resource is supplied. Equally,
+# simulating a resource-scoped statement against the default "*" reports a
+# denial that is not real: the same role returned implicitDeny for
+# iam:CreateRole, iam:CreateInstanceProfile, iam:AddRoleToInstanceProfile,
+# iam:DeleteInstanceProfile, s3:PutObject and dynamodb:PutItem against "*"
+# and allowed for every one of them against the concrete ARNs it will
+# actually touch.
+#
+# That direction is the dangerous one: rc would tell a correctly
+# least-privileged stack it was missing IAM, and the natural fix an operator
+# reaches for is widening those statements to Resource: "*" -- the tool would
+# actively push people from scoped policies toward admin-shaped ones, which
+# is worse than the gap it replaces.
+#
+# Hence: group actions by the resource class they act on, simulate each group
+# against the concrete ARNs rc's own templates produce, and simulate the
+# remainder against "*" while MARKING those results as possibly-false.
 
-    ``error`` non-None means the simulation could not be performed at all --
-    typically because the caller lacks ``iam:SimulatePrincipalPolicy``
-    itself. The caller must then report "could not check", never "all clear".
+# What terraform's own s3 backend calls, independent of any resource the
+# module declares. These never appear in RESOURCE_TYPE_ACTIONS because the
+# state bucket and lock table are not resources rc creates -- which is why
+# the first version of this check omitted them entirely even though every
+# stateful deploy needs them (they were among the denials found by hand).
+BACKEND_STATE_ACTIONS = [
+    "s3:DeleteObject",
+    "s3:GetObject",
+    "s3:ListBucket",
+    "s3:PutObject",
+]
+BACKEND_LOCK_ACTIONS = [
+    "dynamodb:DeleteItem",
+    "dynamodb:DescribeTable",
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+]
 
-    SimulatePrincipalPolicy caps ActionNames at 1000 per call; rc's action
-    set is nowhere near that, but the batching keeps the contract explicit
-    and the API happy on very large modules.
+# Action -> resource class, by explicit membership rather than by service
+# prefix. Prefix matching would be wrong in both directions here: s3 actions
+# for the BACKUP bucket (aws_s3_bucket in the module) must not be evaluated
+# against the STATE bucket's ARN, and iam:CreateServiceLinkedRole acts on a
+# service-linked role rc does not name.
+_INSTANCE_PROFILE_MARKER = "InstanceProfile"
+_UNSCOPED_IAM_ACTIONS = {"iam:CreateServiceLinkedRole"}
+
+
+def classify_action(action: str) -> str:
+    """Which resource class an action's ARN should come from.
+
+    Returns "wildcard" for anything rc cannot pin to a concrete ARN. Only
+    classes rc constructs from its OWN template output (project-named roles
+    and instance profiles) or from the backend config (state object, lock
+    table) are ever scoped.
     """
-    denied: list[str] = []
+    if action in _UNSCOPED_IAM_ACTIONS:
+        return "wildcard"
+    if _INSTANCE_PROFILE_MARKER in action:
+        return "iam_instance_profile"
+    if action.startswith("iam:"):
+        return "iam_role"
+    if action in BACKEND_STATE_ACTIONS:
+        # s3:ListBucket is needed on the state bucket AND (for the backup
+        # bucket) elsewhere. Scoping it to state is the safe direction: a
+        # denial here is a real finding, and the backup-bucket need simply
+        # goes unchecked rather than being falsely reported.
+        return "s3_state"
+    if action in BACKEND_LOCK_ACTIONS:
+        return "dynamodb_lock"
+    return "wildcard"
+
+
+@dataclass
+class SimulationGroup:
+    """One SimulatePrincipalPolicy call: actions + the ARNs to evaluate them on."""
+
+    label: str
+    actions: list[str]
+    resource_arns: list[str] = field(default_factory=list)
+
+    @property
+    def scoped(self) -> bool:
+        return bool(self.resource_arns)
+
+
+def project_resource_arns(
+    *,
+    account_id: str,
+    region: Optional[str],
+    project: str,
+    backend_cfg: dict,
+) -> dict[str, list[str]]:
+    """Concrete ARNs rc's own templates will create, per resource class.
+
+    rc renders these names itself, so they are facts rather than guesses:
+    iam.tf.j2 emits ``${var.project}-task`` / ``-task-exec`` and capacity.tf.j2
+    emits ``${var.project}-ec2-instance`` for both the role and the instance
+    profile. The state bucket/key and lock table come from the backend config.
+
+    A class with no constructible ARN is simply absent, and its actions fall
+    back to the wildcard group (reported with a caveat).
+    """
+    arns: dict[str, list[str]] = {}
+    if account_id:
+        arns["iam_role"] = [
+            f"arn:aws:iam::{account_id}:role/{project}-task",
+            f"arn:aws:iam::{account_id}:role/{project}-task-exec",
+            f"arn:aws:iam::{account_id}:role/{project}-ec2-instance",
+        ]
+        arns["iam_instance_profile"] = [
+            f"arn:aws:iam::{account_id}:instance-profile/{project}-ec2-instance"
+        ]
+    bucket = (backend_cfg or {}).get("bucket")
+    key = (backend_cfg or {}).get("key")
+    if bucket:
+        # Both the bucket (ListBucket) and the object (Get/Put/DeleteObject);
+        # terraform's backend needs each on its own ARN, and supplying both
+        # lets one call cover the group.
+        state = [f"arn:aws:s3:::{bucket}"]
+        if key:
+            state.append(f"arn:aws:s3:::{bucket}/{key}")
+        arns["s3_state"] = state
+    table = (backend_cfg or {}).get("dynamodb_table")
+    if table and account_id and region:
+        arns["dynamodb_lock"] = [
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{table}"
+        ]
+    return arns
+
+
+def build_simulation_groups(
+    actions: Iterable[str], resource_arns: dict[str, list[str]]
+) -> list[SimulationGroup]:
+    """Split actions into per-resource-class calls plus a wildcard remainder.
+
+    Each group is one SimulatePrincipalPolicy invocation. Actions whose class
+    has no constructible ARN join the wildcard group rather than being
+    dropped -- an unchecked action is worse than one checked imprecisely, as
+    long as the imprecision is reported.
+    """
+    by_class: dict[str, list[str]] = {}
+    for action in sorted(set(actions)):
+        klass = classify_action(action)
+        if klass != "wildcard" and klass not in resource_arns:
+            klass = "wildcard"
+        by_class.setdefault(klass, []).append(action)
+
+    groups: list[SimulationGroup] = []
+    for klass in sorted(k for k in by_class if k != "wildcard"):
+        groups.append(
+            SimulationGroup(
+                label=klass, actions=by_class[klass], resource_arns=resource_arns[klass]
+            )
+        )
+    if by_class.get("wildcard"):
+        groups.append(SimulationGroup(label="wildcard", actions=by_class["wildcard"]))
+    return groups
+
+
+def simulate_groups(
+    iam_client: Any, principal_arn: str, groups: list[SimulationGroup]
+) -> tuple[list[tuple[str, bool]], Optional[str]]:
+    """Simulate each group against its own resources.
+
+    Returns ``(denials, error)`` where each denial is
+    ``(action, scoped)`` -- ``scoped`` False means it was evaluated against
+    "*" and may therefore be a FALSE denial for a resource-scoped policy.
+    ``error`` non-None means the simulation could not be performed at all.
+
+    One call per group, because ResourceArns applies to every action in a
+    call (verified live -- see the module comment above). Batched within a
+    group only, where every action shares the same resources.
+    """
+    denials: list[tuple[str, bool]] = []
     batch_size = 100
     try:
-        for start in range(0, len(actions), batch_size):
-            batch = actions[start : start + batch_size]
-            response = iam_client.simulate_principal_policy(
-                PolicySourceArn=principal_arn, ActionNames=batch
-            )
-            for result in response.get("EvaluationResults") or []:
-                if result.get("EvalDecision") != "allowed":
-                    denied.append(result.get("EvalActionName", "?"))
+        for group in groups:
+            for start in range(0, len(group.actions), batch_size):
+                batch = group.actions[start : start + batch_size]
+                kwargs: dict[str, Any] = {
+                    "PolicySourceArn": principal_arn,
+                    "ActionNames": batch,
+                }
+                if group.resource_arns:
+                    kwargs["ResourceArns"] = group.resource_arns
+                response = iam_client.simulate_principal_policy(**kwargs)
+                for result in response.get("EvaluationResults") or []:
+                    if result.get("EvalDecision") != "allowed":
+                        denials.append(
+                            (result.get("EvalActionName", "?"), group.scoped)
+                        )
     except Exception as exc:  # noqa: BLE001 — advisory check, never fatal
         return [], f"{type(exc).__name__}: {exc}"
-    return sorted(set(denied)), None
+    return sorted(set(denials)), None
 
 
 # ---------------------------------------------------------------------------
@@ -875,6 +1084,12 @@ def _lock_permission_failure(table: str, exc: Exception) -> PreflightCheck:
     )
 
 
+def _account_from_arn(arn: str) -> str:
+    """Account id out of any ARN, for building sibling resource ARNs."""
+    parts = (arn or "").split(":")
+    return parts[4] if len(parts) > 4 else ""
+
+
 def _error_code(exc: Exception) -> str:
     """Best-effort AWS error code out of a botocore ClientError."""
     response = getattr(exc, "response", None)
@@ -885,39 +1100,57 @@ def _error_code(exc: Exception) -> str:
 
 
 def check_iam_actions(
-    session: Any, caller_arn: str, actions: list[str], region: Optional[str] = None
+    session: Any,
+    caller_arn: str,
+    actions: list[str],
+    region: Optional[str] = None,
+    *,
+    principal_arn: Optional[str] = None,
+    is_deploy_principal: bool = False,
+    resource_arns: Optional[dict[str, list[str]]] = None,
 ) -> tuple[PreflightCheck, list[str]]:
     """Simulate every action terraform will call, and report ALL that fail.
 
-    This is the check that matters most: after fixing the state-bucket 403 by
-    hand, a diff against a working stack turned up 36 more missing actions,
-    every one of which would have been another failed deploy discovered
-    serially.
+    ``principal_arn`` overrides the caller as the simulated principal
+    (rc-zu1x): the identity that matters is the CI role the deploy will
+    actually run as, which is precisely the identity a laptop run is NOT.
+    ``is_deploy_principal`` records whether that is the configured deploy
+    role, so the report can say plainly which principal it checked.
 
     Advisory by construction. ``iam:SimulatePrincipalPolicy`` is itself a
     permission, and it does not fully evaluate SCPs or permission boundaries
     — a clean result is evidence, not proof, and an unavailable simulation is
     reported as "could not check" rather than as a pass.
     """
-    principal = canonical_principal_arn(caller_arn)
+    target = principal_arn or caller_arn
+    principal = canonical_principal_arn(target) or (
+        target if target.startswith("arn:aws:iam:") else None
+    )
     if principal is None:
         return (
             PreflightCheck(
                 name="deploy principal IAM",
                 status=SKIP,
-                detail=f"cannot derive an IAM entity ARN from {caller_arn!r}",
+                detail=f"cannot derive an IAM entity ARN from {target!r}",
                 remedy="Only role and user principals can be simulated.",
             ),
             [],
         )
+
+    provenance = (
+        f"checked {principal} (the configured deploy principal)"
+        if is_deploy_principal
+        else f"checked {principal} — NOT a configured deploy role"
+    )
     iam = session.client("iam", region_name=region)
-    denied, error = simulate_actions(iam, principal, actions)
+    groups = build_simulation_groups(actions, resource_arns or {})
+    denials, error = simulate_groups(iam, principal, groups)
     if error:
         return (
             PreflightCheck(
                 name="deploy principal IAM",
                 status=WARN,
-                detail=f"could not simulate ({error})",
+                detail=f"could not simulate ({error}) — {provenance}",
                 remedy=(
                     "Grant iam:SimulatePrincipalPolicy to check permissions "
                     "up front. Without it rc cannot tell you what is missing "
@@ -927,28 +1160,61 @@ def check_iam_actions(
             ),
             [],
         )
-    if not denied:
+
+    scoped_count = sum(1 for g in groups if g.scoped)
+    if not denials:
+        detail = f"{len(actions)} action(s) allowed — {provenance}"
+        remedy = ""
+        if not is_deploy_principal:
+            remedy = (
+                "This says nothing about whether CI can deploy. Point rc at "
+                "the principal that will really run it: set "
+                "provider_config.ecs.deploy_role_arn in rc.yml, or pass "
+                "`rc preflight --principal <arn>`."
+            )
         return (
             PreflightCheck(
                 name="deploy principal IAM",
-                status=OK,
-                detail=f"{len(actions)} action(s) allowed for {principal}",
-                remedy="",
+                status=OK if is_deploy_principal else WARN,
+                detail=detail,
+                remedy=remedy,
             ),
             [],
         )
+
+    denied = [a for a, _ in denials]
     grouped = group_by_service(denied)
     summary = ", ".join(
         f"{service} ({len(items)})" for service, items in sorted(grouped.items())
     )
-    lines = [
-        f"{service}: {', '.join(items)}" for service, items in sorted(grouped.items())
-    ]
+    lines = [f"{provenance}."]
+    if scoped_count:
+        lines.append(
+            f"{scoped_count} action group(s) were evaluated against the "
+            f'concrete ARNs rc will create; the rest against "*".'
+        )
+    for service, items in sorted(grouped.items()):
+        lines.append(f"{service}: {', '.join(items)}")
+    unscoped_denials = sorted({a for a, scoped in denials if not scoped})
+    if unscoped_denials:
+        lines.append(
+            'NOTE — the following were checked against "*" because rc '
+            "could not construct a concrete ARN for them, so a "
+            "resource-scoped policy that genuinely permits them will still "
+            "show here. Verify with `aws iam simulate-principal-policy "
+            "--resource-arns <the real arn>` before widening any statement: "
+            + ", ".join(unscoped_denials[:12])
+            + (
+                f", +{len(unscoped_denials) - 12} more"
+                if len(unscoped_denials) > 12
+                else ""
+            )
+        )
     return (
         PreflightCheck(
             name="deploy principal IAM",
             status=FAIL,
-            detail=f"{len(denied)} action(s) denied for {principal} — {summary}",
+            detail=f"{len(denied)} action(s) denied — {summary}",
             remedy="\n".join(lines),
         ),
         denied,
@@ -961,6 +1227,9 @@ def run_preflight(
     session: Any,
     region: Optional[str] = None,
     required_terraform: tuple[int, ...] = (1, 5),
+    *,
+    project: str = "",
+    deploy_principal_arn: Optional[str] = None,
 ) -> PreflightReport:
     """Run every check and return the COMPLETE set of findings.
 
@@ -974,14 +1243,15 @@ def run_preflight(
     report.add(tf_check)
 
     caller_arn = ""
+    account_id = ""
     try:
         identity = session.client("sts", region_name=region).get_caller_identity()
         caller_arn = str(identity.get("Arn") or "")
-        report.add(
-            PreflightCheck(
-                name="aws identity", status=OK, detail=caller_arn or "(no arn)"
-            )
-        )
+        account_id = str(identity.get("Account") or "")
+        detail = caller_arn or "(no arn)"
+        if deploy_principal_arn:
+            detail += f"; simulating against {deploy_principal_arn}"
+        report.add(PreflightCheck(name="aws identity", status=OK, detail=detail))
     except Exception as exc:  # noqa: BLE001
         report.add(
             PreflightCheck(
@@ -999,7 +1269,7 @@ def run_preflight(
     report.add(check_state_lock(session, backend_cfg))
 
     resources, data_sources = scan_terraform_dir(tf_dir)
-    actions, unmodeled = derive_required_actions(resources, data_sources)
+    actions, unmodeled = derive_required_actions(resources, data_sources, backend_cfg)
     report.unmodeled_resource_types = unmodeled
     if unmodeled:
         report.add(
@@ -1011,10 +1281,28 @@ def run_preflight(
                 remedy=", ".join(unmodeled),
             )
         )
-    if caller_arn:
-        iam_check, denied = check_iam_actions(session, caller_arn, actions, region)
+    if caller_arn or deploy_principal_arn:
+        iam_check, denied = check_iam_actions(
+            session,
+            caller_arn,
+            actions,
+            region,
+            principal_arn=deploy_principal_arn,
+            is_deploy_principal=bool(deploy_principal_arn),
+            resource_arns=project_resource_arns(
+                account_id=account_id
+                or _account_from_arn(deploy_principal_arn or caller_arn),
+                region=region,
+                project=project,
+                backend_cfg=backend_cfg,
+            ),
+        )
         report.add(iam_check)
         report.missing_actions = denied
+        report.checked_principal = (
+            canonical_principal_arn(deploy_principal_arn or caller_arn) or ""
+        )
+        report.checked_deploy_principal = bool(deploy_principal_arn)
     else:
         report.add(
             PreflightCheck(

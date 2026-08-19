@@ -16,13 +16,23 @@ import click
 
 @click.command(name="preflight")
 @click.option(
+    "--principal",
+    "principal",
+    default=None,
+    help=(
+        "Simulate IAM against this principal ARN (the role CI assumes) "
+        "instead of the current caller. Defaults to "
+        "provider_config.ecs.deploy_role_arn."
+    ),
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     help="Emit the report as JSON instead of a table.",
 )
 @click.pass_context
-def preflight_cmd(ctx, as_json):
+def preflight_cmd(ctx, principal, as_json):
     """Check every deploy prerequisite before touching anything."""
     from ..cli_v2 import build_deploy_context, load_rc_yml, resolve_provider
     from ..config._schema_types import ConfigError
@@ -67,7 +77,9 @@ def preflight_cmd(ctx, as_json):
     from ..provider.base import ProviderConfigError
 
     try:
-        report = provider.deploy_preflight(deploy_ctx, out_dir, force=True)
+        report = provider.deploy_preflight(
+            deploy_ctx, out_dir, force=True, principal_arn=principal
+        )
     except ProviderConfigError as exc:
         # deploy_preflight raises on the deploy path so a broken principal
         # stops the deploy. Here the report IS the output, so render it and
@@ -95,6 +107,8 @@ def preflight_cmd(ctx, as_json):
                         }
                         for c in report.checks
                     ],
+                    "checked_principal": report.checked_principal,
+                    "checked_deploy_principal": report.checked_deploy_principal,
                     "missing_actions": report.missing_actions,
                     "unmodeled_resource_types": report.unmodeled_resource_types,
                 },
@@ -105,4 +119,14 @@ def preflight_cmd(ctx, as_json):
 
     click.echo(f"\n  Preflight for {v2.project}:\n")
     click.echo(report.render_table())
-    click.echo("\n  All prerequisites satisfied.")
+    if report.checked_deploy_principal:
+        click.echo("\n  All prerequisites satisfied.")
+    else:
+        click.echo(
+            "\n  All checks passed for the CURRENT caller "
+            f"({report.checked_principal or 'unknown'}) — which is probably "
+            "not the principal that deploys.\n  Set "
+            "provider_config.ecs.deploy_role_arn in rc.yml, or pass "
+            "`rc preflight --principal <role-arn>`, to check the role CI "
+            "actually assumes."
+        )
