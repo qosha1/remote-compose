@@ -451,6 +451,34 @@ def _looks_like_singleton_scheduler(name: str, command: list[str]) -> bool:
     return bool(_SINGLETON_COMMAND_RE.search(cmd_str))
 
 
+def _is_stateful_service(
+    name: str, spec: Any, *, mount_count: "int | None" = None
+) -> bool:
+    """Whether this service must roll one-at-a-time (stop-then-start).
+
+    rc-usk0: ONE predicate, shared by the terraform emit path and the
+    ``--no-state`` force-roll. They used to compute this separately — the roll
+    path checked ``spec.volumes`` alone and never consulted
+    ``_looks_like_singleton_scheduler`` — so a celery-beat with no EFS mount was
+    stateful in terraform and stateless in the roll. Since the roll runs on every
+    deploy, it silently won: it reset the service to min=100/max=200 AND ran two
+    schedulers during the overlap, which is the exact failure rc-e5u.46.10 added
+    the singleton heuristic to prevent.
+
+    ``mount_count`` lets the terraform path pass its already-computed volume
+    count; omit it and the spec's own ``volumes`` are used.
+    """
+    if mount_count is None:
+        mount_count = len(getattr(spec, "volumes", None) or []) if spec else 0
+    if mount_count > 0:
+        return True
+    if spec is None:
+        return False
+    if getattr(spec, "stateful", False):
+        return True
+    return _looks_like_singleton_scheduler(name, getattr(spec, "command", None))
+
+
 def _default_session_factory(ctx: DeployContext) -> Any:
     """Return a boto3 Session configured from ctx.provider_config.ecs.
 
@@ -1556,10 +1584,7 @@ class ECSProvider(Provider):
             # or service name ends in -beat / -scheduler. False-positive
             # cost: a stateless service goes through stop-then-start
             # rolling deploy (slower) instead of overlap. Acceptable.
-            singleton = _looks_like_singleton_scheduler(name, spec.command)
-            stateful = (
-                len(svc_mounts) > 0 or singleton or getattr(spec, "stateful", False)
-            )
+            stateful = _is_stateful_service(name, spec, mount_count=len(svc_mounts))
             # rc-kr7: a single-writer EFS volume (postgres data, sqlite) is one
             # access point; replicas>1 runs concurrent tasks against the same
             # dir and corrupts it. min_healthy=0 only protects the ROLL window —
@@ -3813,14 +3838,21 @@ class ECSProvider(Provider):
         rolled_names: list[str] = []
         for svc in ordered:
             spec = ctx.services.get(svc)
-            # Stateful (EFS-mounting) services roll one-at-a-time (min=0/
-            # max=100); everything else gets zero-downtime config: keep 100%
-            # of old tasks until new ones are healthy, up to 200% during the
-            # roll, + circuit breaker to auto-roll-back a bad deploy. This
-            # mirrors the terraform template for stacks that deploy --no-state
-            # (terraform bypassed), so the live service still gets the right
-            # rollout behavior.
-            stateful = bool(getattr(spec, "volumes", None)) if spec else False
+            # Stateful services roll one-at-a-time (min=0/max=100); everything
+            # else gets zero-downtime config: keep 100% of old tasks until new
+            # ones are healthy, up to 200% during the roll, + circuit breaker to
+            # auto-roll-back a bad deploy. This mirrors the terraform template
+            # for stacks that deploy --no-state (terraform bypassed), so the live
+            # service still gets the right rollout behavior.
+            #
+            # rc-usk0: it only ACTUALLY mirrors it because both sides now call
+            # _is_stateful_service. This line used to be
+            #     bool(getattr(spec, "volumes", None))
+            # which is volumes-only and misses singleton schedulers, so a
+            # celery-beat was rolled with an overlap window on every deploy —
+            # two beat schedulers double-firing every periodic task — and each
+            # deploy silently reverted any hand-applied correction.
+            stateful = _is_stateful_service(svc, spec)
             dep_cfg = (
                 None
                 if stateful
