@@ -208,6 +208,12 @@ class DeployContext:
     # every apply with "failed to get shared config profile, default".
     omit_aws_profile: bool = False
 
+    # rc-hguq: the account's ECS ``awsvpcTrunking`` setting, as resolved by
+    # the provider's preflight (ListAccountSettings) or asserted by
+    # ec2_capacity.eni_trunking. True/False are findings; None means rc has
+    # NOT checked, and must never be reported as "trunking is not enabled".
+    eni_trunking: "Optional[bool]" = None
+
 
 @dataclass
 class ServiceStatus:

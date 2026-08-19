@@ -639,6 +639,7 @@ provider_config:
       desired: 1                 # default 1 when instance_type is set, else auto-sized
       max: 3                     # default 3 when instance_type is set, else auto-sized
       subnet_group: asg-private  # optional — a declared network.subnets group; see below
+      eni_trunking: auto         # auto (default) | true | false — see below
       size_for_rolling_deploy: false  # default false — see below
       root_volume_size: 120      # GiB; omit to inherit the AMI's 30 GiB — see below
       root_volume_type: gp3      # gp3 (default) | gp2 | io1 | io2 | standard
@@ -670,6 +671,33 @@ provider_config:
   `egress: nat`; declared groups already provision the real
   `aws_nat_gateway` + route table. Omit it and nothing changes (see
   below).
+- **`eni_trunking`** — `auto` (default), `true`, or `false`. With `awsvpc`
+  networking every task consumes a whole ENI, and **ENI counts are flat
+  across much of an instance family**: an `m5.2xlarge` is twice the box of an
+  `m5.xlarge` and hosts the same 3 tasks. A fleet sized against that ceiling
+  exists to satisfy a networking artifact rather than a workload — 11
+  right-sized tasks needing 4.5 vCPU end up on 4 instances / 28 vCPU. ECS's
+  `awsvpcTrunking` account setting lifts the cap (m5.xlarge: 3 → 20 tasks),
+  and on `auto` rc reads it via `ecs:ListAccountSettings` during preflight
+  and sizes accordingly.
+
+  **`awsvpcTrunking` is PER-REGION.** `put-account-setting-default` applies
+  only to the region it is called in, so enabling it in the region you tested
+  from does nothing for a stack deployed elsewhere. rc names the region in
+  every message about it for exactly this reason. Check with:
+
+  ```
+  aws ecs list-account-settings --name awsvpcTrunking --effective-settings --region <region>
+  ```
+
+  Set `true` to assert it without the API call — rc validates the instance
+  family is eligible and **errors if not**, since sizing against a ceiling
+  that doesn't exist leaves tasks `PENDING` forever. Eligibility is AWS's
+  published list: the entire `t3`/`t3a`/`t4g` burstable family is *not*
+  trunking-eligible at any size (so this knob is a no-op for rc's default
+  auto-sizing ladder), and `m5.metal`/`c5.metal` are excluded even though
+  their families are — don't infer a metal tier's limit from its siblings.
+  Trunking only affects EC2 container instances; Fargate is unaffected.
 - **`size_for_rolling_deploy`** — whether auto-sizing covers a rolling
   deploy or only steady state. Default `false`: rc sizes the ASG for the
   tasks you declared, exactly as it always has. But ECS permits up to 200%

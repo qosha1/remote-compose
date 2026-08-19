@@ -16,6 +16,7 @@ Feature work deferred to dedicated follow-ups:
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import time
@@ -40,8 +41,10 @@ from ..base import (
 )
 from .autosize import (
     DEPLOYMENT_MAX_PERCENT_DEFAULT,
+    TRUNKING_DISABLED,
+    TRUNKING_ENABLED,
+    TRUNKING_UNKNOWN,
     EC2TaskDemand,
-    ENI_RESERVED_FOR_PRIMARY,
     KNOWN_INSTANCE_SHAPES,
     auto_size,
     check_fixed_shape_capacity,
@@ -338,6 +341,19 @@ def _resolve_root_volume_options(user_cfg: dict) -> dict:
         "root_volume_device": ECS_AMI_ROOT_DEVICE_NAME,
         "root_volume_encrypted": bool(user_cfg.get("root_volume_encrypted", True)),
     }
+
+
+def _trunking_state(eni_trunking: Optional[bool]) -> str:
+    """Map the resolved account setting onto autosize's three-state vocabulary.
+
+    None is UNKNOWN, never DISABLED (rc-hguq ask 3): rc must not report an
+    assumption as a verified finding.
+    """
+    if eni_trunking is True:
+        return TRUNKING_ENABLED
+    if eni_trunking is False:
+        return TRUNKING_DISABLED
+    return TRUNKING_UNKNOWN
 
 
 def _resolve_imds_options(user_cfg: dict) -> dict:
@@ -1930,7 +1946,9 @@ class ECSProvider(Provider):
         ) or "/"
 
         ec2_capacity_cfg = (
-            self._resolve_ec2_capacity(ecs_cfg, ec2_demands)
+            self._resolve_ec2_capacity(
+                ecs_cfg, ec2_demands, eni_trunking=getattr(ctx, "eni_trunking", None)
+            )
             if has_ec2_service
             else None
         )
@@ -2161,6 +2179,65 @@ class ECSProvider(Provider):
                 f"environment."
             )
 
+    def _preflight_eni_trunking(self, ctx: DeployContext, ecs_cfg: dict) -> None:
+        """Resolve whether awsvpcTrunking is on before anything sizes a fleet.
+
+        rc-hguq. Without trunking an awsvpc task costs one whole ENI, and ENI
+        counts are FLAT across the useful part of the m5 range -- m5.2xlarge
+        is twice the box of an m5.xlarge with the same 3 task slots. A fleet
+        sized against that ceiling exists to satisfy a networking artifact
+        rather than a workload: 11 right-sized tasks needing 4.5 vCPU end up
+        on 28 vCPU of instances.
+
+        ``ec2_capacity.eni_trunking`` is the explicit override (true/false).
+        Left unset ("auto"), rc asks ECS -- ``ListAccountSettings`` with
+        effectiveSettings, which is what actually governs the behaviour.
+
+        A failed lookup leaves ``ctx.eni_trunking`` as None, which every
+        message downstream renders as "rc has not checked", never as
+        "trunking is not enabled". That distinction IS the bug this fixes.
+        """
+        declared = (ecs_cfg.get("ec2_capacity") or {}).get("eni_trunking", "auto")
+        if isinstance(declared, bool):
+            ctx.eni_trunking = declared
+            return
+        if str(declared).lower() not in ("auto", "none", ""):
+            raise ProviderConfigError(
+                f"ec2_capacity.eni_trunking must be true, false, or 'auto', "
+                f"got {declared!r}"
+            )
+        # Nothing to resolve for an all-Fargate stack -- and no reason to
+        # spend an AWS call on one.
+        default_launch_type = ecs_cfg.get("default_launch_type", "FARGATE")
+        if not any(
+            (spec.launch_type or default_launch_type) == "EC2"
+            for spec in (ctx.services or {}).values()
+        ):
+            return
+        try:
+            client = self.session_factory(ctx).client(
+                "ecs", region_name=ecs_cfg.get("region")
+            )
+            settings = client.list_account_settings(
+                name="awsvpcTrunking", effectiveSettings=True
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed probe is not a finding
+            self._warn(
+                f"could not read the account's awsvpcTrunking setting "
+                f"({type(exc).__name__}: {exc}). rc is sizing EC2 capacity as "
+                f"though ENI trunking were off, which may over-provision "
+                f"badly. Grant ecs:ListAccountSettings, or set "
+                f"provider_config.ecs.ec2_capacity.eni_trunking explicitly."
+            )
+            return
+        for setting in settings.get("settings") or []:
+            if setting.get("name") == "awsvpcTrunking":
+                ctx.eni_trunking = str(setting.get("value", "")).lower() == "enabled"
+                return
+        # ECS returned no row for it: the setting has never been set, which
+        # means disabled. That IS a finding, unlike a failed call.
+        ctx.eni_trunking = False
+
     def preflight(self, ctx: DeployContext) -> None:
         """AWS pre-flight run at the head of plan() and deploy().
 
@@ -2181,6 +2258,7 @@ class ECSProvider(Provider):
         """
         ecs_cfg = _ecs_cfg(ctx)
         self._preflight_aws_profile(ctx, ecs_cfg)
+        self._preflight_eni_trunking(ctx, ecs_cfg)
         if not ecs_cfg.get("vpc_id"):
             return
         session = self.session_factory(ctx)
@@ -3080,6 +3158,57 @@ class ECSProvider(Provider):
             "RC_SKIP_PREFLIGHT=1 to proceed anyway."
         )
         raise ProviderConfigError(message)
+
+    def _warn_on_eni_bound_fleet(
+        self, pressure: Any, eni_trunking: Optional[bool], region: Optional[str] = None
+    ) -> None:
+        """Say WHY the fleet is this size when the answer is "a networking cap".
+
+        rc-hguq ask 4. "You need 4 instances" and "you need 4 instances
+        because awsvpc costs one ENI per task and this shape only has 4" are
+        very different messages, and only the second is actionable -- the
+        more so because ENI counts are FLAT across the useful part of the m5
+        range, so the operator's instinct (buy a bigger box) does nothing
+        until m5.4xlarge.
+        """
+        if pressure.binding_dimension != "eni":
+            return
+        shape = pressure.shape
+        head = (
+            f"EC2 fleet size is set by NETWORKING, not by CPU or memory: "
+            f"{pressure.steady_task_count} awsvpc task(s) need "
+            f"{pressure.steady_instances} {shape.name} instance(s) because "
+            f"each task consumes one ENI and this shape has "
+            f"{shape.task_eni_slots} task slot(s). CPU and memory would fit "
+            f"on fewer."
+        )
+        if not pressure.eni_bound_but_trunkable:
+            self._warn(
+                head + " Note ENI counts are flat across much of an instance "
+                "family, so a bigger shape in the same family may buy no extra "
+                "task slots at all — check the slot count, not the vCPU count."
+            )
+            return
+        state = _trunking_state(eni_trunking)
+        where = f"in {region}" if region else "in this region"
+        fix = (
+            f"the awsvpcTrunking account setting is DISABLED {where}"
+            if state == TRUNKING_DISABLED
+            else f"rc has not checked whether awsvpcTrunking is enabled {where}"
+        )
+        region_flag = f" --region {region}" if region else ""
+        self._warn(
+            head + f" {shape.name} supports ENI trunking, which would raise it to "
+            f"{shape.trunked_task_limit} task slot(s) per instance, but "
+            f"{fix}. The setting is PER-REGION -- enabling it in another "
+            f"region does not apply here. Enable it with `aws ecs "
+            f"put-account-setting-default --name awsvpcTrunking --value "
+            f"enabled{region_flag}` (it affects EC2 container instances "
+            f"only), or set "
+            f"provider_config.ecs.ec2_capacity.eni_trunking: true if it is "
+            f"already on. This is the difference between paying for instances "
+            f"your workload needs and paying for instances an ENI limit needs."
+        )
 
     def _task_defs_are_owned_out_of_band(self, ctx: DeployContext) -> bool:
         """True when rc.yml declares terraform is not the source of truth for
@@ -4906,12 +5035,22 @@ class ECSProvider(Provider):
         }
 
     def _resolve_ec2_capacity(
-        self, ecs_cfg: dict, ec2_demands: list[EC2TaskDemand]
+        self,
+        ecs_cfg: dict,
+        ec2_demands: list[EC2TaskDemand],
+        eni_trunking: Optional[bool] = None,
     ) -> dict:
         """Merge user-supplied ec2_capacity with auto-sized defaults.
 
         User-supplied instance_type, min/max/desired all take precedence.
         Auto-sizing fills in gaps.
+
+        ``eni_trunking`` is what preflight resolved about the account
+        (True/False/None-for-unchecked). It is applied to the SHAPE via
+        InstanceShape.with_trunking() rather than threaded as a flag through
+        the sizing functions, so auto_size/measure_fleet/
+        check_fixed_shape_capacity keep working on one consistent notion of
+        "task ENI slots" and no call site has to know trunking exists.
         """
         user_cfg = ecs_cfg.get("ec2_capacity") or {}
         capacity_type = user_cfg.get("capacity_type", "ON_DEMAND")
@@ -4970,11 +5109,19 @@ class ECSProvider(Provider):
             # modeled and skips this, same as a custom auto_size() ladder.
             known_shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
             if known_shape is not None:
+                effective = self._effective_shape(known_shape, eni_trunking)
                 try:
-                    check_fixed_shape_capacity(known_shape, ec2_demands, desired_size)
+                    check_fixed_shape_capacity(
+                        effective,
+                        ec2_demands,
+                        desired_size,
+                        trunking_state=_trunking_state(eni_trunking),
+                        region=ecs_cfg.get("region"),
+                    )
                 except ValueError as exc:
                     raise ProviderConfigError(str(exc)) from exc
 
+        self._check_trunking_assertion(user_cfg, instance_type, eni_trunking)
         resolved = {
             "instance_type": instance_type,
             "min_size": min_size,
@@ -4985,12 +5132,64 @@ class ECSProvider(Provider):
             **_resolve_imds_options(user_cfg),
             **_resolve_root_volume_options(user_cfg),
         }
-        self._warn_on_shared_root_volume(resolved, ec2_demands)
-        self._warn_on_ec2_fleet_pressure(resolved, ec2_demands)
+        self._warn_on_shared_root_volume(resolved, ec2_demands, eni_trunking)
+        self._warn_on_ec2_fleet_pressure(
+            resolved, ec2_demands, eni_trunking, ecs_cfg.get("region")
+        )
         return resolved
 
+    @staticmethod
+    def _effective_shape(shape, eni_trunking: Optional[bool]):
+        """The shape as it behaves under the resolved trunking state.
+
+        with_trunking() is a no-op for an ineligible type, so this is safe to
+        apply unconditionally -- which is why the default t3 ladder needs no
+        special-casing anywhere.
+        """
+        return shape.with_trunking() if eni_trunking else shape
+
+    def _check_trunking_assertion(
+        self, user_cfg: dict, instance_type: str, eni_trunking: Optional[bool]
+    ) -> None:
+        """Reject `eni_trunking: true` on a family AWS cannot trunk (ask 2).
+
+        Silently accepting it would size the fleet against a ceiling that
+        does not exist and leave tasks PENDING forever. Correctly rejects the
+        entire t3/t3a/t4g ladder, and m5.metal / c5.metal, which AWS names in
+        its not-supported list despite their families being eligible.
+        """
+        if user_cfg.get("eni_trunking") is not True:
+            return
+        shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
+        if shape is None:
+            self._warn(
+                f"ec2_capacity.eni_trunking: true was asserted for "
+                f"{instance_type!r}, which rc has no verified numbers for. rc "
+                f"is taking your word for it and skipping the ENI density "
+                f"check for this shape; confirm the type appears in AWS's "
+                f"eni-trunking-supported-instance-types tables."
+            )
+            return
+        if not shape.trunking_supported:
+            raise ProviderConfigError(
+                f"ec2_capacity.eni_trunking: true, but AWS does not support "
+                f"ENI trunking on {instance_type}. It is absent from the "
+                f"eni-trunking-supported-instance-types tables (the entire "
+                f"t3/t3a/t4g burstable family is, and m5.metal / c5.metal are "
+                f"named in the explicit not-supported list). Sizing against a "
+                f"ceiling that does not exist would leave tasks PENDING "
+                f"forever. Pick a trunking-eligible shape (m5/m6i/c5/c6i, "
+                f"non-metal) or drop the assertion."
+            )
+        if eni_trunking is not True:  # pragma: no cover - defensive
+            return
+
     def _warn_on_ec2_fleet_pressure(
-        self, resolved: dict, ec2_demands: list[EC2TaskDemand]
+        self,
+        resolved: dict,
+        ec2_demands: list[EC2TaskDemand],
+        eni_trunking: Optional[bool] = None,
+        region: Optional[str] = None,
     ) -> None:
         """Flag EC2 fleets that are correct at rest and wrong during a deploy.
 
@@ -5020,10 +5219,12 @@ class ECSProvider(Provider):
         """
         if not ec2_demands:
             return
-        shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
-        if shape is None:
+        base_shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
+        if base_shape is None:
             return
+        shape = self._effective_shape(base_shape, eni_trunking)
         pressure = measure_fleet(shape, ec2_demands)
+        self._warn_on_eni_bound_fleet(pressure, eni_trunking, region)
         instance_cpu = shape.vcpu * 1024
         desired = resolved["desired_size"]
         max_size = resolved["max_size"]
@@ -5075,7 +5276,10 @@ class ECSProvider(Provider):
             )
 
     def _warn_on_shared_root_volume(
-        self, resolved: dict, ec2_demands: list[EC2TaskDemand]
+        self,
+        resolved: dict,
+        ec2_demands: list[EC2TaskDemand],
+        eni_trunking: Optional[bool] = None,
     ) -> None:
         """Flag EC2 tasks sharing the AMI's default root volume (rc-hbjb).
 
@@ -5093,10 +5297,20 @@ class ECSProvider(Provider):
         if resolved.get("root_volume_size") is not None:
             return
         shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
-        if shape is None or shape.max_enis is None:
+        if shape is None:
             return
-        tasks_per_instance = shape.max_enis - ENI_RESERVED_FOR_PRIMARY
+        shape = self._effective_shape(shape, eni_trunking)
+        eni_ceiling = shape.task_eni_slots
+        if eni_ceiling is None:
+            return
         total_tasks = sum(t.replicas for t in ec2_demands)
+        # With trunking the ENI ceiling stops being the real density (m5.xlarge
+        # allows 20 tasks but CPU/memory bind long before that), so bound it by
+        # what the sized fleet can actually pack. Otherwise this would report
+        # "30 GiB shared 20 ways" for a fleet that will never place 20 tasks on
+        # one instance.
+        desired = max(1, int(resolved.get("desired_size") or 1))
+        tasks_per_instance = min(eni_ceiling, math.ceil(total_tasks / desired))
         neighbours = min(tasks_per_instance, total_tasks)
         if neighbours < 2:
             return

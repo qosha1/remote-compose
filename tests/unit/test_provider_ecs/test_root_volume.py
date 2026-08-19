@@ -159,7 +159,14 @@ class TestEphemeralStorageErrorNamesTheAlternative:
 
 class TestSharedRootVolumeWarning:
     def test_warns_when_tasks_share_the_default_disk(self, tmp_path):
-        """t3.xlarge holds 3 awsvpc tasks -> ~10 GiB of scratch each."""
+        """3 tasks over 2 instances packs 2 per box -> ~15 GiB of scratch each.
+
+        Density is bounded by what the SIZED fleet actually packs, not by the
+        shape's raw ENI ceiling: t3.xlarge could hold 3 awsvpc tasks, but with
+        desired=2 the honest figure is ceil(3/2)=2 neighbours. Quoting the
+        ceiling would overstate the squeeze — and badly so once ENI trunking
+        raises that ceiling to 20 (rc-hguq).
+        """
         provider = ECSProvider()
         ctx = _ctx(
             tmp_path,
@@ -172,7 +179,7 @@ class TestSharedRootVolumeWarning:
         provider.emit_terraform(ctx, tmp_path / "tf")
         [warning] = [w for w in provider._warnings if "root_volume_size" in w]
         assert str(ECS_AMI_DEFAULT_ROOT_VOLUME_GIB) in warning
-        assert "10 GiB" in warning
+        assert "15 GiB" in warning
         assert "takes its neighbours down" in warning
 
     def test_silent_once_root_volume_size_is_set(self, tmp_path):

@@ -16,7 +16,7 @@ capacity planning. Production users with tight cost targets should set
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 
@@ -41,6 +41,56 @@ class InstanceShape:
     # caller-supplied custom ``ladder=`` (see ``TestCustomLadder``) -- rc
     # only carries verified numbers for its own T3_LADDER.
     max_enis: "int | None" = None
+    # Tasks this instance type can host when the account's ``awsvpcTrunking``
+    # setting is ENABLED (rc-hguq). Trunking attaches one trunk ENI and gives
+    # each task a *branch* interface, so the ceiling stops being
+    # ``max_enis - 1`` and becomes a much larger published per-type number --
+    # m5.xlarge goes from 3 tasks to 20.
+    #
+    # Within rc's own tables (T3_LADDER / KNOWN_INSTANCE_SHAPES) None means
+    # VERIFIED INELIGIBLE, not unknown: every entry was checked against AWS's
+    # eni-trunking-supported-instance-types tables, where the whole T family
+    # is absent and m5.metal / c5.metal are named in the explicit
+    # not-supported list. A shape rc has no row for is never consulted at
+    # all, so the two states never collide in practice.
+    trunked_task_limit: "int | None" = None
+    # Set by ``with_trunking()`` to pin the usable task-ENI slot count
+    # directly. Exists so trunking does not have to be threaded as a boolean
+    # through auto_size() / measure_fleet() / check_fixed_shape_capacity()
+    # and every one of their call sites and tests -- and so that no field
+    # ever holds a number that misdescribes itself (``max_enis`` means the
+    # EC2 API's MaximumNetworkInterfaces and nothing else, trunked or not).
+    task_slots_override: "int | None" = None
+
+    @property
+    def trunking_supported(self) -> bool:
+        """Whether AWS lists this type as ENI-trunking-eligible."""
+        return self.trunked_task_limit is not None
+
+    @property
+    def task_eni_slots(self) -> "int | None":
+        """awsvpc tasks this shape can host, or None when not modeled.
+
+        Without trunking that is ``max_enis - ENI_RESERVED_FOR_PRIMARY``.
+        With it (see ``with_trunking``) it is AWS's published trunked limit.
+        """
+        if self.task_slots_override is not None:
+            return self.task_slots_override
+        if self.max_enis is None:
+            return None
+        return self.max_enis - ENI_RESERVED_FOR_PRIMARY
+
+    def with_trunking(self) -> "InstanceShape":
+        """This shape as it behaves with ``awsvpcTrunking`` enabled.
+
+        Returns self unchanged for an ineligible type, so callers can apply
+        it unconditionally -- which is what makes the whole feature a no-op
+        for the default t3 ladder without a single conditional at the call
+        sites.
+        """
+        if self.trunked_task_limit is None:
+            return self
+        return replace(self, task_slots_override=self.trunked_task_limit)
 
 
 # Conservative t3 ladder. Add m5/m6i family via explicit instance_type.
@@ -84,6 +134,25 @@ T3_LADDER: list[InstanceShape] = [
 # verified row for exactly this reason -- do not "simplify" this into a
 # smaller per-family/per-size formula.
 #
+# trunked_task_limit is AWS's published "Task limit with ENI trunking" for
+# each type, transcribed from
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/eni-trunking-supported-instance-types.html
+# (read 2026-08-19, rc-hguq). Two independent checks on that transcription:
+#
+#   1. The same tables carry a "Task limit WITHOUT ENI trunking" column, and
+#      it equals max_enis - ENI_RESERVED_FOR_PRIMARY for every single row rc
+#      models -- m5.large 2, m5.xlarge 3, m5.4xlarge 7, m5.16xlarge 14,
+#      c5.large 2, c6i.32xlarge 15 and the rest. That is an end-to-end
+#      confirmation of the max_enis column above, from a different AWS source
+#      than the describe-instance-types call it was built from.
+#   2. Absence is meaningful, not an oversight: no t3.*, t3a.* or t4g.* row
+#      appears anywhere in those tables, which is the positive evidence
+#      behind T3_LADDER's "the T family is not ENI-trunking-eligible at any
+#      size" claim. m5.metal and c5.metal are likewise named in the page's
+#      explicit not-supported list despite their families being eligible --
+#      so they keep trunked_task_limit=None while their siblings do not.
+#      Do NOT infer a metal tier's limit from its family.
+#
 # Unlisted instance types (any type not a key here) are simply not modeled --
 # check_fixed_shape_capacity() skips validation for them, same "not modeled"
 # precedent as InstanceShape.max_enis=None for a caller-supplied ladder.
@@ -112,47 +181,127 @@ KNOWN_INSTANCE_SHAPES: dict[str, InstanceShape] = {
         InstanceShape("t4g.large", vcpu=2, memory_gib=8, max_enis=3),
         InstanceShape("t4g.xlarge", vcpu=4, memory_gib=16, max_enis=4),
         InstanceShape("t4g.2xlarge", vcpu=8, memory_gib=32, max_enis=4),
-        InstanceShape("m5.large", vcpu=2, memory_gib=8, max_enis=3),
-        InstanceShape("m5.xlarge", vcpu=4, memory_gib=16, max_enis=4),
-        InstanceShape("m5.2xlarge", vcpu=8, memory_gib=32, max_enis=4),
-        InstanceShape("m5.4xlarge", vcpu=16, memory_gib=64, max_enis=8),
-        InstanceShape("m5.8xlarge", vcpu=32, memory_gib=128, max_enis=8),
-        InstanceShape("m5.12xlarge", vcpu=48, memory_gib=192, max_enis=8),
-        InstanceShape("m5.16xlarge", vcpu=64, memory_gib=256, max_enis=15),
-        InstanceShape("m5.24xlarge", vcpu=96, memory_gib=384, max_enis=15),
+        InstanceShape(
+            "m5.large", vcpu=2, memory_gib=8, max_enis=3, trunked_task_limit=10
+        ),
+        InstanceShape(
+            "m5.xlarge", vcpu=4, memory_gib=16, max_enis=4, trunked_task_limit=20
+        ),
+        InstanceShape(
+            "m5.2xlarge", vcpu=8, memory_gib=32, max_enis=4, trunked_task_limit=40
+        ),
+        InstanceShape(
+            "m5.4xlarge", vcpu=16, memory_gib=64, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "m5.8xlarge", vcpu=32, memory_gib=128, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "m5.12xlarge", vcpu=48, memory_gib=192, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "m5.16xlarge", vcpu=64, memory_gib=256, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m5.24xlarge", vcpu=96, memory_gib=384, max_enis=15, trunked_task_limit=120
+        ),
         InstanceShape("m5.metal", vcpu=96, memory_gib=384, max_enis=15),
-        InstanceShape("m6i.large", vcpu=2, memory_gib=8, max_enis=3),
-        InstanceShape("m6i.xlarge", vcpu=4, memory_gib=16, max_enis=4),
-        InstanceShape("m6i.2xlarge", vcpu=8, memory_gib=32, max_enis=4),
-        InstanceShape("m6i.4xlarge", vcpu=16, memory_gib=64, max_enis=8),
-        InstanceShape("m6i.8xlarge", vcpu=32, memory_gib=128, max_enis=8),
-        InstanceShape("m6i.12xlarge", vcpu=48, memory_gib=192, max_enis=8),
-        InstanceShape("m6i.16xlarge", vcpu=64, memory_gib=256, max_enis=15),
-        InstanceShape("m6i.24xlarge", vcpu=96, memory_gib=384, max_enis=15),
-        InstanceShape("m6i.32xlarge", vcpu=128, memory_gib=512, max_enis=15),
-        InstanceShape("m6i.metal", vcpu=128, memory_gib=512, max_enis=15),
+        InstanceShape(
+            "m6i.large", vcpu=2, memory_gib=8, max_enis=3, trunked_task_limit=10
+        ),
+        InstanceShape(
+            "m6i.xlarge", vcpu=4, memory_gib=16, max_enis=4, trunked_task_limit=20
+        ),
+        InstanceShape(
+            "m6i.2xlarge", vcpu=8, memory_gib=32, max_enis=4, trunked_task_limit=40
+        ),
+        InstanceShape(
+            "m6i.4xlarge", vcpu=16, memory_gib=64, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "m6i.8xlarge", vcpu=32, memory_gib=128, max_enis=8, trunked_task_limit=90
+        ),
+        InstanceShape(
+            "m6i.12xlarge", vcpu=48, memory_gib=192, max_enis=8, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m6i.16xlarge", vcpu=64, memory_gib=256, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m6i.24xlarge", vcpu=96, memory_gib=384, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m6i.32xlarge",
+            vcpu=128,
+            memory_gib=512,
+            max_enis=15,
+            trunked_task_limit=120,
+        ),
+        InstanceShape(
+            "m6i.metal", vcpu=128, memory_gib=512, max_enis=15, trunked_task_limit=120
+        ),
         # c5/c6i memory is HALF of the same-size m5/m6i/t3 shape -- e.g.
         # c5.xlarge is 8 GiB, not 16 (the t3.xlarge/m5.xlarge value). Do not
         # collapse these into a shared "xlarge row" across families.
-        InstanceShape("c5.large", vcpu=2, memory_gib=4, max_enis=3),
-        InstanceShape("c5.xlarge", vcpu=4, memory_gib=8, max_enis=4),
-        InstanceShape("c5.2xlarge", vcpu=8, memory_gib=16, max_enis=4),
-        InstanceShape("c5.4xlarge", vcpu=16, memory_gib=32, max_enis=8),
-        InstanceShape("c5.9xlarge", vcpu=36, memory_gib=72, max_enis=8),
-        InstanceShape("c5.12xlarge", vcpu=48, memory_gib=96, max_enis=8),
-        InstanceShape("c5.18xlarge", vcpu=72, memory_gib=144, max_enis=15),
-        InstanceShape("c5.24xlarge", vcpu=96, memory_gib=192, max_enis=15),
+        InstanceShape(
+            "c5.large", vcpu=2, memory_gib=4, max_enis=3, trunked_task_limit=10
+        ),
+        InstanceShape(
+            "c5.xlarge", vcpu=4, memory_gib=8, max_enis=4, trunked_task_limit=20
+        ),
+        InstanceShape(
+            "c5.2xlarge", vcpu=8, memory_gib=16, max_enis=4, trunked_task_limit=40
+        ),
+        InstanceShape(
+            "c5.4xlarge", vcpu=16, memory_gib=32, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "c5.9xlarge", vcpu=36, memory_gib=72, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "c5.12xlarge", vcpu=48, memory_gib=96, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "c5.18xlarge", vcpu=72, memory_gib=144, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "c5.24xlarge", vcpu=96, memory_gib=192, max_enis=15, trunked_task_limit=120
+        ),
         InstanceShape("c5.metal", vcpu=96, memory_gib=192, max_enis=15),
-        InstanceShape("c6i.large", vcpu=2, memory_gib=4, max_enis=3),
-        InstanceShape("c6i.xlarge", vcpu=4, memory_gib=8, max_enis=4),
-        InstanceShape("c6i.2xlarge", vcpu=8, memory_gib=16, max_enis=4),
-        InstanceShape("c6i.4xlarge", vcpu=16, memory_gib=32, max_enis=8),
-        InstanceShape("c6i.8xlarge", vcpu=32, memory_gib=64, max_enis=8),
-        InstanceShape("c6i.12xlarge", vcpu=48, memory_gib=96, max_enis=8),
-        InstanceShape("c6i.16xlarge", vcpu=64, memory_gib=128, max_enis=15),
-        InstanceShape("c6i.24xlarge", vcpu=96, memory_gib=192, max_enis=15),
-        InstanceShape("c6i.32xlarge", vcpu=128, memory_gib=256, max_enis=15),
-        InstanceShape("c6i.metal", vcpu=128, memory_gib=256, max_enis=15),
+        InstanceShape(
+            "c6i.large", vcpu=2, memory_gib=4, max_enis=3, trunked_task_limit=10
+        ),
+        InstanceShape(
+            "c6i.xlarge", vcpu=4, memory_gib=8, max_enis=4, trunked_task_limit=20
+        ),
+        InstanceShape(
+            "c6i.2xlarge", vcpu=8, memory_gib=16, max_enis=4, trunked_task_limit=40
+        ),
+        InstanceShape(
+            "c6i.4xlarge", vcpu=16, memory_gib=32, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "c6i.8xlarge", vcpu=32, memory_gib=64, max_enis=8, trunked_task_limit=90
+        ),
+        InstanceShape(
+            "c6i.12xlarge", vcpu=48, memory_gib=96, max_enis=8, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "c6i.16xlarge", vcpu=64, memory_gib=128, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "c6i.24xlarge", vcpu=96, memory_gib=192, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "c6i.32xlarge",
+            vcpu=128,
+            memory_gib=256,
+            max_enis=15,
+            trunked_task_limit=120,
+        ),
+        InstanceShape(
+            "c6i.metal", vcpu=128, memory_gib=256, max_enis=15, trunked_task_limit=120
+        ),
     ]
 }
 
@@ -340,6 +489,16 @@ class FleetPressure:
     cpu_saturating_tasks: list[str] = field(default_factory=list)
     steady_task_count: int = 0
     peak_task_count: int = 0
+    # Which of the three dimensions actually decided steady_instances:
+    # "cpu", "memory", "eni", or "" when nothing constrains. rc-hguq ask 4 --
+    # "you need 7 instances" and "you need 7 instances because of a
+    # networking limit you can lift with one account setting" are very
+    # different messages, and only the second is actionable.
+    binding_dimension: str = ""
+    # True when the ENI dimension is what binds AND the shape supports ENI
+    # trunking that is not currently in effect -- i.e. this fleet is sized by
+    # a networking artifact the operator can remove.
+    eni_bound_but_trunkable: bool = False
 
     @property
     def binpacks(self) -> bool:
@@ -371,7 +530,7 @@ def measure_fleet(
     instance_cpu = shape.vcpu * 1024
     instance_mem = shape.memory_gib * 1024
 
-    def _instances(replica_of) -> int:
+    def _dimensions(replica_of) -> dict[str, int]:
         by_cpu = by_mem = 0
         if demands:
             total_cpu = sum(t.cpu_units * replica_of(t) for t in demands)
@@ -381,12 +540,32 @@ def measure_fleet(
         by_eni = _instances_needed_for_enis(
             shape, sum(replica_of(t) for t in tasks), safety_headroom
         )
-        return max(1, by_cpu, by_mem, by_eni) if tasks else 0
+        return {"cpu": by_cpu, "memory": by_mem, "eni": by_eni}
+
+    def _instances(dims: dict[str, int]) -> int:
+        return max(1, *dims.values()) if tasks else 0
+
+    steady_dims = _dimensions(lambda t: t.replicas)
+    steady = _instances(steady_dims)
+    # Ties go to cpu/memory: naming ENI as the culprit when CPU needs the
+    # same number of instances would send the operator to enable trunking
+    # for no benefit.
+    binding = ""
+    if tasks:
+        binding = max(steady_dims, key=lambda k: (steady_dims[k], k != "eni"))
+        if steady_dims[binding] <= 0:
+            binding = ""
 
     return FleetPressure(
         shape=shape,
-        steady_instances=_instances(lambda t: t.replicas),
-        peak_instances=_instances(lambda t: t.peak_replicas),
+        steady_instances=steady,
+        peak_instances=_instances(_dimensions(lambda t: t.peak_replicas)),
+        binding_dimension=binding,
+        eni_bound_but_trunkable=(
+            binding == "eni"
+            and shape.trunking_supported
+            and shape.task_slots_override is None
+        ),
         cpu_saturating_tasks=sorted(
             t.name for t in demands if t.cpu_units >= instance_cpu
         ),
@@ -399,14 +578,16 @@ def _instances_needed_for_enis(
     shape: InstanceShape, total_task_count: int, safety_headroom: float
 ) -> int:
     """Instances needed so ``total_task_count`` awsvpc tasks fit within
-    ``shape``'s usable task-ENI slots (``max_enis - ENI_RESERVED_FOR_PRIMARY``).
+    ``shape.task_eni_slots`` -- ``max_enis - ENI_RESERVED_FOR_PRIMARY``
+    normally, or AWS's published trunked limit for a shape that has been
+    through ``with_trunking()``.
 
     Returns 0 (i.e. "does not constrain sizing") when the shape's ENI
-    ceiling isn't modeled (``max_enis is None``) or there are no tasks.
+    ceiling isn't modeled (``task_eni_slots is None``) or there are no tasks.
     """
-    if shape.max_enis is None or total_task_count <= 0:
+    usable_enis = shape.task_eni_slots
+    if usable_enis is None or total_task_count <= 0:
         return 0
-    usable_enis = shape.max_enis - ENI_RESERVED_FOR_PRIMARY
     return math.ceil(total_task_count * safety_headroom / usable_enis)
 
 
@@ -459,11 +640,93 @@ def _smallest_fit(
     return None
 
 
+# What rc knows about the account's awsvpcTrunking setting. rc-hguq ask 3:
+# the old message asserted "ENI trunking is not enabled" as fact when rc had
+# never looked, so an operator who HAD enabled it read a verified finding
+# where there was only an assumption. These three states are reported
+# differently, and UNKNOWN is never worded as "not enabled".
+TRUNKING_ENABLED = "enabled"
+TRUNKING_DISABLED = "disabled"
+TRUNKING_UNKNOWN = "unknown"
+
+
+# awsvpcTrunking is a PER-REGION ECS account setting, not a global one.
+# `put-account-setting-default` applies to the region it is called in, so an
+# account can (and routinely does) have it enabled in the region someone
+# tested in and disabled everywhere else -- verified live on 033937118837
+# (2026-08-19): enabled in us-east-2, disabled in us-west-1/us-west-2/
+# us-east-1. Every message below names the region for exactly this reason:
+# "trunking is disabled for this account" sends an operator who already
+# enabled it somewhere hunting for a bug that isn't there.
+def _region_phrase(region: "str | None") -> str:
+    return f"in {region}" if region else "in this region"
+
+
+def _trunking_clause(
+    shape: InstanceShape, state: str, region: "str | None" = None
+) -> str:
+    """Parenthetical explaining WHERE the slot number came from."""
+    if shape.task_slots_override is not None:
+        return " -- AWS's published limit with ENI trunking enabled"
+    base = (
+        " after reserving 1 for the instance's own primary ENI, "
+        "ENI trunking not in effect"
+    )
+    if not shape.trunking_supported:
+        return (
+            base + f"; {shape.name} is not one of the instance types AWS "
+            "supports ENI trunking on"
+        )
+    if state == TRUNKING_DISABLED:
+        return (
+            base + f"; the awsvpcTrunking account setting is disabled "
+            f"{_region_phrase(region)} -- it is PER-REGION, so enabling it "
+            f"elsewhere does not apply here"
+        )
+    if state == TRUNKING_UNKNOWN:
+        return (
+            base + f"; rc has NOT checked whether awsvpcTrunking is enabled "
+            f"{_region_phrase(region)}"
+        )
+    return base
+
+
+def _trunking_remedy(
+    shape: InstanceShape, state: str, region: "str | None" = None
+) -> str:
+    """Lead the remedy with trunking when trunking is the real answer."""
+    if shape.task_slots_override is not None or not shape.trunking_supported:
+        return ""
+    region_flag = f" --region {region}" if region else ""
+    if state == TRUNKING_DISABLED:
+        return (
+            f"{shape.name} supports ENI trunking, which would raise this to "
+            f"{shape.trunked_task_limit} task(s) per instance -- enable it "
+            f"{_region_phrase(region)} with `aws ecs "
+            f"put-account-setting-default --name awsvpcTrunking --value "
+            f"enabled{region_flag}` and re-run (the setting is per-region; "
+            f"check with `aws ecs list-account-settings --name awsvpcTrunking "
+            f"--effective-settings{region_flag}`); otherwise "
+        )
+    if state == TRUNKING_UNKNOWN:
+        return (
+            f"{shape.name} supports ENI trunking, which would raise this to "
+            f"{shape.trunked_task_limit} task(s) per instance -- if "
+            f"awsvpcTrunking is already enabled {_region_phrase(region)} "
+            f"(it is per-region), set "
+            f"provider_config.ecs.ec2_capacity.eni_trunking: true to tell rc "
+            f"so; otherwise "
+        )
+    return ""
+
+
 def check_fixed_shape_capacity(
     shape: InstanceShape,
     tasks: Iterable[EC2TaskDemand],
     desired_size: int,
     reserved_memory_mib: int = RESERVED_MEMORY_MIB,
+    trunking_state: str = TRUNKING_UNKNOWN,
+    region: "str | None" = None,
 ) -> None:
     """Validate that ``desired_size`` instances of a caller-chosen ``shape``
     can host the declared EC2 task demand.
@@ -526,15 +789,16 @@ def check_fixed_shape_capacity(
             )
 
     total_task_count = sum(t.replicas for t in tasks)
-    if shape.max_enis is not None and total_task_count > 0:
-        usable_enis = shape.max_enis - ENI_RESERVED_FOR_PRIMARY
+    usable_enis = shape.task_eni_slots
+    if usable_enis is not None and total_task_count > 0:
         if total_task_count > desired_size * usable_enis:
             raise ValueError(
                 f"ec2_capacity.desired={desired_size} {shape.name} "
                 f"instance(s) provide {desired_size * usable_enis} awsvpc "
-                f"task ENI slots ({usable_enis} usable per instance after "
-                f"reserving 1 for the instance's own primary ENI -- ENI "
-                f"trunking is not enabled), but {total_task_count} EC2-launch "
-                f"task(s) are declared; raise ec2_capacity.desired, pick a "
-                f"larger instance_type, or reduce replica counts"
+                f"task ENI slots ({usable_enis} per instance"
+                f"{_trunking_clause(shape, trunking_state, region)}"
+                f"), but {total_task_count} EC2-launch task(s) are declared; "
+                f"{_trunking_remedy(shape, trunking_state, region)}raise "
+                f"ec2_capacity.desired, pick a larger instance_type, or "
+                f"reduce replica counts"
             )
