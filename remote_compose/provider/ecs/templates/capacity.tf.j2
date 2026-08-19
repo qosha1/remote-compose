@@ -70,6 +70,37 @@ resource "aws_launch_template" "ec2" {
   iam_instance_profile {
     name = aws_iam_instance_profile.ec2_instance.name
   }
+{%- if ec2_capacity.root_volume_size %}
+
+  # ec2_capacity.root_volume_size (rc-hbjb). Without this block the instance
+  # inherits the ECS-optimized AMI's own root volume -- 30 GiB gp2, verified
+  # against the AMI this template resolves (describe-images on the
+  # /aws/service/ecs/optimized-ami/amazon-linux-2/recommended AMI:
+  # RootDeviceName=/dev/xvda, VolumeSize=30, VolumeType=gp2). That disk is
+  # SHARED by every task binpacked onto the instance, so a Fargate service
+  # that declared `ephemeral_storage: 40` (40 GiB of its own scratch) and was
+  # moved to EC2 silently ends up with a fraction of that, and a task that
+  # fills the disk takes its NEIGHBOURS down with it, not just itself.
+  #
+  # device_name must be the AMI's actual root device. Any other name creates
+  # an ADDITIONAL, unmounted volume instead of resizing root: a clean plan, a
+  # real bill, and the original problem unchanged.
+  #
+  # Note a launch-template change only reaches an instance when that instance
+  # is REPLACED. Existing container instances keep their current root volume
+  # until the ASG rolls them (terminate / scale-in-out); resizing is not
+  # retroactive.
+  block_device_mappings {
+    device_name = "{{ ec2_capacity.root_volume_device }}"
+
+    ebs {
+      volume_size           = {{ ec2_capacity.root_volume_size }}
+      volume_type           = "{{ ec2_capacity.root_volume_type }}"
+      delete_on_termination = true
+      encrypted             = {{ 'true' if ec2_capacity.root_volume_encrypted else 'false' }}
+    }
+  }
+{%- endif %}
 
   # IMDS hardening. http_tokens = "required" makes the instance metadata
   # service IMDSv2-only: a token has to be minted with a PUT before anything

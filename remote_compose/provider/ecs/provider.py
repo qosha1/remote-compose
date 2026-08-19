@@ -40,6 +40,7 @@ from ..base import (
 )
 from .autosize import (
     EC2TaskDemand,
+    ENI_RESERVED_FOR_PRIMARY,
     KNOWN_INSTANCE_SHAPES,
     auto_size,
     check_fixed_shape_capacity,
@@ -257,6 +258,82 @@ def _service_placement_view(
 IMDS_DEFAULT_TOKENS = "required"
 IMDS_DEFAULT_HOP_LIMIT = 2
 VALID_IMDS_TOKEN_MODES = {"required", "optional"}
+
+
+# The root volume an ECS container instance gets when the launch template
+# declares no block_device_mappings: whatever the AMI ships. Verified live
+# against the AMI capacity.tf.j2 resolves (2026-08-18):
+#
+#   aws ec2 describe-images --image-ids $(aws ssm get-parameter \
+#     --name /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id \
+#     --query Parameter.Value --output text) \
+#     --query 'Images[0].{Root:RootDeviceName,Bdm:BlockDeviceMappings}'
+#   -> RootDeviceName=/dev/xvda, VolumeSize=30, VolumeType=gp2
+#
+# device_name has to match that root device exactly. Any other name adds a
+# SECOND, unmounted volume rather than resizing root — a clean plan, a real
+# bill, and the original problem untouched.
+ECS_AMI_ROOT_DEVICE_NAME = "/dev/xvda"
+ECS_AMI_DEFAULT_ROOT_VOLUME_GIB = 30
+
+# gp3 rather than the AMI's gp2: same durability, cheaper per GiB, and its
+# baseline 3000 IOPS is not tied to volume size the way gp2's is. Only
+# applies when the user opts into a root volume at all.
+ROOT_VOLUME_TYPE_DEFAULT = "gp3"
+VALID_ROOT_VOLUME_TYPES = {"gp2", "gp3", "io1", "io2", "standard"}
+
+# EBS root volumes must be at least as large as the AMI snapshot; AWS rejects
+# anything smaller outright.
+MIN_ROOT_VOLUME_GIB = ECS_AMI_DEFAULT_ROOT_VOLUME_GIB
+
+
+def _resolve_root_volume_options(user_cfg: dict) -> dict:
+    """Validate the root-volume knobs under ``provider_config.ecs.ec2_capacity``.
+
+    rc-hbjb. ``ephemeral_storage`` is a Fargate-only task field and rc
+    correctly rejects it on EC2 — but until now it offered nothing in its
+    place, so the user deleted the setting to satisfy the error and silently
+    lost the capacity: capacity.tf.j2 declared no block_device_mappings, so
+    every instance took the AMI's 30 GiB and every binpacked task on it
+    shared that one disk.
+
+    Instance-level, beside ``instance_type``, because the resource that owns
+    it is ``aws_launch_template.ec2`` — a root volume belongs to the
+    container instance, not to any one task on it. That is also the
+    substantive difference from Fargate's ``ephemeral_storage``, which is
+    per-task and private, and the reason the two are not interchangeable.
+    """
+    size = user_cfg.get("root_volume_size")
+    if size is None:
+        return {
+            "root_volume_size": None,
+            "root_volume_type": ROOT_VOLUME_TYPE_DEFAULT,
+            "root_volume_device": ECS_AMI_ROOT_DEVICE_NAME,
+            "root_volume_encrypted": True,
+        }
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise ProviderConfigError(
+            f"ec2_capacity.root_volume_size must be an integer number of "
+            f"GiB, got {size!r}"
+        )
+    if size < MIN_ROOT_VOLUME_GIB:
+        raise ProviderConfigError(
+            f"ec2_capacity.root_volume_size must be at least "
+            f"{MIN_ROOT_VOLUME_GIB} GiB (an EBS root volume cannot be smaller "
+            f"than the ECS-optimized AMI's own snapshot), got {size}"
+        )
+    vol_type = str(user_cfg.get("root_volume_type", ROOT_VOLUME_TYPE_DEFAULT))
+    if vol_type not in VALID_ROOT_VOLUME_TYPES:
+        raise ProviderConfigError(
+            f"ec2_capacity.root_volume_type must be one of "
+            f"{sorted(VALID_ROOT_VOLUME_TYPES)}, got {vol_type!r}"
+        )
+    return {
+        "root_volume_size": size,
+        "root_volume_type": vol_type,
+        "root_volume_device": ECS_AMI_ROOT_DEVICE_NAME,
+        "root_volume_encrypted": bool(user_cfg.get("root_volume_encrypted", True)),
+    }
 
 
 def _resolve_imds_options(user_cfg: dict) -> dict:
@@ -1221,9 +1298,23 @@ class ECSProvider(Provider):
 
             if spec.ephemeral_storage is not None:
                 if launch_type != "FARGATE":
+                    # rc-hbjb: name the EC2-side equivalent HERE. Without it
+                    # the only way past this error is to delete the setting,
+                    # which silently drops the service onto the AMI's 30 GiB
+                    # root volume shared with every binpacked neighbour --
+                    # the user learns about it when a task fills the disk and
+                    # takes its neighbours down too.
                     raise ProviderConfigError(
                         f"service {name!r}: ephemeral_storage is only supported "
-                        f"on FARGATE launch_type, got {launch_type!r}"
+                        f"on FARGATE launch_type, got {launch_type!r}. It is a "
+                        f"per-task Fargate field with no EC2 equivalent: an EC2 "
+                        f"task's scratch space is the container instance's root "
+                        f"volume, shared with every other task binpacked onto "
+                        f"that instance. Size it with "
+                        f"provider_config.ecs.ec2_capacity.root_volume_size "
+                        f"(GiB, applies to the whole instance), or keep this "
+                        f"service on FARGATE if it needs "
+                        f"{spec.ephemeral_storage} GiB of its own."
                     )
                 if not (21 <= spec.ephemeral_storage <= 200):
                     raise ProviderConfigError(
@@ -4775,7 +4866,7 @@ class ECSProvider(Provider):
                 except ValueError as exc:
                     raise ProviderConfigError(str(exc)) from exc
 
-        return {
+        resolved = {
             "instance_type": instance_type,
             "min_size": min_size,
             "desired_size": desired_size,
@@ -4783,7 +4874,52 @@ class ECSProvider(Provider):
             "capacity_type": capacity_type,
             "spot_weight": user_cfg.get("spot_weight", 3),
             **_resolve_imds_options(user_cfg),
+            **_resolve_root_volume_options(user_cfg),
         }
+        self._warn_on_shared_root_volume(resolved, ec2_demands)
+        return resolved
+
+    def _warn_on_shared_root_volume(
+        self, resolved: dict, ec2_demands: list[EC2TaskDemand]
+    ) -> None:
+        """Flag EC2 tasks sharing the AMI's default root volume (rc-hbjb).
+
+        Only fires when more than one task can land on an instance, because
+        that is where the hazard actually is: the disk is shared, so a task
+        that fills it takes its NEIGHBOURS down, not just itself. A stack
+        that binpacks one task per instance has a private 30 GiB and nothing
+        to warn about.
+
+        Density comes from the ENI ceiling rc already models (max_enis minus
+        the instance's own primary ENI) — for an awsvpc task that is a hard
+        per-instance limit, so it is the honest upper bound on neighbours.
+        Unmodeled instance types report nothing rather than guess.
+        """
+        if resolved.get("root_volume_size") is not None:
+            return
+        shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
+        if shape is None or shape.max_enis is None:
+            return
+        tasks_per_instance = shape.max_enis - ENI_RESERVED_FOR_PRIMARY
+        total_tasks = sum(t.replicas for t in ec2_demands)
+        neighbours = min(tasks_per_instance, total_tasks)
+        if neighbours < 2:
+            return
+        per_task = ECS_AMI_DEFAULT_ROOT_VOLUME_GIB // neighbours
+        self._warn(
+            f"EC2 launch type: no ec2_capacity.root_volume_size is set, so "
+            f"every {resolved['instance_type']} container instance takes the "
+            f"ECS-optimized AMI's default "
+            f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB} GiB root volume — and that "
+            f"one disk is SHARED by every task binpacked onto it. This shape "
+            f"holds up to {tasks_per_instance} awsvpc tasks, so a full "
+            f"instance leaves roughly {per_task} GiB of scratch per task, not "
+            f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB}. Unlike Fargate's per-task "
+            f"ephemeral_storage this space is not private: one task filling "
+            f"the disk takes its neighbours down with it. Set "
+            f"provider_config.ecs.ec2_capacity.root_volume_size (GiB) to size "
+            f"it deliberately."
+        )
 
 
 _EMITTED_SUFFIXES = (".tf",)

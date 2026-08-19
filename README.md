@@ -591,6 +591,9 @@ provider_config:
       desired: 1                 # default 1 when instance_type is set, else auto-sized
       max: 3                     # default 3 when instance_type is set, else auto-sized
       subnet_group: asg-private  # optional — a declared network.subnets group; see below
+      root_volume_size: 120      # GiB; omit to inherit the AMI's 30 GiB — see below
+      root_volume_type: gp3      # gp3 (default) | gp2 | io1 | io2 | standard
+      root_volume_encrypted: true  # default true
 ```
 
 - **`instance_type`** — the EC2 shape backing the ASG. No fixed default:
@@ -618,6 +621,24 @@ provider_config:
   `egress: nat`; declared groups already provision the real
   `aws_nat_gateway` + route table. Omit it and nothing changes (see
   below).
+- **`root_volume_size` / `root_volume_type` / `root_volume_encrypted`** —
+  the container instance's root EBS volume. Omit `root_volume_size` and the
+  launch template declares no `block_device_mappings`, so every instance
+  inherits the ECS-optimized AMI's own root volume: **30 GiB gp2, shared by
+  every task binpacked onto that instance**. This is the EC2-side answer to
+  Fargate's `ephemeral_storage`, and it is deliberately not the same thing —
+  `ephemeral_storage` is per-task and private, a root volume belongs to the
+  instance and its tasks share it, so a task that fills the disk takes its
+  neighbours down with it. A service moving from `ephemeral_storage: 40` on
+  Fargate to EC2 needs this set, sized for the whole instance (roughly
+  per-task GiB × tasks per instance). rc warns at plan time when it is unset
+  and more than one task can land on an instance. `root_volume_type`
+  defaults to `gp3` (cheaper than the AMI's gp2, and its 3000 baseline IOPS
+  isn't tied to volume size); minimum size is 30 GiB, since an EBS root
+  volume cannot be smaller than the AMI snapshot. Note a launch-template
+  change only reaches an instance when that instance is **replaced** —
+  existing container instances keep their current root volume until the ASG
+  rolls them.
 - `ec2_capacity` is also where the IMDS hardening knobs (`imdsv2`,
   `metadata_hop_limit`, `block_task_imds`) live — covered next.
 
