@@ -1117,3 +1117,94 @@ class TestDestroyPreDrainStillMakesZeroCallsWhenItCan:
         ecs.update_service.assert_called_once_with(
             cluster="test-cluster", service="worker", desiredCount=0
         )
+
+
+class TestEc2DropsTaskLevelCpu:
+    """startsim-u88y: on EC2, task-level `cpu` is a HARD reservation, and rc
+    emits it unconditionally — which makes an EC2 migration cost MORE than the
+    Fargate it replaces.
+
+    Task-level cpu is optional for the EC2 launch type (it is mandatory only for
+    FARGATE). rc emits no container-level cpu at all, so omitting the task-level
+    value means the task reserves no CPU and shares the instance's — which is the
+    entire reason to bin-pack on EC2. Memory stays a task-level reservation: it is
+    the resource you genuinely cannot oversubscribe safely, and the ASG is sized
+    from it.
+
+    Measured on a real 33-task estate before this change: 14.5 vCPU reserved
+    against 0.88 vCPU p50 / 3.18 p99 / 5.18 true simultaneous peak. Carrying those
+    reservations onto EC2 needed 15 instances / ~$1023/mo against ~$526/mo on
+    Fargate — a 95% REGRESSION. Dropping the reservation takes it to 8 instances.
+
+    Bursts are real but uncorrelated: several services peak at exactly 100% of
+    their own reservation (Fargate throttling them), while the SUM never exceeds
+    5.18 vCPU. Paying for peak-per-task is what Fargate forces; paying for
+    peak-of-sum is what EC2 buys, and only if the reservation goes.
+    """
+
+    def _taskdef(self, tmp_path, services):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path, services), out)
+        return (out / "services.tf").read_text()
+
+    def test_ec2_task_definition_omits_task_level_cpu(self, tmp_path):
+        tf = self._taskdef(tmp_path, {"web": _svc("web", "EC2", cpu=2048, memory=4096)})
+        assert 'requires_compatibilities = ["EC2"]' in tf
+        assert 'cpu                      = "2048"' not in tf, (
+            "task-level cpu is a hard reservation on EC2 — emitting it defeats "
+            "bin-packing and makes the migration cost more than Fargate"
+        )
+
+    def test_ec2_task_definition_keeps_task_level_memory(self, tmp_path):
+        """Memory must stay reserved: it is the resource that cannot be safely
+        oversubscribed, and auto_size sizes the ASG from it."""
+        tf = self._taskdef(tmp_path, {"web": _svc("web", "EC2", cpu=2048, memory=4096)})
+        assert 'memory                   = "4096"' in tf
+
+    def test_fargate_task_definition_still_carries_cpu(self, tmp_path):
+        """FARGATE REQUIRES task-level cpu — dropping it there is an API error,
+        and every existing Fargate stack must stay byte-identical."""
+        tf = self._taskdef(
+            tmp_path, {"web": _svc("web", "FARGATE", cpu=512, memory=1024)}
+        )
+        assert 'cpu                      = "512"' in tf
+        assert 'memory                   = "1024"' in tf
+
+    def test_mixed_stack_drops_cpu_only_on_the_ec2_service(self, tmp_path):
+        tf = self._taskdef(
+            tmp_path,
+            {
+                "web": _svc("web", "FARGATE", cpu=512, memory=1024),
+                "worker": _svc("worker", "EC2", cpu=2048, memory=4096),
+            },
+        )
+        assert 'cpu                      = "512"' in tf  # fargate web
+        assert 'cpu                      = "2048"' not in tf  # ec2 worker
+
+    def test_asg_is_not_sized_from_a_reservation_no_longer_made(self, tmp_path):
+        """The other half. auto_size built EC2TaskDemand from spec.cpu, so even
+        with the task def fixed the ASG would still be provisioned for CPU nobody
+        reserves — the regression would survive in the instance count.
+
+        Two tasks so the ENI ceiling (2 usable slots on m5.large without
+        trunking) is not what binds; 2048 cpu each against the instance's 2048
+        total makes CPU-driven sizing demand 2+ instances while memory needs 1.
+        """
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            _ctx(
+                tmp_path,
+                {f"w{i}": _svc(f"w{i}", "EC2", cpu=2048, memory=512) for i in range(2)},
+                ec2_capacity={"instance_type": "m5.large"},  # 2 vCPU / 8 GiB
+            ),
+            out,
+        )
+        cap = (out / "capacity.tf").read_text()
+        import re
+
+        desired = re.search(r"desired_capacity\s+=\s+(\d+)", cap)
+        assert desired, cap[:400]
+        assert int(desired.group(1)) == 1, (
+            f"ASG sized to {desired.group(1)} instances — still provisioning for "
+            "a CPU reservation the task definitions no longer make"
+        )

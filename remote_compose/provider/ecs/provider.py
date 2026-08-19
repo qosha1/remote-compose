@@ -1717,7 +1717,13 @@ class ECSProvider(Provider):
                 ec2_demands.append(
                     EC2TaskDemand(
                         name=name,
-                        cpu_units=spec.cpu,
+                        # startsim-u88y: 0, not spec.cpu. services.tf.j2 omits
+                        # task-level cpu on EC2, so the task reserves no CPU —
+                        # and sizing the ASG for a reservation nobody makes just
+                        # moves the same 95% regression from the task definition
+                        # into the instance count. Memory and ENI slots still
+                        # drive the fleet; CPU is shared, which is the point.
+                        cpu_units=0,
                         memory_mib=spec.memory,
                         replicas=spec.replicas,
                         # rc-anl6: capacity has to hold a ROLLING DEPLOY, not

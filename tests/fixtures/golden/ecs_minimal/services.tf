@@ -303,7 +303,22 @@ resource "aws_ecs_task_definition" "worker" {
   family                   = "${var.project}-worker"
   network_mode             = "awsvpc"
   requires_compatibilities = ["EC2"]
-  cpu                      = "1024"
+  # startsim-u88y: task-level cpu is OMITTED on EC2 deliberately. FARGATE
+  # requires it, but on EC2 it is an optional HARD reservation held against the
+  # container instance for the task's whole life -- and rc emits no
+  # container-level cpu, so leaving it off means the task reserves none and
+  # shares the instance's CPU instead. That sharing is the entire reason to
+  # bin-pack on EC2.
+  #
+  # Measured on a real 33-task estate: 14.5 vCPU reserved against 0.88 vCPU p50
+  # and a 5.18 vCPU true simultaneous peak. Carrying those reservations onto EC2
+  # needed 15 instances (~$1023/mo) versus ~$526/mo of Fargate -- a 95%
+  # REGRESSION. The bursts are real but uncorrelated: individual services peak at
+  # 100% of their own reservation while the SUM never approaches it. Fargate
+  # makes you buy peak-per-task; EC2 only pays if you buy peak-of-sum.
+  #
+  # memory below stays a task-level reservation on purpose -- it is the resource
+  # that cannot be safely oversubscribed, and auto_size sizes the ASG from it.
   memory                   = "2048"
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = aws_iam_role.task.arn
