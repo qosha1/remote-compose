@@ -591,6 +591,7 @@ provider_config:
       desired: 1                 # default 1 when instance_type is set, else auto-sized
       max: 3                     # default 3 when instance_type is set, else auto-sized
       subnet_group: asg-private  # optional — a declared network.subnets group; see below
+      size_for_rolling_deploy: false  # default false — see below
       root_volume_size: 120      # GiB; omit to inherit the AMI's 30 GiB — see below
       root_volume_type: gp3      # gp3 (default) | gp2 | io1 | io2 | standard
       root_volume_encrypted: true  # default true
@@ -621,6 +622,20 @@ provider_config:
   `egress: nat`; declared groups already provision the real
   `aws_nat_gateway` + route table. Omit it and nothing changes (see
   below).
+- **`size_for_rolling_deploy`** — whether auto-sizing covers a rolling
+  deploy or only steady state. Default `false`: rc sizes the ASG for the
+  tasks you declared, exactly as it always has. But ECS permits up to 200%
+  task duplication while a deploy is in flight
+  (`deployment_maximum_percent`, rendered as 200 for normal services and 100
+  for stateful ones), so a fleet that is right at rest can be undersized at
+  the only moment that matters — managed scaling then adds instances
+  mid-deploy, and EC2 boot plus ECS agent registration takes minutes during
+  which tasks sit `PENDING`. rc always **warns** when peak demand exceeds
+  the sized fleet, naming the numbers. Set this `true` to have auto-sizing
+  size for that peak instead; it removes the `PENDING` window and typically
+  costs 1.5–2x the instances continuously, which is why it is opt-in rather
+  than the default. Ignored when `instance_type` is set (auto-sizing doesn't
+  run at all then) — the warning still fires.
 - **`root_volume_size` / `root_volume_type` / `root_volume_encrypted`** —
   the container instance's root EBS volume. Omit `root_volume_size` and the
   launch template declares no `block_device_mappings`, so every instance

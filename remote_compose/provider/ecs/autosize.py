@@ -16,7 +16,7 @@ capacity planning. Production users with tight cost targets should set
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 
@@ -189,12 +189,37 @@ RESERVED_MEMORY_MIB = 256
 ENI_RESERVED_FOR_PRIMARY = 1
 
 
+# ECS's own default deployment_maximum_percent for a rolling deploy, and
+# what services.tf.j2 renders for every non-stateful service: up to 200% of
+# desired count may be RUNNING at once while a deploy is in flight. Stateful
+# services (EFS-mounting, singleton schedulers) render 100 instead — they are
+# stop-then-start precisely so two tasks never share the data dir — so peak
+# demand is per-service, not a blanket doubling of the fleet.
+DEPLOYMENT_MAX_PERCENT_DEFAULT = 200
+
+
 @dataclass
 class EC2TaskDemand:
     name: str
     cpu_units: int
     memory_mib: int
     replicas: int = 1
+    # Ceiling on running tasks during a rolling deploy, as a percentage of
+    # `replicas` — aws_ecs_service.deployment_maximum_percent. Defaults to
+    # ECS's own 200 so a caller that doesn't supply it still models a normal
+    # rolling deploy rather than silently assuming steady state.
+    deployment_maximum_percent: int = DEPLOYMENT_MAX_PERCENT_DEFAULT
+
+    @property
+    def peak_replicas(self) -> int:
+        """Tasks that can be running at once mid-rolling-deploy.
+
+        ECS rounds down when applying deployment_maximum_percent to a desired
+        count, but it will always run at least `replicas` — a deploy that
+        couldn't hold the current tasks would be an outage, not a roll.
+        """
+        scaled = (self.replicas * self.deployment_maximum_percent) // 100
+        return max(self.replicas, scaled)
 
 
 @dataclass
@@ -211,6 +236,7 @@ def auto_size(
     safety_headroom: float = 1.2,
     max_cap: int = 10,
     reserved_memory_mib: int = RESERVED_MEMORY_MIB,
+    size_for_rolling_deploy: bool = False,
 ) -> Sizing:
     """Pick instance_type + ASG sizes to host the given EC2 task demand.
 
@@ -231,13 +257,20 @@ def auto_size(
          pre-rc-e5u.25.1 behavior).
 
          ``safety_headroom`` is applied uniformly across all three
-         dimensions for one legible knob, but it is only an approximation
-         for ENIs: it does NOT model the up-to-200% task duplication ECS
-         permits mid-rolling-deploy for non-stateful services
-         (deployment_maximum_percent=200 in services.tf.j2) — a 2-replica
-         service can briefly need 4 ENI slots while a deploy is in flight.
-         Left as a follow-up; bump ``safety_headroom`` or ``ec2_capacity.max``
-         explicitly if tasks sit PENDING for ENIs during rolling deploys.
+         dimensions for one legible knob.
+
+         ``size_for_rolling_deploy`` (rc-anl6, ``ec2_capacity.
+         size_for_rolling_deploy``) chooses WHICH demand those three
+         dimensions are summed over. Default False sums steady-state
+         ``replicas``. True sums ``peak_replicas`` instead — the up-to-200%
+         task duplication ECS permits mid-rolling-deploy for non-stateful
+         services (``deployment_maximum_percent`` in services.tf.j2, 100 for
+         stateful ones) — so the fleet can hold a deploy without the ASG
+         scaling out first. It is opt-in because it raises the instance count
+         of every stack that turns it on, typically by 1.5-2x, and that is a
+         cost decision rather than rc's to make silently. With it off the
+         provider still WARNS when peak demand exceeds the sized fleet, so
+         the choice is informed rather than invisible.
       3. min_size = max(1, desired_size - 1). max_size = min(max_cap, desired_size * 2).
 
     Raises ``ValueError`` if no shape in the ladder fits the largest task, or
@@ -247,7 +280,12 @@ def auto_size(
     explicitly.
     """
     tasks = list(tasks)
-    total_task_count = sum(t.replicas for t in tasks)
+    replicas_of = (
+        (lambda t: t.peak_replicas)
+        if size_for_rolling_deploy
+        else (lambda t: t.replicas)
+    )
+    total_task_count = sum(replicas_of(t) for t in tasks)
     demands = [t for t in tasks if t.cpu_units > 0 or t.memory_mib > 0]
     if not demands:
         shape = ladder[0]
@@ -269,8 +307,8 @@ def auto_size(
             f"instance_type explicitly"
         )
 
-    total_cpu = sum(t.cpu_units * t.replicas for t in demands)
-    total_mem = sum(t.memory_mib * t.replicas for t in demands)
+    total_cpu = sum(t.cpu_units * replicas_of(t) for t in demands)
+    total_mem = sum(t.memory_mib * replicas_of(t) for t in demands)
 
     instance_cpu = shape.vcpu * 1024
     instance_mem = shape.memory_gib * 1024
@@ -281,6 +319,80 @@ def auto_size(
     desired = max(1, by_cpu, by_mem, by_eni)
 
     return _finalize_sizing(shape, desired, max_cap)
+
+
+@dataclass
+class FleetPressure:
+    """How hard a fleet of ``shape`` is squeezed by a set of task demands.
+
+    Computed for a single (shape, instance count) pair so the provider can
+    say something concrete instead of "it might be tight": how many
+    instances steady state needs, how many a rolling deploy needs, and
+    whether the shape binpacks at all.
+    """
+
+    shape: InstanceShape
+    steady_instances: int
+    peak_instances: int
+    # Services whose single-task cpu request meets or exceeds the whole
+    # instance's CPU. One task per instance, no binpacking, and therefore no
+    # cost advantage over Fargate — which is the entire reason to run EC2.
+    cpu_saturating_tasks: list[str] = field(default_factory=list)
+    steady_task_count: int = 0
+    peak_task_count: int = 0
+
+    @property
+    def binpacks(self) -> bool:
+        """True when steady state puts more than one task on some instance."""
+        return (
+            self.steady_instances > 0 and self.steady_task_count > self.steady_instances
+        )
+
+
+def measure_fleet(
+    shape: InstanceShape,
+    tasks: Iterable[EC2TaskDemand],
+    safety_headroom: float = 1.0,
+) -> FleetPressure:
+    """Instances ``shape`` needs at rest and mid-rolling-deploy.
+
+    Both numbers take the max across the same three dimensions auto_size()
+    uses — CPU, memory and awsvpc task ENIs. The only difference is that the
+    peak figure counts each service's ``peak_replicas`` instead of its
+    steady ``replicas``, which is what ECS actually permits to be running
+    while a deploy is in flight (rc-anl6).
+
+    ``safety_headroom`` defaults to 1.0 here, unlike auto_size(): this
+    measures the demand as declared, so a caller reporting numbers to a user
+    quotes real task counts rather than padded ones.
+    """
+    tasks = list(tasks)
+    demands = [t for t in tasks if t.cpu_units > 0 or t.memory_mib > 0]
+    instance_cpu = shape.vcpu * 1024
+    instance_mem = shape.memory_gib * 1024
+
+    def _instances(replica_of) -> int:
+        by_cpu = by_mem = 0
+        if demands:
+            total_cpu = sum(t.cpu_units * replica_of(t) for t in demands)
+            total_mem = sum(t.memory_mib * replica_of(t) for t in demands)
+            by_cpu = math.ceil(total_cpu * safety_headroom / instance_cpu)
+            by_mem = math.ceil(total_mem * safety_headroom / instance_mem)
+        by_eni = _instances_needed_for_enis(
+            shape, sum(replica_of(t) for t in tasks), safety_headroom
+        )
+        return max(1, by_cpu, by_mem, by_eni) if tasks else 0
+
+    return FleetPressure(
+        shape=shape,
+        steady_instances=_instances(lambda t: t.replicas),
+        peak_instances=_instances(lambda t: t.peak_replicas),
+        cpu_saturating_tasks=sorted(
+            t.name for t in demands if t.cpu_units >= instance_cpu
+        ),
+        steady_task_count=sum(t.replicas for t in tasks),
+        peak_task_count=sum(t.peak_replicas for t in tasks),
+    )
 
 
 def _instances_needed_for_enis(
@@ -311,7 +423,9 @@ def _finalize_sizing(shape: InstanceShape, desired: int, max_cap: int) -> Sizing
             f"auto-sizing needs {desired} {shape.name} instances to cover the "
             f"declared EC2 task demand, but max_cap={max_cap}; raise "
             f"provider_config.ecs.ec2_capacity.max explicitly, reduce replica "
-            f"counts, or set instance_type to a larger shape"
+            f"counts, set instance_type to a larger shape, or turn off "
+            f"ec2_capacity.size_for_rolling_deploy if it is on (it sizes for "
+            f"peak deploy demand, which is up to 2x steady state)"
         )
     max_size = min(max_cap, max(desired * 2, desired + 1))
     min_size = max(1, desired - 1)

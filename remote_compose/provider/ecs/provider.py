@@ -39,11 +39,13 @@ from ..base import (
     StatusReport,
 )
 from .autosize import (
+    DEPLOYMENT_MAX_PERCENT_DEFAULT,
     EC2TaskDemand,
     ENI_RESERVED_FOR_PRIMARY,
     KNOWN_INSTANCE_SHAPES,
     auto_size,
     check_fixed_shape_capacity,
+    measure_fleet,
 )
 from .iam_plan import IamPlan, build_iam_plan
 from .plan_analysis import (
@@ -1593,6 +1595,16 @@ class ECSProvider(Provider):
                         cpu_units=spec.cpu,
                         memory_mib=spec.memory,
                         replicas=spec.replicas,
+                        # rc-anl6: capacity has to hold a ROLLING DEPLOY, not
+                        # just steady state. Take the same
+                        # deployment_maximum_percent services.tf.j2 renders
+                        # for this service — 100 for stateful (stop-then-
+                        # start, so no duplication) and 200 otherwise — so
+                        # peak demand is modeled per-service rather than as a
+                        # blanket doubling of the fleet.
+                        deployment_maximum_percent=(
+                            100 if stateful else DEPLOYMENT_MAX_PERCENT_DEFAULT
+                        ),
                     )
                 )
             if spec.public and spec.port and default_public is None:
@@ -4835,7 +4847,18 @@ class ECSProvider(Provider):
             # advice has to actually change what auto_size() computes, or
             # it's a dead end.
             try:
-                sizing = auto_size(ec2_demands, max_cap=user_cfg.get("max", 10))
+                sizing = auto_size(
+                    ec2_demands,
+                    max_cap=user_cfg.get("max", 10),
+                    # rc-anl6: opt-in. Off (default) sizes for steady state,
+                    # exactly as before, and the fleet-pressure warning below
+                    # reports what a roll would need. On sizes for peak
+                    # rolling-deploy demand instead — no PENDING window, at
+                    # typically 1.5-2x the instances.
+                    size_for_rolling_deploy=bool(
+                        user_cfg.get("size_for_rolling_deploy", False)
+                    ),
+                )
             except ValueError as exc:
                 # auto_size() raises bare ValueError (it's a standalone,
                 # provider-agnostic module with no ProviderConfigError
@@ -4877,7 +4900,93 @@ class ECSProvider(Provider):
             **_resolve_root_volume_options(user_cfg),
         }
         self._warn_on_shared_root_volume(resolved, ec2_demands)
+        self._warn_on_ec2_fleet_pressure(resolved, ec2_demands)
         return resolved
+
+    def _warn_on_ec2_fleet_pressure(
+        self, resolved: dict, ec2_demands: list[EC2TaskDemand]
+    ) -> None:
+        """Flag EC2 fleets that are correct at rest and wrong during a deploy.
+
+        rc-anl6. auto_size() picks the smallest shape that fits the largest
+        single task and sizes for STEADY STATE. ECS permits up to 200% task
+        duplication during a rolling deploy, so the fleet it produces can be
+        right at rest and badly undersized at the only moment that matters.
+        Three separate findings, all cheap and all silent before this:
+
+        1. A service whose cpu request meets or exceeds the whole instance's
+           CPU. debuggai-api's celery-worker requests exactly 2048 units and
+           the smallest fitting shape, t3.large, is exactly 2048. Both facts
+           are individually reasonable; together they mean one task per
+           instance, zero binpacking, and therefore Fargate economics on an
+           EC2 bill — which defeats the entire reason for choosing EC2.
+        2. A fleet that binpacks nothing at all (tasks == instances), the
+           general form of (1).
+        3. A roll that needs more instances than the fleet holds. Managed
+           scaling (capacity.tf.j2) will scale the ASG out, but EC2 boot plus
+           ECS agent registration takes minutes, and tasks sit PENDING
+           throughout. For this stack that state is not hypothetical —
+           it is the production bug celery-worker's replicas: 3 exists to
+           fix.
+
+        Silently skips instance types rc has no verified numbers for, same
+        "not modeled" convention as InstanceShape.max_enis=None.
+        """
+        if not ec2_demands:
+            return
+        shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
+        if shape is None:
+            return
+        pressure = measure_fleet(shape, ec2_demands)
+        instance_cpu = shape.vcpu * 1024
+        desired = resolved["desired_size"]
+        max_size = resolved["max_size"]
+
+        if pressure.cpu_saturating_tasks:
+            names = ", ".join(pressure.cpu_saturating_tasks)
+            self._warn(
+                f"EC2 sizing: service(s) {names} request at least "
+                f"{instance_cpu} CPU units, which is the ENTIRE CPU of a "
+                f"{shape.name} ({shape.vcpu} vCPU). One task fills one "
+                f"instance, so nothing binpacks and this fleet costs EC2 "
+                f"prices for Fargate density — the cost premise of running "
+                f"on EC2 does not hold. Either lower those services' cpu, or "
+                f"set provider_config.ecs.ec2_capacity.instance_type to a "
+                f"larger shape so more than one task fits per instance."
+            )
+        elif not pressure.binpacks:
+            self._warn(
+                f"EC2 sizing: {pressure.steady_task_count} task(s) across "
+                f"{pressure.steady_instances} {shape.name} instance(s) — no "
+                f"binpacking at all. Paying for EC2 capacity is only cheaper "
+                f"than Fargate when instances host several tasks; at one task "
+                f"per instance there is no saving to collect. Consider a "
+                f"larger instance_type, or staying on FARGATE."
+            )
+
+        if pressure.peak_instances > desired:
+            headroom = (
+                f"and its max of {max_size} cannot reach that either"
+                if pressure.peak_instances > max_size
+                else f"so the ASG must scale out from {desired} to "
+                f"{pressure.peak_instances} mid-deploy"
+            )
+            self._warn(
+                f"EC2 sizing models steady state, not deploys: this stack "
+                f"runs {pressure.steady_task_count} task(s) at rest but ECS "
+                f"permits up to {pressure.peak_task_count} while a rolling "
+                f"deploy is in flight (deployment_maximum_percent). That "
+                f"peak needs ~{pressure.peak_instances} {shape.name} "
+                f"instance(s) against a desired of {desired}, {headroom}. "
+                f"EC2 boot plus ECS agent registration takes minutes, and "
+                f"tasks sit PENDING for the whole window — the "
+                f"'worker did not pick up the task' failure mode. Set "
+                f"provider_config.ecs.ec2_capacity.size_for_rolling_deploy: "
+                f"true to have rc size for the peak instead (it costs the "
+                f"extra instances continuously), pin "
+                f"ec2_capacity.desired to {pressure.peak_instances} yourself, "
+                f"or accept the PENDING window deliberately."
+            )
 
     def _warn_on_shared_root_volume(
         self, resolved: dict, ec2_demands: list[EC2TaskDemand]
