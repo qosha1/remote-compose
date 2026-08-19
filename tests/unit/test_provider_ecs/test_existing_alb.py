@@ -237,3 +237,71 @@ class TestExistingAlbAcmCertificateAttachment:
             "certificate_arn   = aws_acm_certificate_validation.main.certificate_arn"
             in alb
         )
+
+
+class TestSharedListenerPriorityBand:
+    """rc-4tkc.2: listener-rule priorities must not collide between projects
+    sharing ONE adopted listener.
+
+    `listener_rule_priority` is computed per project as 100 + i*10, so EVERY
+    project's first domained service emits priority 100. That is correct when rc
+    owns the listener — each project has its own. It is broken the moment two
+    projects adopt the SAME listener: priorities are unique per LISTENER in AWS,
+    so the second apply fails with PriorityInUse.
+
+    Verified live 2026-08-19: all four foundry tenants (mcr, tandem, obwbqa,
+    marketing-agents) currently sit at priority 100 on their own ALBs. Collapsing
+    them onto one shared ALB would have failed on the second tenant.
+
+    Fix is an explicit opt-in band rather than a hash of the project name: a hash
+    collision here is silent and priorities are a scarce ordered resource, so the
+    platform assigning bands beats rc guessing.
+    """
+
+    def _emit_with(self, tmp_path, alb_cfg, out_name="tf"):
+        out = tmp_path / out_name
+        ECSProvider().emit_terraform(_ctx(tmp_path, {"existing_alb": alb_cfg}), out)
+        return (out / "alb.tf").read_text()
+
+    def test_priority_base_shifts_the_band(self, tmp_path):
+        alb = self._emit_with(
+            tmp_path, {**EXISTING_ALB, "listener_rule_priority_base": 2000}
+        )
+        assert "priority     = 2000" in alb
+        assert "priority     = 100\n" not in alb
+
+    def test_default_is_unchanged(self, tmp_path):
+        """Omitting the key keeps today's behaviour exactly."""
+        alb = self._emit_with(tmp_path, EXISTING_ALB, out_name="tf-default")
+        assert "priority     = 100" in alb
+
+    def test_two_projects_can_share_one_listener(self, tmp_path):
+        """The actual point: distinct bands produce non-overlapping priorities."""
+        a = self._emit_with(
+            tmp_path, {**EXISTING_ALB, "listener_rule_priority_base": 1000}, "tf-a"
+        )
+        b = self._emit_with(
+            tmp_path, {**EXISTING_ALB, "listener_rule_priority_base": 2000}, "tf-b"
+        )
+
+        import re
+
+        def pri(t):
+            return set(re.findall(r"priority\s+=\s+(\d+)", t))
+
+        assert pri(a) and pri(b)
+        assert not (pri(a) & pri(b)), f"priority collision: {pri(a) & pri(b)}"
+
+    def test_rejects_a_base_outside_the_aws_range(self, tmp_path):
+        """AWS listener-rule priorities are 1..50000. A bad band should fail at
+        emit time, not as an opaque apply-time API error."""
+        with pytest.raises(ProviderConfigError, match="listener_rule_priority_base"):
+            self._emit_with(
+                tmp_path, {**EXISTING_ALB, "listener_rule_priority_base": 0}, "tf-bad"
+            )
+        with pytest.raises(ProviderConfigError, match="listener_rule_priority_base"):
+            self._emit_with(
+                tmp_path,
+                {**EXISTING_ALB, "listener_rule_priority_base": 50001},
+                "tf-bad2",
+            )
