@@ -170,6 +170,28 @@ resource "aws_lb_listener_rule" "{{ dsvc.tf_name }}" {
   }
 }
 {%- endfor %}
+{%- if existing_alb and tls_mode == "acm" %}
+
+# rc-4tkc: when the listener is ADOPTED, rc emits no aws_lb_listener, so the
+# certificate it just minted has nowhere to bind — `certificate_arn` only exists
+# on the listener resource rc is deliberately not creating. Without this the cert
+# is requested, DNS-validated and then never attached, and TLS to the service's
+# domain serves whatever DEFAULT certificate the adopted listener carries: a name
+# mismatch the client sees as an invalid certificate.
+#
+# Attaching it as an SNI certificate is what makes several projects share one
+# ALB — each contributes its own host-based rule (above) AND its own cert here.
+#
+# ACM mode only, on purpose. In manual mode the operator supplied a
+# certificate_arn for a listener they already own, and that cert is typically
+# that listener's DEFAULT — AWS rejects adding a listener's default certificate
+# to it again as an SNI cert. Leaving manual mode untouched also keeps the
+# emitted terraform byte-identical for the original adopt-in-place user.
+resource "aws_lb_listener_certificate" "main" {
+  listener_arn    = {{ https_listener_ref }}
+  certificate_arn = aws_acm_certificate_validation.main.certificate_arn
+}
+{%- endif %}
 {%- else %}
 {%- if not existing_alb %}
 resource "aws_lb_listener" "http" {
