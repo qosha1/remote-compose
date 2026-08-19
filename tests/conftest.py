@@ -3,6 +3,8 @@ Pytest configuration and fixtures.
 """
 
 import os
+import tempfile
+import pathlib
 import pytest
 import django
 
@@ -40,9 +42,43 @@ def pytest_configure():
 # applies to every test in the fast + integration tiers regardless of
 # ordering; snapshot/restore of a ~dozen-to-few-hundred-key dict is
 # microseconds, well inside the 8s per-test runtime budget below.
+# rc-8ikz: AWS shared-config isolation, folded into the same autouse fixture.
+#
+# `_aws_profile_status` resolves a profile through botocore, which reads the real
+# ~/.aws/config. That made 15 unit tests depend on the DEVELOPER'S MACHINE: green
+# on a laptop that happens to have a [default] profile, red on a clean runner with
+#     provider_config.ecs.aws_profile is 'default', but no such profile exists
+# so main's CI was red continuously while every local run was green. A suite that
+# disagrees with CI about the same commit is worse than no suite -- a real
+# regression looks exactly like the standing failure.
+#
+# Pointing AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE at a generated file with
+# a [default] profile makes resolution deterministic WITHOUT mocking: the
+# production code path runs unchanged, it just reads a known file. Both are
+# pointed because botocore merges them, and leaving the credentials file on the
+# developer's ~/.aws/credentials reintroduces the same dependence.
+#
+# Tests that deliberately exercise absent/unknown profiles
+# (test_aws_profile_resolution.py) monkeypatch these same vars per-test and still
+# win: monkeypatch applies after this fixture.
+_AWS_CFG_DIR = pathlib.Path(tempfile.gettempdir()) / "rc-tests-aws-config"
+
+
+def _hermetic_aws_config_env() -> dict:
+    _AWS_CFG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = _AWS_CFG_DIR / "config"
+    creds = _AWS_CFG_DIR / "credentials"
+    if not cfg.exists():
+        cfg.write_text("[default]\nregion = us-west-2\noutput = json\n")
+    if not creds.exists():
+        creds.write_text("")
+    return {"AWS_CONFIG_FILE": str(cfg), "AWS_SHARED_CREDENTIALS_FILE": str(creds)}
+
+
 @pytest.fixture(autouse=True)
 def _isolate_os_environ():
     snapshot = dict(os.environ)
+    os.environ.update(_hermetic_aws_config_env())
     try:
         yield
     finally:
