@@ -131,9 +131,20 @@ def _warnings_for(tmp_path, services, ec2_capacity=None) -> list[str]:
 
 
 class TestFleetPressureWarnings:
-    def test_cpu_saturating_task_is_called_out_as_an_economics_problem(self, tmp_path):
-        """2048 units on a 2048-unit shape places fine — it is not a
-        placement failure, it is a cost failure."""
+    def test_cpu_saturation_is_no_longer_a_thing_on_ec2(self, tmp_path):
+        """startsim-u88y CHANGED THIS. It used to warn that a task requesting a
+        whole instance's CPU means "nothing binpacks... the cost premise of
+        running on EC2 does not hold".
+
+        That warning was diagnosing the RESERVATION, and the reservation is gone:
+        services.tf.j2 now omits task-level cpu on EC2, so a task declaring 2048
+        units reserves nothing and shares the instance CPU. One task no longer
+        fills one instance, so the warning is not merely silent — it would be
+        false.
+
+        The fleet still binpacks; it binpacks on memory and ENI slots, which are
+        the dimensions ECS actually reserves for an EC2 task now.
+        """
         warnings = _warnings_for(
             tmp_path,
             {
@@ -143,9 +154,9 @@ class TestFleetPressureWarnings:
             },
             {"instance_type": "t3.large", "desired": 2, "max": 4},
         )
-        [w] = [x for x in warnings if "celery-worker" in x and "ENTIRE CPU" in x]
-        assert "nothing binpacks" in w
-        assert "does not hold" in w
+        assert not [
+            x for x in warnings if "ENTIRE CPU" in x
+        ], "warned about CPU saturation for a task that no longer reserves CPU"
 
     def test_no_binpacking_at_all_is_reported(self, tmp_path):
         warnings = _warnings_for(
