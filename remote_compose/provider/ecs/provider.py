@@ -542,6 +542,51 @@ def _aws_profile_status(profile: Optional[str]) -> str:
     )
 
 
+def resolve_run_launch(svc: dict, task_def: dict) -> dict[str, Any]:
+    """RunTask kwargs that place a one-off task the way its SERVICE runs.
+
+    rc-fg83. ``run_one_off`` used ``svc.get("launchType") or "FARGATE"``,
+    and that fallback is not a harmless default -- it is wrong precisely when
+    it fires. ``launchType`` and ``capacityProviderStrategy`` are mutually
+    exclusive on a service, so an EC2 service (which rc renders with a
+    capacity provider strategy) reports NO launchType at all. The fallback
+    then sent launchType=FARGATE for a task definition whose
+    requiresCompatibilities is ["EC2"], and RunTask refused it:
+
+        InvalidParameterException: Task definition does not support
+        launch_type FARGATE
+
+    Resolution order, so ``rc run django`` and the django service always
+    agree about where work runs:
+
+      1. The service's own capacityProviderStrategy -- the one-off lands on
+         the same ASG the services use, and engages that provider's managed
+         scaling, which a bare launchType=EC2 would not.
+      2. The service's own launchType.
+      3. The task definition's requiresCompatibilities, preferring FARGATE
+         when it declares both (matching what the service resolution would
+         pick for a task def that can do either).
+      4. Nothing -- let ECS apply the cluster's default capacity provider
+         strategy rather than guess a launch type that may be rejected.
+
+    Never returns both keys: RunTask rejects that combination.
+    """
+    strategy = svc.get("capacityProviderStrategy")
+    if strategy:
+        return {"capacityProviderStrategy": list(strategy)}
+    launch_type = svc.get("launchType")
+    if launch_type:
+        return {"launchType": launch_type}
+    compatibilities = [
+        str(c).upper() for c in (task_def or {}).get("requiresCompatibilities") or []
+    ]
+    if "FARGATE" in compatibilities:
+        return {"launchType": "FARGATE"}
+    if "EC2" in compatibilities:
+        return {"launchType": "EC2"}
+    return {}
+
+
 def _profile_is_resolvable(profile: Optional[str]) -> bool:
     """True only if a named AWS profile actually exists in the shared config.
 
@@ -1976,6 +2021,9 @@ class ECSProvider(Provider):
             )
             ec2_capacity_cfg["subnets_ref"] = ec2_placement["subnets_ref"]
             ec2_capacity_cfg["assign_public_ip"] = ec2_placement["assign_public_ip"]
+            self._warn_on_ec2_one_off_capacity(
+                ctx, ec2_capacity_cfg, ec2_demands, default_launch_type
+            )
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
         # not opted out via bucket_managed=false, terraform creates and
@@ -4525,8 +4573,10 @@ class ECSProvider(Provider):
         primitive for secret-dependent management commands (Django/Rails
         migrate, template sync, ...).
 
-        Reuses the live service's task definition + network config + launch
-        type so the task lands in the same VPC/subnets/SGs. With ``wait``
+        Reuses the live service's task definition, network config and launch
+        mechanism (see ``resolve_run_launch``) so the one-off lands in the
+        same VPC/subnets/SGs and on the same capacity as the service. With
+        ``wait``
         (default), blocks until the task stops, fetches its CloudWatch logs,
         and returns the container's real exit code; without it, returns the
         task ARN immediately (exit 0).
@@ -4549,15 +4599,18 @@ class ECSProvider(Provider):
         if not task_def:
             raise ProviderError(f"rc run: service {service!r} has no task definition")
         net = svc.get("networkConfiguration")
-        launch_type = svc.get("launchType") or "FARGATE"
+
+        # Describe the task def unconditionally: it supplies the container
+        # name to override AND (rc-fg83) the requiresCompatibilities that
+        # decide how this task may legally be launched.
+        td_desc = ecs.describe_task_definition(taskDefinition=task_def).get(
+            "taskDefinition", {}
+        )
 
         # Resolve the container to override. Default to the container whose
         # name matches the service, else the first one in the task def.
         cname = container
         if not cname:
-            td_desc = ecs.describe_task_definition(taskDefinition=task_def).get(
-                "taskDefinition", {}
-            )
             cdefs = td_desc.get("containerDefinitions") or []
             cname = next(
                 (c["name"] for c in cdefs if c.get("name") == service),
@@ -4569,10 +4622,10 @@ class ECSProvider(Provider):
             "taskDefinition": task_def,
             "count": 1,
             "startedBy": "rc-run",
-            "launchType": launch_type,
             "overrides": {
                 "containerOverrides": [{"name": cname, "command": list(command)}]
             },
+            **resolve_run_launch(svc, td_desc),
         }
         if net:
             run_kwargs["networkConfiguration"] = net
@@ -5253,6 +5306,62 @@ class ECSProvider(Provider):
             )
         if eni_trunking is not True:  # pragma: no cover - defensive
             return
+
+    def _warn_on_ec2_one_off_capacity(
+        self,
+        ctx: DeployContext,
+        resolved: dict,
+        ec2_demands: list[EC2TaskDemand],
+        default_launch_type: str,
+    ) -> None:
+        """Flag one-off tasks competing for EC2 capacity nothing sized for.
+
+        rc-fg83 fixed `rc run` launching at all on an EC2 stack. This is the
+        hazard that survives the fix: on Fargate a one-off task always has
+        somewhere to run, but on EC2 it needs a free slot on an instance that
+        already exists. auto_size() models declared SERVICES only, so a
+        `mode: task` lifecycle hook -- the migrate-then-roll ordering rc
+        itself recommends -- is invisible to sizing. If the fleet is full the
+        one-off sits PENDING while the ASG boots an instance, and the deploy
+        step times out.
+
+        Statically detectable, which is the point: today the only signal is a
+        deploy that fails after terraform has already converged.
+        """
+        hooks: list[str] = []
+        for name, spec in sorted((ctx.services or {}).items()):
+            if (spec.launch_type or default_launch_type) != "EC2":
+                continue
+            for hook_name, hook in (getattr(spec, "lifecycle", None) or {}).items():
+                if str((hook or {}).get("mode", "exec")).lower() == "task":
+                    hooks.append(f"{name}.{hook_name}")
+        if not hooks:
+            return
+        shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
+        slots = ""
+        if shape is not None:
+            eni_slots = self._effective_shape(
+                shape, getattr(ctx, "eni_trunking", None)
+            ).task_eni_slots
+            if eni_slots is not None:
+                capacity = eni_slots * int(resolved.get("desired_size") or 1)
+                declared = sum(t.replicas for t in ec2_demands)
+                slots = (
+                    f" This fleet holds about {capacity} awsvpc task(s) against "
+                    f"{declared} declared, leaving roughly "
+                    f"{max(0, capacity - declared)} slot(s) for one-offs."
+                )
+        self._warn(
+            f"EC2 one-off tasks: lifecycle hook(s) {', '.join(hooks)} run as "
+            f"their own ECS task (mode: task), and auto-sizing models declared "
+            f"services only — a one-off needs a free slot on an instance that "
+            f"already exists.{slots} On Fargate a one-off always has somewhere "
+            f"to run; on EC2 a full fleet leaves it PENDING while the ASG boots, "
+            f"and a migrate-before-roll step that times out is a deploy that "
+            f"cannot safely ship a migration. Keep headroom via "
+            f"ec2_capacity.desired, or run migrations with `mode: exec` into a "
+            f"running task."
+        )
 
     def _warn_on_ec2_fleet_pressure(
         self,

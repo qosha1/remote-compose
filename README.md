@@ -713,6 +713,12 @@ provider_config:
   `egress: nat`; declared groups already provision the real
   `aws_nat_gateway` + route table. Omit it and nothing changes (see
   below).
+- One-off tasks (`rc run`, `mode: task` lifecycle hooks) launch on the same
+  capacity as their service — via its capacity provider strategy on EC2, its
+  launch type on Fargate. Note EC2 one-offs need a free slot on an instance
+  that already exists: auto-sizing models declared services only, so a full
+  fleet leaves a `migrate`-before-roll task `PENDING` while the ASG boots. rc
+  warns at plan time when a `mode: task` hook runs on EC2 capacity.
 - **`eni_trunking`** — `auto` (default), `true`, or `false`. With `awsvpc`
   networking every task consumes a whole ENI, and **ENI counts are flat
   across much of an instance family**: an `m5.2xlarge` is twice the box of an
