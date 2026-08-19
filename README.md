@@ -461,7 +461,22 @@ services:
     aliases:                           # extra hostnames same service answers for
       - api.app.example.com            #   (cert SANs + R53 records, no listener rules)
     health_check_path: /health
+
+  redis:
+    type: infrastructure
+    cpu: 256
+    memory: 512
+    # A service that ISN'T in docker-compose.yml has to say what it runs —
+    # compose is the only other place rc reads images from. Set alongside a
+    # compose `build:`, this overrides it: rc deploys this image and builds
+    # nothing for the service.
+    image: redis:7-alpine
 ```
+
+Every service in the deploy set needs an image from somewhere: compose
+`image:`, compose `build:`, or rc.yml `image:`. A service with none of the
+three is rejected at config load rather than deployed against an empty ECR
+repository it would never be able to pull from.
 
 Full schema reference: [ARCHITECTURE.md § rc.yml v2 at a glance](ARCHITECTURE.md#rcyml-v2-at-a-glance).
 

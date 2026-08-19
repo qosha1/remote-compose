@@ -143,6 +143,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             aliases=raw["aliases"] if "aliases" in raw else [],
             # rc-e5u.46.1: optional Dockerfile override.
             dockerfile=raw.get("dockerfile"),
+            # rc-2r1r: pre-built image, for services compose doesn't define
+            # (and as an override for those it does).
+            image=raw.get("image"),
             # Same — preserve raw shape for validate() to inspect.
             dev_volumes=raw["dev_volumes"] if "dev_volumes" in raw else [],
             # rc-e5u.46.4: extra env vars merged into the task def alongside

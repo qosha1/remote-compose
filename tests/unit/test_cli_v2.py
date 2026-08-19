@@ -618,7 +618,9 @@ class TestComposeAutoImport:
 
     def test_rc_yml_service_not_in_compose_still_deploys(self, tmp_path, monkeypatch):
         # Sometimes a service has no compose definition (pre-built image
-        # only, no build context). rc.yml should still deploy it.
+        # only, no build context). rc.yml should still deploy it — declaring
+        # the image it runs, which is what makes the service deployable at
+        # all (rc-2r1r; see tests/unit/test_service_image_required.py).
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
 
         self._write_compose(tmp_path, "  api:\n    image: busybox\n")
@@ -627,7 +629,12 @@ class TestComposeAutoImport:
             p,
             self._v2(
                 services={
-                    "redis": {"cpu": 256, "memory": 512, "type": "infrastructure"},
+                    "redis": {
+                        "cpu": 256,
+                        "memory": 512,
+                        "type": "infrastructure",
+                        "image": "redis:7-alpine",
+                    },
                 }
             ),
         )
@@ -636,6 +643,7 @@ class TestComposeAutoImport:
         ctx = build_deploy_context(v2, raw, p)
         assert "api" in ctx.services
         assert "redis" in ctx.services
+        assert ctx.services["redis"].image == "redis:7-alpine"
 
     def test_include_unknown_service_rejected(self, tmp_path, monkeypatch):
         from remote_compose.cli_v2 import build_deploy_context, load_rc_yml

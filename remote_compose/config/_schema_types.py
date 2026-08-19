@@ -190,6 +190,16 @@ class ServiceV2:
     # rc at an ECS-aware variant (e.g., the one emitted by `rc fix
     # nginx-conf`). See .46.1.
     dockerfile: Optional[str] = None
+    # rc-2r1r: the image this service runs, when rc is not building it.
+    # Required for a service rc.yml declares that compose does not have —
+    # compose is the only other place rc reads images from, so without this
+    # such a service had no resolvable image at all and the task def fell
+    # through to an ECR tag rc never pushes.
+    #
+    # Set alongside a compose `build:` it OVERRIDES that build (same
+    # precedence as `dockerfile` above): rc deploys the declared image and
+    # builds nothing for this service.
+    image: Optional[str] = None
     # Hot-reload mounts for `rc up --dev` (rc-e5u.45.7+). Each entry maps a
     # local source dir into a mount path inside the container; the provider
     # backs them with EFS in dev mode and mounts the EFS access point at the
