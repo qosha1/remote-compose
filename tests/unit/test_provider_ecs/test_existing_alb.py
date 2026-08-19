@@ -165,3 +165,75 @@ class TestExistingAlbValidation:
                 _ctx(tmp_path, {"existing_alb": EXISTING_ALB}, services=svcs),
                 tmp_path / "tf",
             )
+
+
+class TestExistingAlbAcmCertificateAttachment:
+    """rc-4tkc: with an ADOPTED listener, rc must still attach the cert it minted.
+
+    Every existing test in this file runs tls mode=manual, where the operator's
+    certificate is already sitting on the listener they told rc to adopt. That
+    hid a gap in the ACM path: rc emits aws_acm_certificate +
+    aws_acm_certificate_validation for the service's domain, but the only place
+    a certificate is ever bound to a listener is `certificate_arn` on the
+    rc-created `aws_lb_listener "https"` — which the existing_alb branch
+    deliberately does not emit.
+
+    Net effect: the cert is requested, DNS-validated, and then never attached.
+    TLS to that hostname serves whatever default certificate the adopted
+    listener carries, so the client gets a name mismatch.
+
+    This blocks putting several tenants behind one shared ALB, which is the
+    whole point of adopting a listener: each tenant needs its own SNI cert on
+    the shared listener.
+    """
+
+    def _acm_ctx(self, tmp_path, **over):
+        ctx = _ctx(tmp_path, {"existing_alb": EXISTING_ALB}, **over)
+        ctx.rc_yml_v2 = {"tls": {"mode": "acm"}}  # rc mints the cert itself
+        return ctx
+
+    def _emit_acm(self, tmp_path, **over):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(self._acm_ctx(tmp_path, **over), out)
+        return out
+
+    def test_minted_cert_is_attached_to_the_adopted_listener(self, tmp_path):
+        out = self._emit_acm(tmp_path)
+        alb = (out / "alb.tf").read_text()
+
+        assert 'resource "aws_lb_listener_certificate"' in alb, (
+            "rc minted an ACM cert for the domain but never attached it to the "
+            "adopted listener — TLS serves the listener's default cert instead"
+        )
+        assert "listener_arn    = data.aws_lb_listener.https.arn" in alb
+        assert (
+            "certificate_arn = aws_acm_certificate_validation.main.certificate_arn"
+            in alb
+        )
+
+    def test_still_no_rc_managed_listener(self, tmp_path):
+        """The attachment must not smuggle back a listener resource."""
+        alb = (self._emit_acm(tmp_path) / "alb.tf").read_text()
+        assert 'resource "aws_lb_listener" "https"' not in alb
+        assert 'resource "aws_lb" "main"' not in alb
+
+    def test_manual_tls_is_unchanged(self, tmp_path):
+        """Manual mode must stay byte-identical. The operator's cert is already
+        on the listener they adopted; adding it again as an SNI cert fails in
+        AWS when it is that listener's DEFAULT certificate."""
+        alb = (_emit(tmp_path) / "alb.tf").read_text()
+        assert 'resource "aws_lb_listener_certificate"' not in alb
+
+    def test_not_emitted_without_existing_alb(self, tmp_path):
+        """Without adoption rc owns the listener and sets certificate_arn on it
+        directly — a separate attachment would be redundant."""
+        out = tmp_path / "tf2"
+        ctx = _ctx(tmp_path)
+        ctx.rc_yml_v2 = {"tls": {"mode": "acm"}}
+        ECSProvider().emit_terraform(ctx, out)
+        alb = (out / "alb.tf").read_text()
+        assert 'resource "aws_lb_listener_certificate"' not in alb
+        assert (
+            "certificate_arn   = aws_acm_certificate_validation.main.certificate_arn"
+            in alb
+        )
