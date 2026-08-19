@@ -48,6 +48,8 @@ from .autosize import (
     measure_fleet,
 )
 from .iam_plan import IamPlan, build_iam_plan
+from .deploy_preflight import FAIL as _PREFLIGHT_FAIL
+from .deploy_preflight import run_preflight
 from .plan_analysis import (
     detect_task_definition_replacements,
     render_replacement_warning,
@@ -2196,6 +2198,7 @@ class ECSProvider(Provider):
         self.preflight(ctx)
         out_dir = self._tf_dir(ctx)
         self.emit_terraform(ctx, out_dir)
+        self.deploy_preflight(ctx, out_dir)
         runner = self.runner_factory(out_dir)
         runner.init()
         # rc-avcr: on an ignore_task_definition_changes stack, save the plan
@@ -2266,6 +2269,7 @@ class ECSProvider(Provider):
         warnings: list[str] = self._drain_warnings()
         for _w in warnings:
             self._emit(f"  warning: {_w}")
+        self.deploy_preflight(ctx, out_dir)
         # rc-ysh: detect held local state lock BEFORE invoking terraform so
         # we surface the holder PID in <1s instead of inheriting terraform's
         # subprocess-output buffering and retry loops.
@@ -2994,6 +2998,80 @@ class ECSProvider(Provider):
         import sys
 
         print(message, file=sys.stderr)
+
+    def deploy_preflight(
+        self, ctx: DeployContext, out_dir: Path, force: bool = False
+    ) -> Optional[Any]:
+        """Verify the deploy principal BEFORE terraform touches anything.
+
+        rc-g3jy. Checks the terraform binary and its version against the
+        version that wrote the remote state, state read access, lock
+        acquire/release, and every IAM action the just-rendered module will
+        need — reporting the COMPLETE set at once rather than one failed
+        production deploy at a time.
+
+        Runs after emit_terraform because the IAM action set is derived from
+        the emitted ``.tf`` files. Deriving it from a plan instead would need
+        state access, which is one of the things being checked.
+
+        Auto-runs only for a remote (s3) backend, which is what "this stack
+        deploys somewhere that matters" looks like: a local-backend stack has
+        no state bucket or lock table to check, and its credentials are a
+        workstation's. ``force=True`` (``rc preflight``) runs it regardless.
+        Set RC_SKIP_PREFLIGHT=1 to opt out entirely.
+
+        Returns the report, or None when it did not run. Blocking findings
+        raise ProviderConfigError; a failure of the CHECKER itself never
+        breaks a deploy — it degrades to a warning, because a preflight that
+        can grounded a working deploy is worse than no preflight.
+        """
+        if os.environ.get("RC_SKIP_PREFLIGHT"):
+            return None
+        if getattr(ctx, "skip_terraform", False):
+            return None
+        backend_cfg = ctx.tf_backend_config or {}
+        if not force and backend_cfg.get("type") != "s3":
+            return None
+        ecs_cfg = _ecs_cfg(ctx)
+        try:
+            session = self.session_factory(ctx)
+            report = run_preflight(
+                tf_dir=Path(out_dir),
+                backend_cfg=backend_cfg,
+                session=session,
+                region=ecs_cfg.get("region"),
+            )
+        except Exception as exc:  # noqa: BLE001 — the checker is not the job
+            self._warn(
+                f"deploy preflight could not run ({type(exc).__name__}: "
+                f"{exc}); proceeding unchecked."
+            )
+            return None
+
+        for check in report.checks:
+            if check.status != _PREFLIGHT_FAIL and check.remedy:
+                self._warn(f"preflight — {check.name}: {check.detail}")
+        if report.ok:
+            return report
+
+        fragment = report.policy_fragment()
+        detail = report.render_table()
+        message = (
+            "deploy preflight failed — every problem found, not just the "
+            "first:\n" + detail
+        )
+        if fragment:
+            message += (
+                "\n\n  Paste this statement into the deploy role's policy "
+                '(Resource is "*" for speed; narrow it once the deploy '
+                "runs):\n" + fragment
+            )
+        message += (
+            "\n\n  These checks are advisory: iam:SimulatePrincipalPolicy "
+            "does not evaluate SCPs or permission boundaries. Set "
+            "RC_SKIP_PREFLIGHT=1 to proceed anyway."
+        )
+        raise ProviderConfigError(message)
 
     def _task_defs_are_owned_out_of_band(self, ctx: DeployContext) -> bool:
         """True when rc.yml declares terraform is not the source of truth for

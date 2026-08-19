@@ -130,6 +130,54 @@ Scripted. Repeatable. The tracking bead is
 
 ---
 
+## `rc preflight` — every missing prerequisite at once
+
+A stack's FIRST stateful apply is where rc is most dangerous: nothing about
+the terraform path has ever been exercised, and the failure lands on
+production. Moving one stack off `--no-state` cost three failed production
+deploys in a row, each surfacing exactly one missing prerequisite — no
+terraform binary, an S3 403 on the state object, an `aws_profile` that
+doesn't resolve on an OIDC runner. Fixing those by hand then turned up 36
+more missing IAM actions, every one of which would have been another serial
+failure.
+
+```
+rc preflight            # table
+rc preflight --json     # machine-readable
+```
+
+It renders the terraform first, then checks:
+
+- **terraform binary** — present, and new enough.
+- **state backend** — readable by *this* principal, and its recorded
+  `terraform_version` vs the local binary. terraform refuses to operate on
+  state written by a newer version, so pinning another repo's version without
+  checking it against *this* state fails every deploy. A state object that
+  doesn't exist yet is a first apply, not a failure.
+- **state lock** — acquire *and* release, proven against the DynamoDB lock
+  table. A lock somebody else holds is reported, never broken.
+- **deploy principal IAM** — every action the module will call, simulated
+  with `iam:SimulatePrincipalPolicy`, reported **all at once** grouped by
+  service, with a paste-ready policy statement for whatever's missing.
+
+The action set is derived from the `.tf` rc just rendered — not from a
+terraform plan, which would need the state access preflight is checking, and
+not from a fixed list, so the report is about *this* deploy. A stack with no
+`domain:` is never told it needs route53.
+
+Two deliberate limits. Resource types rc has no action mapping for are
+reported as **unchecked** rather than passed silently. And the whole thing is
+advisory: `iam:SimulatePrincipalPolicy` is itself a permission the caller may
+lack (reported as "could not check", never as a pass), and it does not
+evaluate SCPs or permission boundaries — a clean report is evidence, not
+proof.
+
+Preflight also runs automatically at the head of `rc plan` / `rc deploy` for
+stacks with a remote (s3) backend, and blocks on failures. `RC_SKIP_PREFLIGHT=1`
+opts out.
+
+---
+
 ## What rc.yml v2 looks like
 
 ```yaml
