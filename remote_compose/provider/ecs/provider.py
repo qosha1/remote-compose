@@ -768,6 +768,42 @@ def _ecs_cfg(ctx: DeployContext, *, require: tuple[str, ...] = ()) -> dict[str, 
     return ecs
 
 
+def _service_prefix(ctx: DeployContext) -> str:
+    """The prefix rc renders into every ECS service name (rc-py32).
+
+    ``service_name_prefix`` exists because ECS service names are unique per
+    CLUSTER: when several projects adopt one shared cluster they would otherwise
+    all try to own a service called ``django``. rc applies it when RENDERING
+    terraform, so the live service is ``<prefix><name>`` while ``ctx.services``
+    is still keyed by the bare compose name.
+
+    Every runtime path that hands a service name to the ECS API therefore has to
+    add it back, and every path that reads a serviceName off the API has to take
+    it off again (``_compose_service_name``). Without that rc writes
+    ``acme-django`` and then talks to ``django``: status reports every service
+    missing, redeploy updates nothing, exec cannot find a task.
+    """
+    return str(_ecs_cfg(ctx).get("service_name_prefix") or "")
+
+
+def _ecs_service_name(ctx: DeployContext, compose_name: str) -> str:
+    """compose service name -> the live ECS service name."""
+    return f"{_service_prefix(ctx)}{compose_name}"
+
+
+def _compose_service_name(ctx: DeployContext, ecs_name: str) -> str:
+    """Live ECS service name -> the compose name, for reporting.
+
+    Only strips a prefix that is actually there, so an unprefixed project (the
+    default) and a service whose own name happens to start with the prefix text
+    both round-trip unchanged.
+    """
+    prefix = _service_prefix(ctx)
+    if prefix and ecs_name.startswith(prefix):
+        return ecs_name[len(prefix) :]
+    return ecs_name
+
+
 def _destroy_drain_timeout_s(default_s: int = 600) -> int:
     """Bound on each pre-drain poll loop in ``destroy()`` (rc-e5u.25.9).
 
@@ -4004,7 +4040,16 @@ class ECSProvider(Provider):
                     "deploymentCircuitBreaker": {"enable": True, "rollback": True},
                 }
             )
-            candidates = [svc]
+            # rc-py32: the rendered name comes first. Under a shared cluster the
+            # live service is "<prefix><svc>" and a bare "django" simply is not
+            # there; the legacy cluster-prefix probe below cannot supply it,
+            # because cluster_prefix derives from the CLUSTER name (it would try
+            # "foundry-tenants-django", never "acme-django").
+            candidates = []
+            rendered = _ecs_service_name(ctx, svc)
+            if rendered != svc:
+                candidates.append(rendered)
+            candidates.append(svc)
             if cluster_prefix and cluster_prefix != ctx.project:
                 candidates.append(f"{cluster_prefix}-{svc}")
             last_err: Exception | None = None
@@ -4429,7 +4474,12 @@ class ECSProvider(Provider):
         own or are stopped manually -- see this method's unit tests and
         the bead for the tracked follow-up.
         """
-        ec2_services = self._ec2_service_names(ctx)
+        # rc-py32: rendered ECS names, not compose names. _live_ec2_service_names
+        # below returns what AWS actually calls the services, and the two lists
+        # are unioned -- so they have to be in the same namespace or a prefixed
+        # stack drains nothing and "missed" reports every live service as
+        # unknown.
+        ec2_services = [_ecs_service_name(ctx, n) for n in self._ec2_service_names(ctx)]
         # rc-915l: ctx.services is built with require_compose_file=False on
         # this path, so a compose-only service is missing from it entirely
         # once the compose file is gone (ephemeral stacks delete theirs the
@@ -4669,7 +4719,7 @@ class ECSProvider(Provider):
         for svc in targets:
             client.update_service(
                 cluster=cluster,
-                service=svc,
+                service=_ecs_service_name(ctx, svc),
                 forceNewDeployment=True,
             )
         return DeployResult(
@@ -4693,8 +4743,17 @@ class ECSProvider(Provider):
         if not service_names:
             return StatusReport(services=[], cluster_health="inactive")
 
-        resp = client.describe_services(cluster=cluster, services=service_names)
-        reported = {s["serviceName"]: s for s in resp.get("services", [])}
+        resp = client.describe_services(
+            cluster=cluster,
+            services=[_ecs_service_name(ctx, n) for n in service_names],
+        )
+        # Key the report by the COMPOSE name: everything downstream (and the
+        # user) refers to services the way rc.yml does, not the way they are
+        # named in a shared cluster.
+        reported = {
+            _compose_service_name(ctx, s["serviceName"]): s
+            for s in resp.get("services", [])
+        }
 
         # rc-e5u.44.24: query the latest revision in each task definition
         # family so we can flag services running on an older revision (i.e.,
@@ -4883,7 +4942,9 @@ class ECSProvider(Provider):
         ecs = session.client("ecs")
 
         svcs = (
-            ecs.describe_services(cluster=cluster, services=[service]).get("services")
+            ecs.describe_services(
+                cluster=cluster, services=[_ecs_service_name(ctx, service)]
+            ).get("services")
             or []
         )
         if not svcs:
@@ -5075,7 +5136,7 @@ class ECSProvider(Provider):
         try:
             svc_desc = ecs_client.describe_services(
                 cluster=cluster,
-                services=[service],
+                services=[_ecs_service_name(ctx, service)],
             )
             services_list = svc_desc.get("services") or []
             if services_list:
@@ -5085,7 +5146,9 @@ class ECSProvider(Provider):
         while True:
             tasks = (
                 ecs_client.list_tasks(
-                    cluster=cluster, serviceName=service, desiredStatus="RUNNING"
+                    cluster=cluster,
+                    serviceName=_ecs_service_name(ctx, service),
+                    desiredStatus="RUNNING",
                 ).get("taskArns")
                 or []
             )
