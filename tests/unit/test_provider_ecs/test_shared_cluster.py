@@ -6,9 +6,12 @@ tenants to SHARE A CLUSTER. Today rc always creates its own, which puts a hard
 floor of one instance per tenant underneath the whole estate.
 
 Measured on foundry-tenant-obwbqa, the first EC2 tenant (2026-08-19): 6 tasks
-declaring 2304 MiB on an m6i.large that registers 7817 MiB. Three such tenants
-fit on ONE box by memory, but each currently gets its own cluster and therefore
-its own instance. The per-tenant migration cannot pay until this exists.
+declaring 2304 MiB on an m6i.large that registers 7817 MiB -- 29% of memory but
+60% of ENI, because every awsvpc task takes one branch ENI and an m6i.large
+carries 10 of them. ENI slots, not memory, are what a box runs out of. ECS
+places tasks individually, so what an instance holds is 10 tasks from any mix of
+projects; today each project gets its own cluster and therefore its own
+instance. The per-tenant migration cannot pay until this exists.
 
 Two things are needed, and neither is useful without the other:
 
@@ -22,6 +25,8 @@ Two things are needed, and neither is useful without the other:
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from remote_compose.provider import DeployContext, ServiceSpec
@@ -31,7 +36,7 @@ from remote_compose.provider.ecs import ECSProvider
 SHARED = {"name": "foundry-tenants", "capacity_provider": "foundry-tenants-ec2-cp"}
 
 
-def _ctx(tmp_path, **ecs_over):
+def _ctx(tmp_path, services=None, **ecs_over):
     ecs = {
         "region": "us-west-2",
         "cluster": "foundry-tenants",
@@ -48,7 +53,8 @@ def _ctx(tmp_path, **ecs_over):
         provider_config={"ecs": ecs},
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
-        services={
+        services=services
+        or {
             "django": ServiceSpec(
                 name="django", cpu=512, memory=1024, type="application"
             )
@@ -154,3 +160,101 @@ class TestServiceNamePrefix:
         na, nb = ecs_service_names(a), ecs_service_names(b)
         assert na and nb, (na, nb)
         assert not (na & nb), f"collision: {na & nb}"
+
+
+class TestPrefixIsAppliedAtRUNTIME:
+    """The prefix has to reach the ECS API, not just the terraform (rc-py32).
+
+    rc renders a service named "<prefix><name>" but keys ctx.services by the bare
+    compose name, so every runtime path has to add the prefix back. It did not:
+    the value was read once and handed to the template, and nothing else. rc
+    wrote `acme-django` and then asked ECS about `django`.
+
+    The original nine tests for this feature all asserted on rendered terraform,
+    which is exactly why the gap survived them -- they checked what rc writes,
+    never what rc does. These drive the provider instead.
+    """
+
+    @pytest.fixture
+    def mock_session(self):
+        sess = mock.MagicMock()
+        sess.client.return_value = mock.MagicMock()
+        return sess
+
+    @pytest.fixture
+    def provider(self, mock_session):
+        return ECSProvider(session_factory=lambda ctx: mock_session)
+
+    def test_redeploy_targets_the_prefixed_service(
+        self, provider, mock_session, tmp_path
+    ):
+        ctx = _ctx(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
+        provider.redeploy(ctx)
+        kwargs = mock_session.client.return_value.update_service.call_args.kwargs
+        assert kwargs["service"] == "obwbqa-django"
+        assert kwargs["cluster"] == "foundry-tenants"
+
+    def test_status_asks_for_the_prefixed_name(self, provider, mock_session, tmp_path):
+        ecs = mock_session.client.return_value
+        ecs.describe_services.return_value = {"services": []}
+        ctx = _ctx(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
+        provider.status(ctx)
+        assert ecs.describe_services.call_args.kwargs["services"] == ["obwbqa-django"]
+
+    def test_status_reports_under_the_COMPOSE_name(
+        self, provider, mock_session, tmp_path
+    ):
+        """The user asked about `django`; they must not be told about
+        `obwbqa-django`, which appears nowhere in their rc.yml."""
+        ecs = mock_session.client.return_value
+        ecs.describe_services.return_value = {
+            "services": [
+                {
+                    "serviceName": "obwbqa-django",
+                    "runningCount": 1,
+                    "desiredCount": 1,
+                    "events": [{"message": "steady state"}],
+                }
+            ]
+        }
+        ctx = _ctx(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
+        report = provider.status(ctx)
+        names = {s.name for s in report.services}
+        assert names == {"django"}
+        assert next(iter(report.services)).health == "healthy"
+
+    def test_unprefixed_project_is_untouched(self, provider, mock_session, tmp_path):
+        """The default path must issue byte-identical calls to before."""
+        ctx = _ctx(tmp_path)
+        provider.redeploy(ctx)
+        kwargs = mock_session.client.return_value.update_service.call_args.kwargs
+        assert kwargs["service"] == "django"
+
+    def test_a_service_named_like_the_prefix_round_trips(
+        self, provider, mock_session, tmp_path
+    ):
+        """Stripping must not chew into a name that merely starts with the
+        prefix text -- only the prefix rc actually rendered comes off."""
+        ecs = mock_session.client.return_value
+        ecs.describe_services.return_value = {
+            "services": [
+                {
+                    "serviceName": "obwbqa-obwbqa-thing",
+                    "runningCount": 1,
+                    "desiredCount": 1,
+                    "events": [],
+                }
+            ]
+        }
+        ctx = _ctx(
+            tmp_path,
+            services={
+                "obwbqa-thing": ServiceSpec(
+                    name="obwbqa-thing", cpu=256, memory=512, type="application"
+                )
+            },
+            existing_cluster=SHARED,
+            service_name_prefix="obwbqa-",
+        )
+        report = provider.status(ctx)
+        assert {s.name for s in report.services} == {"obwbqa-thing"}
