@@ -2315,6 +2315,29 @@ class ECSProvider(Provider):
                 if existing_cluster
                 else "aws_ecs_cluster.main"
             ),
+            # The ATTRIBUTES differ too, not just the address. The managed
+            # resource exports `.name`; the data source takes `cluster_name` as
+            # its argument and exports no `.name` at all, so swapping only the
+            # prefix renders `data.aws_ecs_cluster.main.name`, which terraform
+            # rejects with "Unsupported attribute". Both spellings live here so a
+            # template never has to know which side it is on.
+            "cluster_name_expr": (
+                "data.aws_ecs_cluster.main.cluster_name"
+                if existing_cluster
+                else "aws_ecs_cluster.main.name"
+            ),
+            "cluster_arn_expr": (
+                "data.aws_ecs_cluster.main.arn"
+                if existing_cluster
+                else "aws_ecs_cluster.main.arn"
+            ),
+            # aws_ecs_service.cluster takes an ARN or a name; the data source has
+            # no `.id`, so adoption passes the arn.
+            "cluster_id_expr": (
+                "data.aws_ecs_cluster.main.arn"
+                if existing_cluster
+                else "aws_ecs_cluster.main.id"
+            ),
             "shared_capacity_provider": shared_capacity_provider,
             "service_name_prefix": service_name_prefix,
             "has_service_discovery": has_service_discovery,
