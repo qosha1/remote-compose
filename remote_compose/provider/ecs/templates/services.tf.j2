@@ -191,8 +191,8 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 }
 
 resource "aws_ecs_service" "{{ svc.tf_name }}" {
-  name            = "{{ svc.name }}"
-  cluster         = aws_ecs_cluster.main.id
+  name            = "{{ service_name_prefix }}{{ svc.name }}"
+  cluster         = {% if existing_cluster %}data.aws_ecs_cluster.main.arn{% else %}aws_ecs_cluster.main.id{% endif %}
   task_definition = aws_ecs_task_definition.{{ svc.tf_name }}.arn
   desired_count   = {{ svc.replicas }}
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).
@@ -229,7 +229,12 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- if svc.launch_type == "EC2" %}
 
   capacity_provider_strategy {
+{%- if existing_cluster %}
+    # The shared cluster stack owns this provider; reference it by name.
+    capacity_provider = "{{ shared_capacity_provider }}"
+{%- else %}
     capacity_provider = aws_ecs_capacity_provider.ec2.name
+{%- endif %}
     weight            = 1
     base              = 1
   }

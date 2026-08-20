@@ -1050,6 +1050,37 @@ class ECSProvider(Provider):
         # data source. The existing listener keeps its own default action, so
         # adopting an ALB requires the public service(s) to declare a domain
         # (host-based routing) — there's no rc-managed catch-all to point.
+        # Shared-cluster adoption (startsim-wyn2). An ECS container instance
+        # registers to exactly ONE cluster, so packing several projects onto the
+        # same EC2 instances requires them to SHARE A CLUSTER — a per-project
+        # cluster puts a hard floor of one instance under every project.
+        #
+        # Measured on foundry-tenant-obwbqa: 6 tasks declaring 2304 MiB on an
+        # m6i.large registering 7817 MiB. Three such tenants fit on ONE box, but
+        # each gets its own cluster and therefore its own instance today.
+        #
+        # A shared stack owns the cluster, the ASG and the capacity provider; the
+        # adopting project emits none of them and references the provider by name.
+        existing_cluster_cfg = ecs_cfg.get("existing_cluster") or {}
+        existing_cluster = bool(existing_cluster_cfg)
+        shared_capacity_provider = existing_cluster_cfg.get("capacity_provider")
+        # ECS service names are unique per CLUSTER. Every tenant has a `django`,
+        # so without a prefix the second one into a shared cluster collides.
+        service_name_prefix = str(ecs_cfg.get("service_name_prefix") or "")
+
+        _lt_default = ecs_cfg.get("default_launch_type", "FARGATE")
+        _any_ec2 = any(
+            (sp.launch_type or _lt_default) == "EC2" for sp in ctx.services.values()
+        )
+        if existing_cluster and _any_ec2 and not shared_capacity_provider:
+            raise ProviderConfigError(
+                "provider_config.ecs.existing_cluster requires "
+                "'capacity_provider' when any service uses the EC2 launch type: "
+                "the adopting project emits no aws_ecs_capacity_provider of its "
+                "own, so it must reference the one the shared cluster stack owns "
+                "by name."
+            )
+
         existing_alb_cfg = ecs_cfg.get("existing_alb") or {}
         existing_alb = bool(existing_alb_cfg)
         existing_alb_arn = existing_alb_cfg.get("arn")
@@ -2226,6 +2257,14 @@ class ECSProvider(Provider):
             "has_public_service": has_public_service,
             "has_build_context_service": has_build_context_service,
             "has_ec2_service": has_ec2_service,
+            # startsim-wyn2: adopting a shared cluster suppresses everything
+            # CLUSTER-scoped — the cluster itself, its capacity-provider
+            # association, and the whole ASG/launch-template/instance-role
+            # stack — because a shared stack owns them. A tenant that also
+            # created an ASG would add its own box back and defeat the point.
+            "existing_cluster": existing_cluster,
+            "shared_capacity_provider": shared_capacity_provider,
+            "service_name_prefix": service_name_prefix,
             "has_service_discovery": has_service_discovery,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
