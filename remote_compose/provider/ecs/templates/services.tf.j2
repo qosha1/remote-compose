@@ -192,7 +192,7 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 
 resource "aws_ecs_service" "{{ svc.tf_name }}" {
   name            = "{{ service_name_prefix }}{{ svc.name }}"
-  cluster         = {{ cluster_ref }}.{% if existing_cluster %}arn{% else %}id{% endif %}
+  cluster         = {{ cluster_id_expr }}
   task_definition = aws_ecs_task_definition.{{ svc.tf_name }}.arn
   desired_count   = {{ svc.replicas }}
   # Required for `aws ecs execute-command` (rc exec / db backup / restore).

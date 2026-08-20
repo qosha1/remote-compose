@@ -296,8 +296,13 @@ class TestAdoptedStackHasNoDanglingClusterReference:
     def test_outputs_resolve_to_the_adopted_cluster(self, tmp_path):
         out = _emit(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
         outputs = (out / "outputs.tf").read_text()
-        assert "data.aws_ecs_cluster.main.name" in outputs
+        # `.cluster_name`, NOT `.name`: the data source takes cluster_name as its
+        # argument and exports no `.name`. An earlier version of this test asserted
+        # `.name` and so encoded the very bug it was meant to catch — which is why
+        # the terraform-validate test below exists.
+        assert "data.aws_ecs_cluster.main.cluster_name" in outputs
         assert "data.aws_ecs_cluster.main.arn" in outputs
+        assert "data.aws_ecs_cluster.main.name" not in outputs
 
     def test_unadopted_outputs_are_unchanged(self, tmp_path):
         """The default path must keep emitting the managed resource."""
@@ -305,3 +310,52 @@ class TestAdoptedStackHasNoDanglingClusterReference:
         outputs = (out / "outputs.tf").read_text()
         assert "aws_ecs_cluster.main.name" in outputs
         assert "data.aws_ecs_cluster.main" not in outputs
+
+
+def _terraform_on_path():
+    import shutil
+
+    return shutil.which("terraform") is not None
+
+
+@pytest.mark.slow  # terraform init downloads the AWS provider (~10s)
+@pytest.mark.skipif(not _terraform_on_path(), reason="terraform binary required")
+def test_adopted_stack_passes_terraform_validate(tmp_path):
+    """The adopted stack must actually be valid HCL, not merely look right.
+
+    Two separate errors reached real AWS before this existed, both invisible to
+    string-matching tests:
+
+      1. outputs.tf still referenced the MANAGED cluster after adoption turned it
+         into a data source -> "Reference to undeclared resource".
+      2. Swapping only the prefix produced data.aws_ecs_cluster.main.name, and the
+         data source has no `.name` -> "Unsupported attribute".
+
+    The second slipped through a test written specifically for the first, because
+    that test asserted on a string I had chosen wrongly. terraform is the only
+    thing here that knows the provider schema; asking it is the whole point.
+
+    tests/contract/test_provider_contract.py already validates the emitted module,
+    but only for the DEFAULT context — adoption was never on that path.
+    """
+    import subprocess
+
+    out = _emit(
+        tmp_path,
+        name="tf-adopted",
+        existing_cluster=SHARED,
+        service_name_prefix="obwbqa-",
+    )
+    init = subprocess.run(
+        ["terraform", "init", "-backend=false", "-input=false"],
+        cwd=out,
+        capture_output=True,
+        text=True,
+    )
+    assert init.returncode == 0, f"terraform init failed:\n{init.stderr}"
+    val = subprocess.run(
+        ["terraform", "validate"], cwd=out, capture_output=True, text=True
+    )
+    assert (
+        val.returncode == 0
+    ), f"terraform validate failed:\n{val.stdout}\n{val.stderr}"

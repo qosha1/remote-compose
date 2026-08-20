@@ -1,9 +1,9 @@
 output "cluster_name" {
-  value = {{ cluster_ref }}.name
+  value = {{ cluster_name_expr }}
 }
 
 output "cluster_arn" {
-  value = {{ cluster_ref }}.arn
+  value = {{ cluster_arn_expr }}
 }
 
 {%- if has_public_service %}
