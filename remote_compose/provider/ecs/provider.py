@@ -1055,9 +1055,14 @@ class ECSProvider(Provider):
         # same EC2 instances requires them to SHARE A CLUSTER — a per-project
         # cluster puts a hard floor of one instance under every project.
         #
-        # Measured on foundry-tenant-obwbqa: 6 tasks declaring 2304 MiB on an
-        # m6i.large registering 7817 MiB. Three such tenants fit on ONE box, but
-        # each gets its own cluster and therefore its own instance today.
+        # The unit that binds is ENI SLOTS, not memory. Every awsvpc task consumes
+        # one branch ENI, and with awsvpcTrunking an m6i.large carries 10 slots
+        # (xlarge 20, 2xlarge 40). Measured on foundry-tenant-obwbqa: 6 tasks
+        # declaring 2304 MiB on an m6i.large registering 7817 MiB is 60% of ENI
+        # but only 29% of memory — so dividing memory overstates how much fits by
+        # 3x. ECS places tasks INDIVIDUALLY, so a project's tasks need not be
+        # co-located; what a box holds is 10 tasks from any mix of projects, and
+        # today each project gets its own cluster and therefore its own instance.
         #
         # A shared stack owns the cluster, the ASG and the capacity provider; the
         # adopting project emits none of them and references the provider by name.
