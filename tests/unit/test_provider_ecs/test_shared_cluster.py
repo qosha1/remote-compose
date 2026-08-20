@@ -258,3 +258,50 @@ class TestPrefixIsAppliedAtRUNTIME:
         )
         report = provider.status(ctx)
         assert {s.name for s in report.services} == {"obwbqa-thing"}
+
+
+class TestAdoptedStackHasNoDanglingClusterReference:
+    """Every reference to the cluster must follow it into the data source.
+
+    This is the miss that failed the first real migration, at `terraform plan`:
+
+        Error: Reference to undeclared resource
+          on outputs.tf line 2, in output "cluster_name":
+           2:   value = aws_ecs_cluster.main.name
+        Did you mean the data resource data.aws_ecs_cluster.main?
+
+    cluster.tf.j2 and services.tf.j2 were branched when adoption was added;
+    outputs.tf.j2 was not. The existing tests all asserted on the file that
+    CHANGED and none on the files that merely referred to it, so a dangling
+    reference rendered clean and only surfaced against real AWS.
+
+    Scanning every rendered .tf for the managed-resource spelling is the cheap
+    generalisation: it catches the next consumer too, without anyone having to
+    remember it exists.
+    """
+
+    def test_no_rendered_file_references_the_managed_cluster(self, tmp_path):
+        out = _emit(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
+        offenders = []
+        for tf in sorted(out.glob("*.tf")):
+            for i, line in enumerate(tf.read_text().splitlines(), 1):
+                # `data.aws_ecs_cluster.main` is correct; the bare resource is not.
+                stripped = line.replace("data.aws_ecs_cluster.main", "")
+                if "aws_ecs_cluster.main" in stripped:
+                    offenders.append(f"{tf.name}:{i}: {line.strip()}")
+        assert not offenders, "dangling managed-cluster reference:\n" + "\n".join(
+            offenders
+        )
+
+    def test_outputs_resolve_to_the_adopted_cluster(self, tmp_path):
+        out = _emit(tmp_path, existing_cluster=SHARED, service_name_prefix="obwbqa-")
+        outputs = (out / "outputs.tf").read_text()
+        assert "data.aws_ecs_cluster.main.name" in outputs
+        assert "data.aws_ecs_cluster.main.arn" in outputs
+
+    def test_unadopted_outputs_are_unchanged(self, tmp_path):
+        """The default path must keep emitting the managed resource."""
+        out = _emit(tmp_path, name="tf-own")
+        outputs = (out / "outputs.tf").read_text()
+        assert "aws_ecs_cluster.main.name" in outputs
+        assert "data.aws_ecs_cluster.main" not in outputs
