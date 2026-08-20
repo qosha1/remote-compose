@@ -296,6 +296,61 @@ VALID_ROOT_VOLUME_TYPES = {"gp2", "gp3", "io1", "io2", "standard"}
 MIN_ROOT_VOLUME_GIB = ECS_AMI_DEFAULT_ROOT_VOLUME_GIB
 
 
+# ECS managed-scaling defaults. target_capacity is what ECS treats as "full": at
+# 80 it holds 20% of the fleet spare and scales OUT to restore that margin.
+# Defaults preserved exactly, so every existing EC2 stack renders byte-identically.
+MANAGED_SCALING_TARGET_DEFAULT = 80
+MANAGED_SCALING_MIN_STEP_DEFAULT = 1
+MANAGED_SCALING_MAX_STEP_DEFAULT = 10
+
+
+def _resolve_managed_scaling(user_cfg: dict) -> dict:
+    """Validate ``ec2_capacity`` managed-scaling knobs (rc-bbq).
+
+    These were hardcoded at 80 / 1..10 in capacity.tf.j2, which is a reasonable
+    default for a fleet meant to absorb bursts and the wrong one for a fleet
+    deliberately packed.
+
+    MEASURED, on the first real EC2 tenant (foundry-tenant-obwbqa, 2026-08-19):
+    6 tasks declaring 2304 MiB on an m6i.large that registers 7817 MiB is 29%
+    utilised, and ECS scaled the ASG to 2 instances to restore its 20% margin.
+    Two boxes for a workload occupying a third of one, and nothing to do with
+    whether it fit.
+
+    target_capacity=100 is legitimate and means "hold no spare": correct when the
+    fleet is packed on purpose and a rolling deploy's headroom is already modelled
+    per-service (rc-anl6 sizes for deployment_maximum_percent), so paying for a
+    second idle box to cover the same roll is buying it twice.
+    """
+
+    def _int(key, default, lo, hi):
+        v = user_cfg.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ProviderConfigError(
+                f"ec2_capacity.{key} must be an integer, got {v!r}"
+            )
+        if not lo <= v <= hi:
+            raise ProviderConfigError(
+                f"ec2_capacity.{key} must be within AWS's accepted range "
+                f"{lo}..{hi}, got {v}"
+            )
+        return v
+
+    target = _int("target_capacity", MANAGED_SCALING_TARGET_DEFAULT, 1, 100)
+    lo = _int("minimum_scaling_step_size", MANAGED_SCALING_MIN_STEP_DEFAULT, 1, 10000)
+    hi = _int("maximum_scaling_step_size", MANAGED_SCALING_MAX_STEP_DEFAULT, 1, 10000)
+    if lo > hi:
+        raise ProviderConfigError(
+            f"ec2_capacity.minimum_scaling_step_size ({lo}) cannot exceed "
+            f"maximum_scaling_step_size ({hi})"
+        )
+    return {
+        "managed_scaling_target": target,
+        "managed_scaling_min_step": lo,
+        "managed_scaling_max_step": hi,
+    }
+
+
 def _resolve_root_volume_options(user_cfg: dict) -> dict:
     """Validate the root-volume knobs under ``provider_config.ecs.ec2_capacity``.
 
@@ -5451,6 +5506,7 @@ class ECSProvider(Provider):
             "spot_weight": user_cfg.get("spot_weight", 3),
             **_resolve_imds_options(user_cfg),
             **_resolve_root_volume_options(user_cfg),
+            **_resolve_managed_scaling(user_cfg),
         }
         self._warn_on_shared_root_volume(resolved, ec2_demands, eni_trunking)
         self._warn_on_ec2_fleet_pressure(
