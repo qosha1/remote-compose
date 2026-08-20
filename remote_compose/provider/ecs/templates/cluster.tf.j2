@@ -1,3 +1,13 @@
+{%- if existing_cluster %}
+# Adopt a cluster a SHARED stack owns (startsim-wyn2). An ECS container instance
+# registers to exactly ONE cluster, so packing several projects onto the same EC2
+# instances requires them to share one. This project creates nothing cluster-scoped:
+# not the cluster, not its capacity-provider association (which every adopter would
+# otherwise fight over, each apply reverting the last), and not the ASG.
+data "aws_ecs_cluster" "main" {
+  cluster_name = var.cluster_name
+}
+{%- else -%}
 resource "aws_ecs_cluster" "main" {
   name = var.cluster_name
 
@@ -23,6 +33,8 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
     weight            = 1
   }
 }
+
+{%- endif %}
 
 resource "aws_cloudwatch_log_group" "tasks" {
   name              = "/ecs/${var.project}"

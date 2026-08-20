@@ -1,4 +1,8 @@
-{%- if has_ec2_service %}
+{%- if has_ec2_service and not existing_cluster %}
+{#- startsim-wyn2: an adopting project emits NO capacity of its own. The
+    shared cluster stack owns the ASG, launch template, instance role and
+    capacity provider; a tenant that created its own would add a box back
+    and defeat the point of sharing one. #}
 # ------------------------------------------------------------------
 # EC2 capacity for EC2-launch services
 # ------------------------------------------------------------------
