@@ -1208,3 +1208,63 @@ class TestEc2DropsTaskLevelCpu:
             f"ASG sized to {desired.group(1)} instances — still provisioning for "
             "a CPU reservation the task definitions no longer make"
         )
+
+
+class TestManagedScalingIsConfigurable:
+    """rc-bbq: capacity.tf.j2 hardcoded target_capacity=80 / step 1..10.
+
+    target_capacity is what ECS managed scaling treats as "full". At 80 it keeps
+    20% of the fleet spare, and it scales OUT to restore that margin — so a small
+    stack provisions instances it has no work for.
+
+    Measured live on the first EC2 tenant (foundry-tenant-obwbqa, 2026-08-19):
+    6 tasks declaring 2304 MiB on an m6i.large registering 7817 MiB = 29%
+    utilised, and the ASG went to DesiredCapacity=2. Two boxes for a workload
+    that fits in a third of one. Nothing to do with fit; entirely this knob.
+
+    100 is a legitimate value and means "do not hold spare capacity" — correct
+    when the fleet is deliberately packed and a rolling deploy's headroom is
+    already modelled per-service (rc-anl6).
+    """
+
+    def _capacity_tf(self, tmp_path, **cap):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            _ctx(
+                tmp_path,
+                {"web": _svc("web", "EC2", memory=512)},
+                ec2_capacity={"instance_type": "m6i.large", **cap},
+            ),
+            out,
+        )
+        return (out / "capacity.tf").read_text()
+
+    def test_defaults_are_unchanged(self, tmp_path):
+        """Every existing EC2 stack must render byte-identically."""
+        tf = self._capacity_tf(tmp_path)
+        assert "target_capacity           = 80" in tf
+        assert "minimum_scaling_step_size = 1" in tf
+        assert "maximum_scaling_step_size = 10" in tf
+
+    def test_target_capacity_is_settable(self, tmp_path):
+        tf = self._capacity_tf(tmp_path, target_capacity=100)
+        assert "target_capacity           = 100" in tf
+        assert "target_capacity           = 80" not in tf
+
+    def test_scaling_steps_are_settable(self, tmp_path):
+        tf = self._capacity_tf(
+            tmp_path, minimum_scaling_step_size=1, maximum_scaling_step_size=2
+        )
+        assert "maximum_scaling_step_size = 2" in tf
+
+    @pytest.mark.parametrize("bad", [0, 101, -1])
+    def test_target_capacity_outside_1_100_is_rejected(self, tmp_path, bad):
+        """AWS accepts 1..100. Fail at emit time, not as an opaque API error."""
+        with pytest.raises(ProviderConfigError, match="target_capacity"):
+            self._capacity_tf(tmp_path, target_capacity=bad)
+
+    def test_scaling_step_bounds_are_validated(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="scaling_step"):
+            self._capacity_tf(
+                tmp_path, minimum_scaling_step_size=5, maximum_scaling_step_size=2
+            )

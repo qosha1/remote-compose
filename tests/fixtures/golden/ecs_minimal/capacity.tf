@@ -184,6 +184,10 @@ resource "aws_ecs_capacity_provider" "ec2" {
 
     managed_scaling {
       status                    = "ENABLED"
+      # rc-bbq: target_capacity is what ECS treats as "full". Below it, ECS scales
+      # OUT to restore the margin -- so a packed fleet at 80 buys idle instances it
+      # has no work for. Measured on the first real EC2 tenant: 29% utilised ->
+      # DesiredCapacity 2, for a workload occupying a third of one box.
       target_capacity           = 80
       minimum_scaling_step_size = 1
       maximum_scaling_step_size = 10
