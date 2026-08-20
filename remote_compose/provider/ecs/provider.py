@@ -2304,6 +2304,17 @@ class ECSProvider(Provider):
             # stack — because a shared stack owns them. A tenant that also
             # created an ASG would add its own box back and defeat the point.
             "existing_cluster": existing_cluster,
+            # rc-py32/#67 follow-up: the ONE spelling of "how do I refer to the
+            # cluster". Adoption turns the cluster from a managed resource into a
+            # data source, and every template that names it has to follow. Both
+            # earlier misses in this feature were the same shape -- a consumer
+            # left behind when the producer changed -- so this is a single value
+            # rather than the conditional repeated per template.
+            "cluster_ref": (
+                "data.aws_ecs_cluster.main"
+                if existing_cluster
+                else "aws_ecs_cluster.main"
+            ),
             "shared_capacity_provider": shared_capacity_provider,
             "service_name_prefix": service_name_prefix,
             "has_service_discovery": has_service_discovery,
