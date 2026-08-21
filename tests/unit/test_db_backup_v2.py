@@ -25,6 +25,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
+import remote_compose.cli_commands._dispatchers as dispatchers
 from remote_compose.cli import cli
 
 
@@ -228,7 +229,6 @@ def test_backup_v2_rejects_a_service_not_in_rc_yml(tmp_path):
 # with fake pg_dump/curl on PATH and checks the bytes.
 # --------------------------------------------------------------------------
 
-import remote_compose.cli_commands._dispatchers as dispatchers
 
 FAKE_PG_DUMP = """#!/bin/sh
 prev=""; out=""
@@ -289,7 +289,10 @@ def test_script_splits_the_dump_on_exact_part_boundaries(tmp_path, monkeypatch):
     """2.5 parts of data -> full, full, remainder. Wrong dd offsets corrupt
     the dump in a way no mock can see."""
     proc, uploads = _run_script(
-        tmp_path, monkeypatch, dump_kb=2560, part_kb=1024,
+        tmp_path,
+        monkeypatch,
+        dump_kb=2560,
+        part_kb=1024,
         urls=[f"https://p{n}" for n in range(1, 65)],
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -301,7 +304,10 @@ def test_script_splits_the_dump_on_exact_part_boundaries(tmp_path, monkeypatch):
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sh")
 def test_script_uses_one_part_for_a_small_dump(tmp_path, monkeypatch):
     proc, uploads = _run_script(
-        tmp_path, monkeypatch, dump_kb=64, part_kb=1024,
+        tmp_path,
+        monkeypatch,
+        dump_kb=64,
+        part_kb=1024,
         urls=[f"https://p{n}" for n in range(1, 65)],
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -315,7 +321,11 @@ def test_script_refuses_before_uploading_when_parts_do_not_cover_the_dump(
     """Fail fast. A half-uploaded multipart is worse than a clean refusal,
     and the dump already cost however long it cost."""
     proc, uploads = _run_script(
-        tmp_path, monkeypatch, dump_kb=2560, part_kb=1024, urls=["https://p1"],
+        tmp_path,
+        monkeypatch,
+        dump_kb=2560,
+        part_kb=1024,
+        urls=["https://p1"],
     )
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert uploads == [], "must not upload a single byte it cannot finish"
@@ -326,7 +336,11 @@ def test_script_refuses_before_uploading_when_parts_do_not_cover_the_dump(
 def test_script_fails_and_uploads_nothing_when_pg_dump_fails(tmp_path, monkeypatch):
     binv = tmp_path / "bin"
     proc, uploads = _run_script(
-        tmp_path, monkeypatch, dump_kb=1, part_kb=1024, urls=["https://p1"],
+        tmp_path,
+        monkeypatch,
+        dump_kb=1,
+        part_kb=1024,
+        urls=["https://p1"],
     )
     # Replace pg_dump with a failing one and re-run.
     (binv / "pg_dump").write_text("#!/bin/sh\nexit 1\n")
@@ -335,13 +349,19 @@ def test_script_fails_and_uploads_nothing_when_pg_dump_fails(tmp_path, monkeypat
     log.write_text("")
     env = dict(os.environ)
     env.update(
-        PATH=f"{binv}:{env['PATH']}", CURL_LOG=str(log),
-        FAKE_DUMP_KB="1", POSTGRES_PASSWORD="x", POSTGRES_USER="u",
+        PATH=f"{binv}:{env['PATH']}",
+        CURL_LOG=str(log),
+        FAKE_DUMP_KB="1",
+        POSTGRES_PASSWORD="x",
+        POSTGRES_USER="u",
         POSTGRES_DB="d",
     )
     proc = subprocess.run(
         ["sh", "-c", dispatchers._build_dump_script(1), "rcbackup", "https://p1"],
-        env=env, capture_output=True, text=True, timeout=60,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert log.read_text().strip() == "", "nothing may be uploaded"

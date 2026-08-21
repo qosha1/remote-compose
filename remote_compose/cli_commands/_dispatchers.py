@@ -541,7 +541,7 @@ def _build_dump_script(keepalive_s: int = 30) -> str:
         ': > "$KEEP"; '
         f'(while [ -f "$KEEP" ]; do sleep {keepalive_s}; '
         '[ -f "$KEEP" ] && echo "  [keepalive]"; done) & '
-        "trap 'rm -f \"$KEEP\" \"$PART\"' EXIT; "
+        'trap \'rm -f "$KEEP" "$PART"\' EXIT; '
         'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -Fc '
         '-h "${POSTGRES_HOST:-postgres}" -p "${POSTGRES_PORT:-5432}" '
         '-U "${POSTGRES_USER:-postgres}" "${POSTGRES_DB:-postgres}" '
@@ -674,9 +674,7 @@ def _db_backup_v2(
     def _abort(why: str) -> None:
         """Never leave parts behind — orphaned MPU parts bill indefinitely."""
         try:
-            s3.abort_multipart_upload(
-                Bucket=bucket, Key=s3_key, UploadId=upload_id
-            )
+            s3.abort_multipart_upload(Bucket=bucket, Key=s3_key, UploadId=upload_id)
         except Exception as exc:  # noqa: BLE001
             click.echo(
                 f"  warning: could not abort the multipart upload "
