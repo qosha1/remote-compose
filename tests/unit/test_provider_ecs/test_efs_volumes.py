@@ -637,3 +637,73 @@ class TestStatefulDeploymentStrategy:
         # Stateless services keep the AWS default (ENABLED) — we don't
         # emit the field at all so terraform doesn't fight the default.
         assert "availability_zone_rebalancing" not in stateless_block
+
+
+class TestEfsBackupPolicy:
+    """rc-56bq.1 / startsim-36qr.
+
+    aws_efs_file_system has no backup argument, so an EFS can look completely
+    declared and still have zero recovery points -- and nothing surfaces that.
+    startsimpli-prod's postgres ran on EFS for months that way, discovered only
+    when someone tried to take a backup before a risky migration. Backups are
+    therefore ON by default, with rc-test-* carved out as throwaway.
+    """
+
+    def _ctx_vol(self, tmp_path, project, volume):
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[volume],
+                ),
+            },
+        )
+        ctx.project = project
+        return ctx
+
+    def test_backup_policy_on_by_default(self, tmp_path):
+        ctx = self._ctx_vol(
+            tmp_path, "myapp", {"name": "pgdata", "mount": "/data"}
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert 'aws_efs_backup_policy" "pgdata"' in efs_tf
+        assert 'status = "ENABLED"' in efs_tf
+
+    def test_opt_out_per_volume(self, tmp_path):
+        """Disposable volumes (scratch, cache) can decline."""
+        ctx = self._ctx_vol(
+            tmp_path,
+            "myapp",
+            {"name": "scratch", "mount": "/scratch", "efs_backups": False},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert "aws_efs_backup_policy" not in efs_tf
+        # ...but the file system itself is still declared.
+        assert 'aws_efs_file_system" "scratch"' in efs_tf
+
+    def test_rc_test_projects_are_carved_out(self, tmp_path):
+        """Throwaway suite stacks must not accrue daily recovery points."""
+        ctx = self._ctx_vol(
+            tmp_path, "rc-test-abc", {"name": "pgdata", "mount": "/data"}
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        assert "aws_efs_backup_policy" not in (out / "efs.tf").read_text()
+
+    def test_rc_test_can_still_opt_in(self, tmp_path):
+        ctx = self._ctx_vol(
+            tmp_path,
+            "rc-test-abc",
+            {"name": "pgdata", "mount": "/data", "efs_backups": True},
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        assert 'aws_efs_backup_policy" "pgdata"' in (out / "efs.tf").read_text()

@@ -43,6 +43,20 @@ resource "aws_efs_mount_target" "pgdata" {
   subnet_id       = aws_subnet.public[count.index].id
   security_groups = [aws_security_group.efs.id]
 }
+
+# Daily EFS recovery points into the AWS Backup default vault, 35-day
+# retention, managed entirely by AWS. This is a SEPARATE resource from the
+# file system, which is why an EFS can look fully declared and still have no
+# backups at all: aws_efs_file_system has no backup argument to forget.
+# Set efs_backups: false on the volume to opt out.
+resource "aws_efs_backup_policy" "pgdata" {
+  file_system_id = aws_efs_file_system.pgdata.id
+
+  backup_policy {
+    status = "ENABLED"
+  }
+}
+
 resource "aws_efs_access_point" "db__pgdata" {
   file_system_id = aws_efs_file_system.pgdata.id
 

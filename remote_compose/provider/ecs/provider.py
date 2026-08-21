@@ -1625,12 +1625,31 @@ class ECSProvider(Provider):
                 # needs ClientMount perms + the policy's tag conditions).
                 iam_auth = "ENABLED" if vol_entry.get("efs_iam_auth") else "DISABLED"
                 vol_tf = _tf_name(vol_name)
+                # rc-56bq.1: EFS automatic backups, ON by default. An EFS
+                # holding a database with no recovery point is a data-loss
+                # trap, and it is a silent one -- nothing in `rc status` or the
+                # AWS console's EFS list says "this has no backups". It was
+                # found the hard way: startsimpli-prod's postgres ran on EFS
+                # for months with no EFS policy, no AWS Backup plan and no
+                # dumps (startsim-36qr), and nobody noticed until someone tried
+                # to take a backup before a risky migration.
+                #
+                # Off for rc-test-* only. Those are throwaway stacks created
+                # and destroyed by the suite, so daily recovery points are pure
+                # cost -- the same carve-out backup.tf.j2 makes for
+                # force_destroy. Opt out per volume with efs_backups: false on
+                # a genuinely disposable volume (scratch, cache, rendered
+                # assets); do not opt out to save money on a stateful one.
+                efs_backups = vol_entry.get("efs_backups")
+                if efs_backups is None:
+                    efs_backups = not ctx.project.startswith("rc-test-")
                 efs_volumes.setdefault(
                     vol_name,
                     {
                         "name": vol_name,
                         "tf_name": vol_tf,
                         "existing_fs_id": existing_fs_id,
+                        "efs_backups": bool(efs_backups),
                     },
                 )
                 ap_tf = f"{_tf_name(name)}__{vol_tf}"

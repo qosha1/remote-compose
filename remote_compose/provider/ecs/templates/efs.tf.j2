@@ -52,6 +52,21 @@ resource "aws_efs_mount_target" "{{ vol.tf_name }}" {
   subnet_id       = {{ public_subnet_idx_ref }}
   security_groups = [aws_security_group.efs.id]
 }
+{%- if vol.efs_backups %}
+
+# Daily EFS recovery points into the AWS Backup default vault, 35-day
+# retention, managed entirely by AWS. This is a SEPARATE resource from the
+# file system, which is why an EFS can look fully declared and still have no
+# backups at all: aws_efs_file_system has no backup argument to forget.
+# Set efs_backups: false on the volume to opt out.
+resource "aws_efs_backup_policy" "{{ vol.tf_name }}" {
+  file_system_id = aws_efs_file_system.{{ vol.tf_name }}.id
+
+  backup_policy {
+    status = "ENABLED"
+  }
+}
+{% endif %}
 {%- endif %}
 {%- endfor %}
 
