@@ -644,13 +644,15 @@ class TestEfsBackupPolicy:
 
     aws_efs_file_system has no backup argument, so an EFS can look completely
     declared and still have zero recovery points -- and nothing surfaces that.
-    startsimpli-prod's postgres ran on EFS for months that way, discovered only
-    when someone tried to take a backup before a risky migration. Backups are
-    therefore ON by default, with rc-test-* carved out as throwaway.
+    startsimpli-prod's postgres ran that way for months, discovered only when
+    someone tried to take a backup before a risky migration.
+
+    Opt-in for now, NOT because the feature is risky but because
+    elasticfilesystem:PutBackupPolicy is granted nowhere -- see rc-56bq.2.
     """
 
-    def _ctx_vol(self, tmp_path, project, volume):
-        ctx = _ctx(
+    def _ctx_vol(self, tmp_path, volume):
+        return _ctx(
             tmp_path,
             {
                 "postgres": ServiceSpec(
@@ -662,48 +664,46 @@ class TestEfsBackupPolicy:
                 ),
             },
         )
-        ctx.project = project
-        return ctx
 
-    def test_backup_policy_on_by_default(self, tmp_path):
+    def test_off_by_default(self, tmp_path):
+        """Default-on would AccessDenied at apply on every existing stack."""
+        ctx = self._ctx_vol(tmp_path, {"name": "pgdata", "mount": "/data"})
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert "aws_efs_backup_policy" not in efs_tf
+        assert 'aws_efs_file_system" "pgdata"' in efs_tf
+
+    def test_rendered_when_the_volume_opts_in(self, tmp_path):
         ctx = self._ctx_vol(
-            tmp_path, "myapp", {"name": "pgdata", "mount": "/data"}
+            tmp_path, {"name": "pgdata", "mount": "/data", "efs_backups": True}
         )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
         assert 'aws_efs_backup_policy" "pgdata"' in efs_tf
         assert 'status = "ENABLED"' in efs_tf
+        assert "file_system_id = aws_efs_file_system.pgdata.id" in efs_tf
 
-    def test_opt_out_per_volume(self, tmp_path):
-        """Disposable volumes (scratch, cache) can decline."""
-        ctx = self._ctx_vol(
+    def test_opt_in_is_per_volume(self, tmp_path):
+        """A stateful volume can be backed up while scratch is not."""
+        ctx = _ctx(
             tmp_path,
-            "myapp",
-            {"name": "scratch", "mount": "/scratch", "efs_backups": False},
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[
+                        {"name": "pgdata", "mount": "/data", "efs_backups": True},
+                        {"name": "scratch", "mount": "/scratch"},
+                    ],
+                ),
+            },
         )
         out = tmp_path / "tf"
         ECSProvider().emit_terraform(ctx, out)
         efs_tf = (out / "efs.tf").read_text()
-        assert "aws_efs_backup_policy" not in efs_tf
-        # ...but the file system itself is still declared.
-        assert 'aws_efs_file_system" "scratch"' in efs_tf
-
-    def test_rc_test_projects_are_carved_out(self, tmp_path):
-        """Throwaway suite stacks must not accrue daily recovery points."""
-        ctx = self._ctx_vol(
-            tmp_path, "rc-test-abc", {"name": "pgdata", "mount": "/data"}
-        )
-        out = tmp_path / "tf"
-        ECSProvider().emit_terraform(ctx, out)
-        assert "aws_efs_backup_policy" not in (out / "efs.tf").read_text()
-
-    def test_rc_test_can_still_opt_in(self, tmp_path):
-        ctx = self._ctx_vol(
-            tmp_path,
-            "rc-test-abc",
-            {"name": "pgdata", "mount": "/data", "efs_backups": True},
-        )
-        out = tmp_path / "tf"
-        ECSProvider().emit_terraform(ctx, out)
-        assert 'aws_efs_backup_policy" "pgdata"' in (out / "efs.tf").read_text()
+        assert 'aws_efs_backup_policy" "pgdata"' in efs_tf
+        assert 'aws_efs_backup_policy" "scratch"' not in efs_tf
