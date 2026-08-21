@@ -485,6 +485,175 @@ def _db_push_v2(
     return True
 
 
+def _build_dump_script(presigned_url: str) -> str:
+    """Generate a /bin/sh script that pg_dumps the DB and PUTs it to S3.
+
+    Runs inside the target ECS container. POSTGRES_HOST/PORT/USER/DB/PASSWORD
+    come from the container's own env (the provider already wires them from
+    secrets), so nothing about the database is interpolated from the laptop.
+
+    The container needs pg_dump and curl and NOTHING ELSE — no aws CLI, and no
+    S3 grant on the task role, because a presigned URL carries the SIGNER's
+    permissions. That is worth stating because the obvious reading (`aws s3 cp`,
+    as export_tenant_db.sh does for tenants) is what makes people believe an
+    image "cannot dump AND upload" and go build one that can.
+
+    Dump to a file, then PUT it. Not a pipe: a presigned PUT needs a
+    Content-Length up front, and `curl -T -` sends chunked, which S3 rejects.
+
+    pg_dump's major version must be >= the server's or it refuses outright,
+    so a version mismatch surfaces here as a non-zero exit rather than a
+    truncated dump.
+    """
+    return (
+        "DUMP=/tmp/_rc_backup.dump; "
+        # SSM closes an idle session; a large pg_dump is silent for minutes.
+        '(while true; do sleep 30; echo "  [keepalive]"; done) & KA=$!; '
+        "trap 'kill $KA 2>/dev/null' EXIT; "
+        'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -Fc '
+        '-h "${POSTGRES_HOST:-postgres}" -p "${POSTGRES_PORT:-5432}" '
+        '-U "${POSTGRES_USER:-postgres}" "${POSTGRES_DB:-postgres}" '
+        '-f "$DUMP" || { echo "rc db backup: pg_dump failed"; '
+        'rm -f "$DUMP"; exit 1; }; '
+        'SIZE=$(wc -c < "$DUMP"); echo "dump bytes: $SIZE"; '
+        '[ "$SIZE" -gt 0 ] || { echo "rc db backup: pg_dump produced an '
+        'empty file"; rm -f "$DUMP"; exit 1; }; '
+        # -f so an S3 error document is a non-zero exit, not a "successful"
+        # upload of an XML error body.
+        f'curl -fsS -X PUT -T "$DUMP" "{presigned_url}" || '
+        '{ echo "rc db backup: upload failed"; rm -f "$DUMP"; exit 1; }; '
+        'rm -f "$DUMP"; echo "uploaded"'
+    )
+
+
+def _db_backup_v2(
+    config_path: Optional[str],
+    service: Optional[str],
+) -> bool:
+    """rc db backup for v2 stacks: pg_dump in-container → presigned PUT → S3.
+
+    Returns True when handled (rc.yml v2 detected), else False so the
+    caller can fall back to the v1 pipeline.
+
+    rc-56bq. The v1 path resolves its exec target through rc's LOCAL Django
+    ORM (ECSCluster / ECSService rows), which a terraform-managed v2 stack
+    never populates — so `rc db backup` died "Service 'django' not found"
+    while the service was declared in rc.yml and running in AWS. It also
+    required a PTY (so it could not run unattended) and never checked that
+    the object landed. This mirrors _db_push_v2: Provider.exec resolves the
+    task from live AWS, runs non-interactive, and returns a real exit code.
+    """
+    from datetime import datetime, timezone
+
+    loaded = _load_v2_if_present(config_path, strict=True)
+    if loaded is None:
+        return False
+    path, raw, v2 = loaded
+
+    from remote_compose.cli_v2 import (
+        build_deploy_context,
+        resolve_provider,
+    )
+
+    backup_cfg = v2.backup
+    if not backup_cfg or not backup_cfg.bucket:
+        click.echo(
+            "rc db backup: rc.yml v2 must declare backup.bucket.\n\n"
+            "  backup:\n"
+            "    bucket: my-project-db-dumps\n"
+            "    service: django",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    bucket = backup_cfg.bucket
+    target_service = service or backup_cfg.service
+    if not target_service:
+        click.echo(
+            "rc db backup: backup.service not set in rc.yml and --service "
+            "not passed. Specify which service container has pg_dump.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if target_service not in v2.services:
+        click.echo(
+            f"rc db backup: service {target_service!r} not in rc.yml.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    ecs_cfg = (v2.provider_config or {}).get("ecs") or {}
+    region = ecs_cfg.get("region")
+    aws_profile = ecs_cfg.get("aws_profile")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    s3_key = f"{v2.project}/{v2.project}-{timestamp}.dump"
+    s3_uri = f"s3://{bucket}/{s3_key}"
+
+    import boto3
+
+    session = boto3.Session(region_name=region, profile_name=aws_profile)
+    s3 = session.client("s3")
+    presigned = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket, "Key": s3_key},
+        ExpiresIn=7200,
+    )
+
+    click.echo(f"\nrc db backup v2 — {v2.project}")
+    click.echo(f"  source:  {target_service} container")
+    click.echo(f"  dest:    {s3_uri}")
+    click.echo(
+        "\n  [1/2] Dumping (this may take a while for large databases)...\n"
+    )
+
+    # Dumps from a live container; emits no terraform, so a missing compose
+    # file must not block it (startsim-wxb7, same as rc db push).
+    deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
+    provider = resolve_provider(v2)
+    result = provider.exec(
+        deploy_ctx,
+        target_service,
+        ["sh", "-c", _build_dump_script(presigned)],
+        timeout=7200,
+    )
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.stderr:
+        click.echo(result.stderr, nl=False, err=True)
+    if result.exit_code != 0:
+        click.echo(
+            f"\n  rc db backup: dump exited {result.exit_code} — "
+            f"nothing was uploaded.",
+            err=True,
+        )
+        raise click.exceptions.Exit(result.exit_code)
+
+    # A backup you have not confirmed exists is not a backup. The v1 path
+    # never did this, so a dump that died mid-stream still read as success.
+    # export_tenant_db.sh (start-simpli-api) head-objects for the same reason.
+    click.echo(f"\n  [2/2] Verifying {s3_uri}...")
+    try:
+        head = s3.head_object(Bucket=bucket, Key=s3_key)
+        size = int(head.get("ContentLength") or 0)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            f"\n  rc db backup: could not verify the uploaded object — "
+            f"{s3_uri} is missing or unreadable ({type(exc).__name__}: {exc}).",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if size <= 0:
+        click.echo(
+            f"\n  rc db backup: {s3_uri} is 0 bytes — the dump did not land.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    click.echo(f"        verified: {size} bytes")
+    click.echo(f"\n  rc db backup: complete — {s3_uri}")
+    return True
+
+
 def _pg_restore_ignored_count(stdout: str, stderr: str) -> Optional[int]:
     """rc-ln1: parse 'pg_restore: warning: errors ignored on restore: N'
     (or 'errors ignored on restore: N') from output. Returns N when
