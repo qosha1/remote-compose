@@ -485,44 +485,91 @@ def _db_push_v2(
     return True
 
 
-def _build_dump_script(presigned_url: str) -> str:
-    """Generate a /bin/sh script that pg_dumps the DB and PUTs it to S3.
+# S3 caps a single PUT at 5 GiB, so the obvious presigned-PUT backup works
+# right up until a database matters. startsimpli-prod's dump is ~6 GiB
+# (startsim-36qr), which is how this was found. Multipart is therefore the ONLY
+# path here — a size branch would leave the large case permanently less tested
+# than the small one, and the small case costs nothing extra: one part.
+#
+# 1 GiB parts x 64 covers 64 GiB. The parts are presigned up front and passed
+# as positional arguments, so the command is ~20 KB (a 316-char URL each) —
+# verified to pass through ecs execute-command, which accepted 20 KB in a live
+# test. Raise MAX together with the part size if a 64 GiB dump ever appears;
+# raising the count alone walks toward the command-length limit.
+_BACKUP_PART_BYTES = 1024 * 1024 * 1024
+_BACKUP_MAX_PARTS = 64
+
+
+def _build_dump_script(keepalive_s: int = 30) -> str:
+    """Generate a /bin/sh script that pg_dumps the DB and uploads it in parts.
 
     Runs inside the target ECS container. POSTGRES_HOST/PORT/USER/DB/PASSWORD
     come from the container's own env (the provider already wires them from
     secrets), so nothing about the database is interpolated from the laptop.
 
-    The container needs pg_dump and curl and NOTHING ELSE — no aws CLI, and no
-    S3 grant on the task role, because a presigned URL carries the SIGNER's
-    permissions. That is worth stating because the obvious reading (`aws s3 cp`,
-    as export_tenant_db.sh does for tenants) is what makes people believe an
-    image "cannot dump AND upload" and go build one that can.
+    The presigned part URLs arrive as POSITIONAL ARGUMENTS ($1, $2, ...), not
+    baked into the script body: Provider.exec shlex-quotes each list element,
+    so a signed URL cannot break out of the command no matter what characters
+    the signature happens to contain.
 
-    Dump to a file, then PUT it. Not a pipe: a presigned PUT needs a
-    Content-Length up front, and `curl -T -` sends chunked, which S3 rejects.
+    The container needs pg_dump, curl and dd, and NOTHING ELSE — no aws CLI,
+    and no S3 grant on the task role, because a presigned URL carries the
+    SIGNER's permissions. Worth stating because the obvious reading (`aws s3
+    cp`, as export_tenant_db.sh does for tenants) is what makes people believe
+    an image "cannot dump AND upload" and go build one that can.
 
-    pg_dump's major version must be >= the server's or it refuses outright,
-    so a version mismatch surfaces here as a non-zero exit rather than a
-    truncated dump.
+    Each part is cut out with dd rather than `split`, so peak disk is the dump
+    plus ONE part instead of twice the dump. That matters: on EC2 capacity the
+    dump lands on the instance's root overlay, shared with every other task on
+    the box.
+
+    pg_dump's major version must be >= the server's or it refuses outright, so
+    a mismatch surfaces here as a non-zero exit rather than a truncated dump.
     """
+    part_mb = _BACKUP_PART_BYTES // (1024 * 1024)
     return (
-        "DUMP=/tmp/_rc_backup.dump; "
-        # SSM closes an idle session; a large pg_dump is silent for minutes.
-        '(while true; do sleep 30; echo "  [keepalive]"; done) & KA=$!; '
-        "trap 'kill $KA 2>/dev/null' EXIT; "
+        "DUMP=/tmp/_rc_backup.dump; PART=/tmp/_rc_backup.part; "
+        "KEEP=/tmp/_rc_backup.keep; "
+        f"PART_MB={part_mb}; "
+        # SSM closes an idle session and a large pg_dump is silent for many
+        # minutes, so something has to talk. The loop is gated on a MARKER FILE
+        # rather than killed on exit: `kill $KA` reaps the subshell but NOT the
+        # `sleep` it is currently blocked in, and that orphan inherits stdout —
+        # so the session's pipe never reaches EOF and any caller reading to EOF
+        # hangs forever. Removing the marker lets the loop retire itself, so
+        # the orphan window is one sleep interval instead of unbounded.
+        ': > "$KEEP"; '
+        f'(while [ -f "$KEEP" ]; do sleep {keepalive_s}; '
+        '[ -f "$KEEP" ] && echo "  [keepalive]"; done) & '
+        "trap 'rm -f \"$KEEP\" \"$PART\"' EXIT; "
         'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -Fc '
         '-h "${POSTGRES_HOST:-postgres}" -p "${POSTGRES_PORT:-5432}" '
         '-U "${POSTGRES_USER:-postgres}" "${POSTGRES_DB:-postgres}" '
         '-f "$DUMP" || { echo "rc db backup: pg_dump failed"; '
-        'rm -f "$DUMP"; exit 1; }; '
+        'rm -f "$DUMP" "$KEEP"; exit 1; }; '
         'SIZE=$(wc -c < "$DUMP"); echo "dump bytes: $SIZE"; '
         '[ "$SIZE" -gt 0 ] || { echo "rc db backup: pg_dump produced an '
-        'empty file"; rm -f "$DUMP"; exit 1; }; '
+        'empty file"; rm -f "$DUMP" "$KEEP"; exit 1; }; '
+        "NPARTS=$(( (SIZE + PART_MB * 1048576 - 1) / (PART_MB * 1048576) )); "
+        # Fail here, not after uploading most of it: the dump already cost
+        # however long it cost, and a half-uploaded multipart is worse than a
+        # clean refusal.
+        '[ "$NPARTS" -le "$#" ] || { echo "rc db backup: dump is $SIZE bytes, '
+        'more than the $# presigned part(s) cover. Raise the part size."; '
+        'rm -f "$DUMP" "$KEEP"; exit 2; }; '
+        'echo "uploading $NPARTS part(s)"; '
+        "i=0; while [ $i -lt $NPARTS ]; do "
+        'URL="$1"; shift; '
+        'dd if="$DUMP" of="$PART" bs=1048576 skip=$(( i * PART_MB )) '
+        "count=$PART_MB 2>/dev/null; "
         # -f so an S3 error document is a non-zero exit, not a "successful"
         # upload of an XML error body.
-        f'curl -fsS -X PUT -T "$DUMP" "{presigned_url}" || '
-        '{ echo "rc db backup: upload failed"; rm -f "$DUMP"; exit 1; }; '
-        'rm -f "$DUMP"; echo "uploaded"'
+        'curl -fsS -X PUT -T "$PART" "$URL" -o /dev/null || '
+        '{ echo "rc db backup: part $(( i + 1 )) upload failed"; '
+        'rm -f "$DUMP" "$PART" "$KEEP"; exit 1; }; '
+        'i=$(( i + 1 )); echo "  part $i/$NPARTS uploaded"; '
+        "done; "
+        'rm -f "$DUMP" "$PART" "$KEEP"; echo "uploaded"'
     )
 
 
@@ -530,7 +577,7 @@ def _db_backup_v2(
     config_path: Optional[str],
     service: Optional[str],
 ) -> bool:
-    """rc db backup for v2 stacks: pg_dump in-container → presigned PUT → S3.
+    """rc db backup for v2 stacks: pg_dump in-container -> presigned multipart -> S3.
 
     Returns True when handled (rc.yml v2 detected), else False so the
     caller can fall back to the v1 pipeline.
@@ -593,45 +640,125 @@ def _db_backup_v2(
 
     session = boto3.Session(region_name=region, profile_name=aws_profile)
     s3 = session.client("s3")
-    presigned = s3.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": bucket, "Key": s3_key},
-        ExpiresIn=7200,
-    )
+
+    # A presigned URL cannot outlive the credentials that signed it. Under an
+    # assumed role (CI) ExpiresIn is silently truncated to the session's
+    # remaining lifetime, and the clock starts HERE — before a dump that can
+    # run for half an hour. Say so rather than letting a 40-minute dump upload
+    # into an expired signature.
+    creds = session.get_credentials()
+    if creds is not None and getattr(creds, "token", None):
+        click.echo(
+            "  note: signing with temporary credentials — the presigned part "
+            "URLs expire when this session does, however large ExpiresIn is. "
+            "A long dump can outlive them; use longer-lived credentials for "
+            "big databases.",
+        )
+
+    mpu = s3.create_multipart_upload(Bucket=bucket, Key=s3_key)
+    upload_id = mpu["UploadId"]
+    part_urls = [
+        s3.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": bucket,
+                "Key": s3_key,
+                "UploadId": upload_id,
+                "PartNumber": n,
+            },
+            ExpiresIn=43200,
+        )
+        for n in range(1, _BACKUP_MAX_PARTS + 1)
+    ]
+
+    def _abort(why: str) -> None:
+        """Never leave parts behind — orphaned MPU parts bill indefinitely."""
+        try:
+            s3.abort_multipart_upload(
+                Bucket=bucket, Key=s3_key, UploadId=upload_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            click.echo(
+                f"  warning: could not abort the multipart upload "
+                f"({type(exc).__name__}: {exc}). Orphaned parts bill until "
+                f"removed: aws s3api abort-multipart-upload --bucket {bucket} "
+                f"--key {s3_key} --upload-id {upload_id}",
+                err=True,
+            )
+        click.echo(f"\n  rc db backup: {why}", err=True)
 
     click.echo(f"\nrc db backup v2 — {v2.project}")
     click.echo(f"  source:  {target_service} container")
     click.echo(f"  dest:    {s3_uri}")
     click.echo(
-        "\n  [1/2] Dumping (this may take a while for large databases)...\n"
+        "\n  [1/3] Dumping + uploading (this may take a while for large "
+        "databases)...\n"
     )
 
     # Dumps from a live container; emits no terraform, so a missing compose
     # file must not block it (startsim-wxb7, same as rc db push).
     deploy_ctx = build_deploy_context(v2, raw, path, require_compose_file=False)
     provider = resolve_provider(v2)
-    result = provider.exec(
-        deploy_ctx,
-        target_service,
-        ["sh", "-c", _build_dump_script(presigned)],
-        timeout=7200,
-    )
+    try:
+        result = provider.exec(
+            deploy_ctx,
+            target_service,
+            # "rcbackup" lands in $0, so the URLs start at $1.
+            ["sh", "-c", _build_dump_script(), "rcbackup", *part_urls],
+            timeout=43200,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _abort(f"exec failed ({type(exc).__name__}: {exc}).")
+        raise click.exceptions.Exit(1)
+
     if result.stdout:
         click.echo(result.stdout, nl=False)
     if result.stderr:
         click.echo(result.stderr, nl=False, err=True)
     if result.exit_code != 0:
-        click.echo(
-            f"\n  rc db backup: dump exited {result.exit_code} — "
-            f"nothing was uploaded.",
-            err=True,
-        )
+        _abort(f"dump exited {result.exit_code} — nothing was uploaded.")
         raise click.exceptions.Exit(result.exit_code)
+
+    # Build the completion from what S3 says it HAS, not from what the
+    # container says it sent. Parsing ETags out of curl would trust the
+    # reporter; ListParts is the authority and doubles as verification.
+    click.echo("\n  [2/3] Completing the multipart upload...")
+    parts: list[dict] = []
+    marker = 0
+    while True:
+        page = s3.list_parts(
+            Bucket=bucket,
+            Key=s3_key,
+            UploadId=upload_id,
+            PartNumberMarker=marker,
+        )
+        parts.extend(page.get("Parts") or [])
+        if not page.get("IsTruncated"):
+            break
+        marker = page.get("NextPartNumberMarker") or 0
+    if not parts:
+        _abort(f"no parts reached {s3_uri} — the dump did not land.")
+        raise click.exceptions.Exit(1)
+    try:
+        s3.complete_multipart_upload(
+            Bucket=bucket,
+            Key=s3_key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"ETag": p["ETag"], "PartNumber": p["PartNumber"]}
+                    for p in sorted(parts, key=lambda x: x["PartNumber"])
+                ]
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _abort(f"complete_multipart_upload failed ({type(exc).__name__}: {exc}).")
+        raise click.exceptions.Exit(1)
 
     # A backup you have not confirmed exists is not a backup. The v1 path
     # never did this, so a dump that died mid-stream still read as success.
     # export_tenant_db.sh (start-simpli-api) head-objects for the same reason.
-    click.echo(f"\n  [2/2] Verifying {s3_uri}...")
+    click.echo(f"  [3/3] Verifying {s3_uri}...")
     try:
         head = s3.head_object(Bucket=bucket, Key=s3_key)
         size = int(head.get("ContentLength") or 0)
@@ -649,7 +776,7 @@ def _db_backup_v2(
         )
         raise click.exceptions.Exit(1)
 
-    click.echo(f"        verified: {size} bytes")
+    click.echo(f"        verified: {size} bytes in {len(parts)} part(s)")
     click.echo(f"\n  rc db backup: complete — {s3_uri}")
     return True
 
