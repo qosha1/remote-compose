@@ -336,7 +336,7 @@ runcmd:
   - npm install -g @anthropic-ai/claude-code
   # bd (beads) — issue tracker the local Claude session expects (settings.json
   # SessionStart hook calls 'bd prime'). v1.0.3 pinned for reproducibility.
-  - 'arch=$(uname -m); case "$arch" in aarch64) bd_arch=arm64 ;; x86_64) bd_arch=amd64 ;; *) bd_arch="" ;; esac; if [ -n "$bd_arch" ]; then curl -sL "https://github.com/steveyegge/beads/releases/download/v1.0.3/beads_1.0.3_linux_${bd_arch}.tar.gz" | tar -xz -C /usr/local/bin bd && chmod +x /usr/local/bin/bd; fi'
+  - 'arch=$(uname -m); case "$arch" in aarch64) bd_arch=arm64 ;; x86_64) bd_arch=amd64 ;; *) bd_arch="" ;; esac; if [ -n "$bd_arch" ]; then curl -sL "https://github.com/gastownhall/beads/releases/download/v1.2.2/beads_1.2.2_linux_${bd_arch}.tar.gz" | tar -xz -C /usr/local/bin bd && chmod +x /usr/local/bin/bd; fi'
   # gh CLI — picks up $GH_TOKEN from the rc-dev-env file (sourced by
   # /etc/profile.d/rc-dev.sh on shell start), so 'gh repo clone' / 'gh pr'
   # work without re-authing in the box. v2.92.0 pinned for reproducibility.
