@@ -410,6 +410,13 @@ RESOURCE_TYPE_ACTIONS: dict[str, list[str]] = {
         "elasticfilesystem:DescribeAccessPoints",
         "elasticfilesystem:TagResource",
     ],
+    # rc-56bq.1: EFS automatic backups. PutBackupPolicy also covers DISABLING
+    # it, so a deploy role without this cannot turn backups off either --
+    # which is the safe direction to fail in.
+    "aws_efs_backup_policy": [
+        "elasticfilesystem:DescribeBackupPolicy",
+        "elasticfilesystem:PutBackupPolicy",
+    ],
     # --- Observability -----------------------------------------------------
     "aws_cloudwatch_log_group": [
         "logs:CreateLogGroup",

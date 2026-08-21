@@ -1625,12 +1625,41 @@ class ECSProvider(Provider):
                 # needs ClientMount perms + the policy's tag conditions).
                 iam_auth = "ENABLED" if vol_entry.get("efs_iam_auth") else "DISABLED"
                 vol_tf = _tf_name(vol_name)
+                # rc-56bq.1: EFS automatic backups. Declare with
+                # efs_backups: true on the volume.
+                #
+                # An EFS holding a database with no recovery point is a
+                # data-loss trap, and a silent one -- nothing in `rc status` or
+                # the console's EFS list says "this has no backups", because
+                # aws_efs_file_system has no backup argument to be missing.
+                # startsimpli-prod's postgres ran that way for months
+                # (startsim-36qr), found only when someone tried to take a
+                # backup before a risky migration. So this SHOULD be the
+                # default.
+                #
+                # It is opt-in anyway, and the reason is not caution about the
+                # feature -- it is that flipping it on by default breaks
+                # deploys. aws_efs_backup_policy needs
+                # elasticfilesystem:PutBackupPolicy, and nothing grants it:
+                # bootstrap's deploy-role policy is derived from the rc.yml
+                # `permissions` block (build.derive_statements), which has no
+                # EFS key at all, and hand-made roles predate the resource
+                # entirely -- startsimpli-prod-github-deploy has ZERO
+                # elasticfilesystem actions today. Rendering the resource by
+                # default would AccessDenied at terraform apply on every
+                # existing stack's next deploy, simultaneously. Loud and
+                # non-destructive, but still an estate-wide outage.
+                #
+                # rc-56bq.2 does it in the safe order: teach derive_statements
+                # to grant the actions, patch the live roles, then flip.
+                efs_backups = bool(vol_entry.get("efs_backups", False))
                 efs_volumes.setdefault(
                     vol_name,
                     {
                         "name": vol_name,
                         "tf_name": vol_tf,
                         "existing_fs_id": existing_fs_id,
+                        "efs_backups": bool(efs_backups),
                     },
                 )
                 ap_tf = f"{_tf_name(name)}__{vol_tf}"

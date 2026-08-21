@@ -12,7 +12,7 @@ from pathlib import Path
 import click
 import yaml
 
-from ._dispatchers import _db_push_v2
+from ._dispatchers import _db_backup_v2, _db_push_v2
 from ._legacy import (
     _bootstrap_django,
     _exec_interactive,
@@ -49,6 +49,14 @@ def db_backup(ctx, service):
       rc db backup
       rc db backup --service django
     """
+    # rc-56bq: v2 first. The v1 body below resolves its exec target through
+    # rc's LOCAL Django ORM, which a terraform-managed v2 stack never
+    # populates — it died "Service 'django' not found" on a service that was
+    # declared in rc.yml and running in AWS. It also needs a PTY and never
+    # verifies the upload. Same shape as `rc db push` above.
+    if _db_backup_v2(ctx.obj.get("config_path"), service):
+        return
+
     config = _load_config(ctx.obj.get("config_path"))
     _set_aws_profile(config)
 

@@ -637,3 +637,73 @@ class TestStatefulDeploymentStrategy:
         # Stateless services keep the AWS default (ENABLED) — we don't
         # emit the field at all so terraform doesn't fight the default.
         assert "availability_zone_rebalancing" not in stateless_block
+
+
+class TestEfsBackupPolicy:
+    """rc-56bq.1 / startsim-36qr.
+
+    aws_efs_file_system has no backup argument, so an EFS can look completely
+    declared and still have zero recovery points -- and nothing surfaces that.
+    startsimpli-prod's postgres ran that way for months, discovered only when
+    someone tried to take a backup before a risky migration.
+
+    Opt-in for now, NOT because the feature is risky but because
+    elasticfilesystem:PutBackupPolicy is granted nowhere -- see rc-56bq.2.
+    """
+
+    def _ctx_vol(self, tmp_path, volume):
+        return _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[volume],
+                ),
+            },
+        )
+
+    def test_off_by_default(self, tmp_path):
+        """Default-on would AccessDenied at apply on every existing stack."""
+        ctx = self._ctx_vol(tmp_path, {"name": "pgdata", "mount": "/data"})
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert "aws_efs_backup_policy" not in efs_tf
+        assert 'aws_efs_file_system" "pgdata"' in efs_tf
+
+    def test_rendered_when_the_volume_opts_in(self, tmp_path):
+        ctx = self._ctx_vol(
+            tmp_path, {"name": "pgdata", "mount": "/data", "efs_backups": True}
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert 'aws_efs_backup_policy" "pgdata"' in efs_tf
+        assert 'status = "ENABLED"' in efs_tf
+        assert "file_system_id = aws_efs_file_system.pgdata.id" in efs_tf
+
+    def test_opt_in_is_per_volume(self, tmp_path):
+        """A stateful volume can be backed up while scratch is not."""
+        ctx = _ctx(
+            tmp_path,
+            {
+                "postgres": ServiceSpec(
+                    name="postgres",
+                    cpu=512,
+                    memory=1024,
+                    type="infrastructure",
+                    volumes=[
+                        {"name": "pgdata", "mount": "/data", "efs_backups": True},
+                        {"name": "scratch", "mount": "/scratch"},
+                    ],
+                ),
+            },
+        )
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(ctx, out)
+        efs_tf = (out / "efs.tf").read_text()
+        assert 'aws_efs_backup_policy" "pgdata"' in efs_tf
+        assert 'aws_efs_backup_policy" "scratch"' not in efs_tf
