@@ -153,7 +153,7 @@ class TestGitSource:
         rendered = GitSource(url="https://github.com/owner/repo.git").render_user_data()
 
         # arch detection + tarball url + extract
-        assert "steveyegge/beads/releases/download" in rendered
+        assert "gastownhall/beads/releases/download" in rendered
         assert "/usr/local/bin/bd" in rendered
         assert "uname -m" in rendered  # arch detect
 
