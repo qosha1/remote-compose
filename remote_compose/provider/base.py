@@ -135,6 +135,17 @@ class ServiceSpec:
     # effect as an EFS mount or a `-beat`/`-scheduler` name, made explicit.
     # Default False = current behavior (rolling deploy for stateless services).
     stateful: bool = False
+    # rc-6akx: per-service rollout percentages, as a mapping with keys
+    # ``minimum_healthy_percent`` (0-100) and ``maximum_percent`` (>=100).
+    # None (the default) keeps rc's zero-downtime 100/200 for stateless
+    # services and the pinned 0/100 stop-then-start for stateful ones —
+    # nothing about an existing stack changes. Set it to trade rollout
+    # capacity for fleet size on services where a brief dip is cheap:
+    # ``{minimum_healthy_percent: 50, maximum_percent: 100}`` replaces tasks
+    # IN PLACE, so a 3-replica EC2 worker pool sizes its ASG by steady state
+    # rather than 2x it. Validated (and rejected on stateful services) by
+    # the ECS provider — see ``_deployment_percents``.
+    deployment: Optional[dict[str, Any]] = None
     # Declared-network placement (rc.yml `network:`). Both REPLACE rc's
     # defaults rather than adding to them.
     #

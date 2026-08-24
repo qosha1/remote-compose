@@ -450,6 +450,23 @@ services:
       - arn: arn:aws:secretsmanager:us-east-2:123:secret:myapp/prod-env-django-AbC
         keys: [DATABASE_URL, REDIS_URL, DJANGO_SECRET_KEY]
 
+  celeryworker:
+    type: worker
+    cpu: 1024
+    memory: 3072
+    replicas: 3
+    # Rollout percentages for THIS service. Omit the block and you get rc's
+    # zero-downtime default (100/200): every old task stays up until a new one
+    # is healthy, so the service briefly runs DOUBLE its tasks. On EC2 that
+    # doubling is not transient — the ASG has to be big enough to hold it, all
+    # month. 50/100 replaces tasks in place instead: 2 of 3 keep working while
+    # the third is replaced, no extra capacity is ever needed, and the fleet is
+    # sized by steady state. Sound for queue-backed work behind no ALB (the
+    # cost is queue latency); NOT for a service serving requests.
+    deployment:
+      minimum_healthy_percent: 50      # 0-100; floor on tasks kept RUNNING
+      maximum_percent: 100             # >=100; ceiling during the roll
+
   nginx:
     type: proxy
     cpu: 256
@@ -765,8 +782,9 @@ provider_config:
   deploy or only steady state. Default `false`: rc sizes the ASG for the
   tasks you declared, exactly as it always has. But ECS permits up to 200%
   task duplication while a deploy is in flight
-  (`deployment_maximum_percent`, rendered as 200 for normal services and 100
-  for stateful ones), so a fleet that is right at rest can be undersized at
+  (`deployment_maximum_percent`, rendered as 200 for normal services, 100 for
+  stateful ones, and whatever `services.<svc>.deployment` declares when it
+  does), so a fleet that is right at rest can be undersized at
   the only moment that matters — managed scaling then adds instances
   mid-deploy, and EC2 boot plus ECS agent registration takes minutes during
   which tasks sit `PENDING`. rc always **warns** when peak demand exceeds
@@ -775,6 +793,20 @@ provider_config:
   costs 1.5–2x the instances continuously, which is why it is opt-in rather
   than the default. Ignored when `instance_type` is set (auto-sizing doesn't
   run at all then) — the warning still fires.
+
+  **It composes with `services.<svc>.deployment`.** The 200% is a per-service
+  default, not a platform constant: a service that declares
+  `deployment: {minimum_healthy_percent: 50, maximum_percent: 100}` rolls in
+  place, so its peak demand *equals* its steady-state demand and it adds
+  nothing for this knob to size for. Turn `maximum_percent: 100` on for the
+  queue-backed workers (which is where the burst usually concentrates — they
+  are the biggest tasks and have the most replicas) and
+  `size_for_rolling_deploy: true` becomes close to free, because the only
+  services still duplicating are the small request-serving ones that genuinely
+  need the overlap. Measured on debuggai-api-prod (2026-08-23): 12 tasks
+  reserving 25.8 GiB run on 5x m5.xlarge, ~34% memory utilised, with the
+  rolling burst — concentrated in two 3-replica celery pools — as the reason
+  the fleet has to be that size at rest.
 - **`root_volume_size` / `root_volume_type` / `root_volume_encrypted`** —
   the container instance's root EBS volume. Omit `root_volume_size` and the
   launch template declares no `block_device_mappings`, so every instance
@@ -940,7 +972,9 @@ model the up-to-200% task duplication ECS permits mid-rolling-deploy for
 non-stateful services, so a 2-replica service can briefly need double its
 steady-state ENI slots while a deploy is in flight. If tasks sit `PENDING`
 for ENIs specifically during rolling deploys, raise
-`ec2_capacity.max`/`safety_headroom` or move to a bigger shape.
+`ec2_capacity.max`/`safety_headroom`, move to a bigger shape, or take the
+duplication away at the source with `services.<svc>.deployment`
+(`maximum_percent: 100` rolls in place and consumes no extra ENI slot).
 
 **Why not ENI trunking (`awsvpcTrunking`) instead?** AWS does offer an
 account-level ECS setting (`aws_ecs_account_setting_default` with

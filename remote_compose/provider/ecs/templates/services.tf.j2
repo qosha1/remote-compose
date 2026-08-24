@@ -212,6 +212,17 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # maximumPercent <= 100". Pin it OFF for stateful services.
   availability_zone_rebalancing = "DISABLED"
 {%- else %}
+{%- if svc.deployment_overridden %}
+  # Rollout percentages declared by rc.yml services.{{ svc.name }}.deployment,
+  # in place of rc's zero-downtime default of 100/200. Below 100 minimum-
+  # healthy, ECS takes serving capacity OUT to make room for replacements
+  # instead of adding it: the roll is in-place, so nothing has to be sized for
+  # a transient second copy of this service -- which is the point on EC2,
+  # where "up to 200% for a few minutes" is what the ASG has to be big enough
+  # to hold all month. The cost is a real dip while the roll runs, so this is
+  # only sound for work that queues (a worker behind no ALB) rather than work
+  # that is dropped. Circuit breaker still auto-rolls-back a bad deploy.
+{%- else %}
   # Zero-downtime rolling deploy: keep 100% of old tasks running until the
   # NEW tasks pass their health check (or reach RUNNING if no healthCheck),
   # allowing up to 200% during the roll. Pair with a container healthCheck
@@ -219,8 +230,9 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # old tasks the instant new ones reach RUNNING, before a worker can accept
   # work. Circuit breaker auto-rolls-back a deploy whose new tasks never go
   # healthy, instead of leaving a degraded/empty pool.
-  deployment_minimum_healthy_percent = 100
-  deployment_maximum_percent         = 200
+{%- endif %}
+  deployment_minimum_healthy_percent = {{ svc.deployment_min_healthy_percent }}
+  deployment_maximum_percent         = {{ svc.deployment_max_percent }}
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -296,6 +308,19 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
 {%- else %}
   launch_type     = "FARGATE"
+{%- if not svc.stateful and svc.deployment_max_percent <= 100 %}
+
+  # rc-6akx: ECS rejects availability_zone_rebalancing alongside
+  # maximumPercent <= 100 ("availability_zone_rebalancing does not support
+  # maximumPercent <= 100"), and NOT rendering the argument does not mean
+  # "off" -- CreateService defaults it to ENABLED and UpdateService keeps
+  # whatever the live service already carries (see the EC2 branch above for
+  # the field's full history). So a Fargate service that asks for an
+  # in-place roll has to pin it explicitly, for the same reason the stateful
+  # branch does. Only rendered when the percentages actually require it: a
+  # service on the default 200% is emitted exactly as before.
+  availability_zone_rebalancing = "DISABLED"
+{%- endif %}
 {%- endif %}
 
   network_configuration {
