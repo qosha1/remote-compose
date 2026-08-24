@@ -229,6 +229,29 @@ class TestAvailabilityZoneRebalancingConflict:
         )
         assert _assignments(worker, "availability_zone_rebalancing") == 1
 
+    def test_fargate_override_is_warned_about(self, tmp_path):
+        """rc deliberately leaves AZ rebalancing ON for Fargate (rc-5a4g), so
+        taking it away has to be said out loud rather than left in a comment
+        inside generated terraform the user may never open."""
+        provider = ECSProvider()
+        provider.emit_terraform(
+            _ctx(tmp_path, self._svc(IN_PLACE), {"default_launch_type": "FARGATE"}),
+            tmp_path / "tf5",
+        )
+        [w] = [x for x in provider._warnings if "AZ rebalancing" in x]
+        assert "worker" in w
+        assert "no ASG to size down" in w
+
+    def test_ec2_override_is_not_warned_about(self, tmp_path):
+        """On EC2 binpack already made the service ineligible and rc-5a4g
+        pins it DISABLED regardless, so there is no trade to report."""
+        provider = ECSProvider()
+        provider.emit_terraform(
+            _ctx(tmp_path, self._svc(IN_PLACE), {"default_launch_type": "EC2"}),
+            tmp_path / "tf6",
+        )
+        assert not [x for x in provider._warnings if "AZ rebalancing" in x]
+
     def test_stateful_fargate_pins_it_exactly_once(self, tmp_path):
         """The stateful branch pins it for its own maximumPercent reason."""
         worker = _block(
@@ -391,14 +414,16 @@ class TestNoStateRollMirrorsIt:
             services=services,
             secrets=[],
         )
+        self.rolled: dict = {}
+        client.update_service.side_effect = lambda **kw: self.rolled.setdefault(
+            kw["service"], kw
+        )
         with (
             patch.object(provider, "session_factory", lambda _c: session),
             patch.object(provider, "_watch_post_rollout_errors", lambda *a, **k: None),
         ):
             provider._force_new_deployments(ctx, names)
-        return {
-            c.kwargs["service"]: c.kwargs for c in client.update_service.call_args_list
-        }
+        return self.rolled
 
     def test_default_roll_is_unchanged(self):
         kw = self._update_kwargs(
@@ -418,6 +443,28 @@ class TestNoStateRollMirrorsIt:
         )
         assert kw["w"]["deploymentConfiguration"]["minimumHealthyPercent"] == 50
         assert kw["w"]["deploymentConfiguration"]["maximumPercent"] == 100
+
+    def test_a_bad_block_rejects_before_anything_is_rolled(self):
+        """On --no-state terraform never runs, so this is the ONLY validation
+        the block gets. Resolving inside the roll loop would deploy the
+        services ahead of the bad one and leave the stack half-rolled on a
+        config rc could have refused before calling AWS at all."""
+        services = {
+            "aaa": ServiceSpec(name="aaa", cpu=1, memory=1, replicas=2),
+            "zzz": ServiceSpec(
+                name="zzz",
+                cpu=1,
+                memory=1,
+                replicas=2,
+                deployment={"minimum_healthy_percent": 100, "maximum_percent": 100},
+            ),
+        }
+        with pytest.raises(ProviderConfigError, match="can never roll"):
+            self._update_kwargs(services, ["aaa", "zzz"])
+        assert self.rolled == {}, (
+            f"rolled {sorted(self.rolled)} before rejecting the config -- the "
+            f"stack is now half-deployed on input rc could have refused"
+        )
 
     def test_stateful_service_still_sends_no_deployment_config(self):
         kw = self._update_kwargs(
@@ -488,11 +535,36 @@ class TestValidationRejectsBadInput:
         -- the deadlock, arrived at by omission rather than by typing it."""
         assert "can never roll" in self._err({"maximum_percent": 100}, replicas=3)
 
-    def test_the_error_names_a_value_that_would_work(self):
+    def test_the_error_names_two_values_that_would_work(self):
+        """A number the user can paste beats "lower it a bit". At 4 replicas,
+        min<=75 permits a stop-then-replace and max>=125 floors to 5 running."""
         msg = self._err(
             {"minimum_healthy_percent": 100, "maximum_percent": 100}, replicas=4
         )
-        assert "75 is the highest" in msg
+        assert "minimum_healthy_percent to at most 75" in msg
+        assert "maximum_percent to at least 125" in msg
+
+    def test_a_maximum_between_100_and_200_still_deadlocks_at_one_replica(self):
+        """maximumPercent rounds DOWN: 150% of 1 floors to 1 running, so the
+        service still cannot roll. "Raise it above 100" would be useless advice
+        to someone already sitting at 150 -- the error has to name 200."""
+        msg = self._err(
+            {"minimum_healthy_percent": 100, "maximum_percent": 150}, replicas=1
+        )
+        assert "can never roll" in msg
+        assert "maximum_percent to at least 200" in msg
+
+    def test_a_maximum_between_100_and_200_is_enough_at_three_replicas(self):
+        """The same 134% that is useless at 1 replica works at 3 -- which is
+        why the advice is computed rather than a constant."""
+        spec = ServiceSpec(
+            name="w",
+            cpu=1,
+            memory=1,
+            replicas=3,
+            deployment={"minimum_healthy_percent": 100, "maximum_percent": 134},
+        )
+        assert _deployment_percents("w", spec) == (100, 134, True)
 
     def test_scaled_to_zero_service_is_not_a_deadlock(self):
         """replicas=0 has no roll to deadlock; raising there would break a

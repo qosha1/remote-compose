@@ -463,6 +463,12 @@ services:
     # the third is replaced, no extra capacity is ever needed, and the fleet is
     # sized by steady state. Sound for queue-backed work behind no ALB (the
     # cost is queue latency); NOT for a service serving requests.
+    # Not available on stateful services (EFS mount, `stateful: true`, or a
+    # -beat/-scheduler name): those are pinned at 0/100 so two tasks never
+    # share a data directory, and rc rejects the block rather than ignore it.
+    # On FARGATE, `maximum_percent: 100` also turns AZ rebalancing off for the
+    # service (ECS rejects the combination) and buys no fleet saving, since
+    # there is no ASG — rc warns when you do it.
     deployment:
       minimum_healthy_percent: 50      # 0-100; floor on tasks kept RUNNING
       maximum_percent: 100             # >=100; ceiling during the roll

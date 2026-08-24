@@ -694,27 +694,40 @@ def _deployment_percents(
                 f"roll. ECS would have to keep {min_running} task(s) healthy "
                 f"while running at most {max_running}, so it can neither start "
                 f"a replacement nor stop an old task, and every deploy of this "
-                f"service hangs until it times out. Lower "
-                f"minimum_healthy_percent (with replicas={replicas}, "
-                f"{_largest_rollable_min_percent(replicas)} is the highest that "
-                f"still leaves room to replace a task in place at "
-                f"maximum_percent=100), or raise maximum_percent above 100."
+                f"service hangs until it times out. Either lower "
+                f"minimum_healthy_percent to at most "
+                f"{_largest_rollable_min_percent(replicas)} (so a task can be "
+                f"stopped and replaced in place), or raise maximum_percent to "
+                f"at least {_smallest_rollable_max_percent(replicas)} (so a "
+                f"replacement can start alongside)."
             )
 
     return DeploymentPercents(min_pct, max_pct, overridden=True)
 
 
 def _largest_rollable_min_percent(replicas: int) -> int:
-    """Biggest minimum_healthy_percent that still rolls at maximum_percent=100.
+    """Biggest minimum_healthy_percent that still permits a stop-then-replace.
 
     Purely for the error message above — a number the user can paste beats
-    "lower it a bit". Returns 0 when no positive value works (replicas=1,
-    where in-place replacement necessarily means going to zero tasks).
+    "lower it a bit". Independent of maximum_percent: stopping first needs no
+    extra capacity at all. Returns 0 at replicas=1, where replacing in place
+    necessarily means going to zero tasks for a moment.
     """
     for pct in range(100, -1, -1):
         if math.ceil(replicas * pct / 100) <= replicas - 1:
             return pct
     return 0
+
+
+def _smallest_rollable_max_percent(replicas: int) -> int:
+    """Smallest maximum_percent leaving room for a replacement to start first.
+
+    ECS rounds maximumPercent DOWN, so the ceiling has to reach replicas+1
+    running tasks: 200 at one replica, but only 134 at three. "Raise it above
+    100" would be wrong advice for anyone already sitting between 100 and 200
+    — 150 at one replica still floors to 1 and still deadlocks.
+    """
+    return math.ceil((replicas + 1) * 100 / replicas)
 
 
 def _default_session_factory(ctx: DeployContext) -> Any:
@@ -1952,6 +1965,32 @@ class ECSProvider(Provider):
             # an rc.yml `deployment:` block overrides them, and the same
             # resolved numbers feed the ASG sizer below.
             deployment = _deployment_percents(name, spec, mount_count=len(svc_mounts))
+            if (
+                deployment.overridden
+                and deployment.maximum <= 100
+                and launch_type != "EC2"
+            ):
+                # ECS refuses availability_zone_rebalancing alongside
+                # maximumPercent <= 100, so services.tf.j2 has to pin it OFF
+                # for this service. On EC2 that costs nothing (binpack already
+                # made the service ineligible, and rc-5a4g pins it there
+                # anyway), but on Fargate rc deliberately leaves rebalancing
+                # ON. Say so out loud: the alternative is a user discovering
+                # it in generated terraform, or not at all. Also worth
+                # knowing that the fleet-size argument for the knob does not
+                # apply here — Fargate bills per task and has no ASG to
+                # shrink, so this only caps concurrent tasks during the roll.
+                self._warn(
+                    f"service {name!r}: deployment.maximum_percent="
+                    f"{deployment.maximum} on a FARGATE service turns AZ "
+                    f"rebalancing OFF for it — ECS rejects "
+                    f"availability_zone_rebalancing with maximumPercent <= "
+                    f"100, so rc must pin it DISABLED. Fargate has no ASG to "
+                    f"size down, so the usual reason for this knob (a fleet "
+                    f"held at 2x steady state to cover the roll) does not "
+                    f"apply; keep it if you are capping concurrent tasks "
+                    f"during a roll on purpose, otherwise drop the block."
+                )
             # rc-kr7: a single-writer EFS volume (postgres data, sqlite) is one
             # access point; replicas>1 runs concurrent tasks against the same
             # dir and corrupts it. min_healthy=0 only protects the ROLL window —
@@ -4265,6 +4304,15 @@ class ECSProvider(Provider):
             if cluster_prefix.endswith(suffix):
                 cluster_prefix = cluster_prefix[: -len(suffix)]
                 break
+        # rc-6akx: resolve EVERY service's rollout percentages before rolling
+        # ANY of them. On the --no-state path terraform never runs, so this is
+        # the first (and only) validation an rc.yml `deployment:` block gets —
+        # resolving inside the loop would roll services 1..n-1 and only then
+        # raise on service n, leaving the stack half-deployed on a config rc
+        # could have rejected before touching AWS at all.
+        deployments = {
+            svc: _deployment_percents(svc, ctx.services.get(svc)) for svc in ordered
+        }
         rolled_names: list[str] = []
         for svc in ordered:
             spec = ctx.services.get(svc)
@@ -4291,7 +4339,7 @@ class ECSProvider(Provider):
             # over. Stateful services keep dep_cfg=None (leave the live
             # config alone), which is what they have always done.
             stateful = _is_stateful_service(svc, spec)
-            deployment = _deployment_percents(svc, spec)
+            deployment = deployments[svc]
             dep_cfg = (
                 None
                 if stateful
