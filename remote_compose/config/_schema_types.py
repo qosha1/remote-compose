@@ -235,6 +235,12 @@ class ServiceV2:
     # rebalancing off) for a service rc's heuristics miss — e.g. a volume-less
     # redis broker/cache. Default False.
     stateful: bool = False
+    # rc-6akx: rollout percentages for THIS service —
+    # ``{minimum_healthy_percent: <0-100>, maximum_percent: <>=100>}``.
+    # None (the default) keeps rc's 100/200 zero-downtime roll, so no
+    # existing stack changes. The raw mapping is carried through to the
+    # provider, which owns the validation (the constraints are ECS's).
+    deployment: Optional[dict[str, Any]] = None
     # rc-e5u.35.7: explicit framework hint. When set, cli_v2 merges the
     # named preset's lifecycle_hooks into this service's lifecycle dict
     # for hooks the user hasn't declared. ``django`` / ``rails`` /

@@ -21,7 +21,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 from ...defaults import VPC_CIDR_DEFAULT
 from ...envfile import EnvFileError, keys as env_file_keys
@@ -539,6 +539,195 @@ def _is_stateful_service(
     if getattr(spec, "stateful", False):
         return True
     return _looks_like_singleton_scheduler(name, getattr(spec, "command", None))
+
+
+def _stateful_reason(name: str, spec: Any, *, mount_count: "int | None" = None) -> str:
+    """Which of ``_is_stateful_service``'s three signals fired, in words.
+
+    Only used to make the rejection in ``_deployment_percents`` actionable:
+    statefulness is INFERRED, so a user whose service happens to be called
+    ``report-scheduler`` must not be handed a lecture about EFS data
+    directories it does not have.
+    """
+    if mount_count is None:
+        mount_count = len(getattr(spec, "volumes", None) or []) if spec else 0
+    if mount_count > 0:
+        return f"it mounts {mount_count} EFS volume(s)"
+    if getattr(spec, "stateful", False):
+        return "rc.yml sets stateful: true on it"
+    return (
+        "rc reads it as a singleton scheduler (name ends in "
+        "-beat/-scheduler/-cron, or the command runs celery beat)"
+    )
+
+
+# rc's minimum_healthy_percent for a normal rolling deploy, matching what
+# services.tf.j2 has always rendered. Its 200% counterpart lives in
+# autosize.py (DEPLOYMENT_MAX_PERCENT_DEFAULT) because the ASG sizer needs
+# it too. Stateful services pin (0, 100) instead — stop-then-start.
+DEPLOYMENT_MIN_HEALTHY_PERCENT_DEFAULT = 100
+STATEFUL_DEPLOYMENT_PERCENTS = (0, 100)
+_DEPLOYMENT_KEYS = ("minimum_healthy_percent", "maximum_percent")
+
+
+class DeploymentPercents(NamedTuple):
+    minimum_healthy: int
+    maximum: int
+    #: True when rc.yml supplied either value, i.e. the numbers below are
+    #: NOT rc's defaults. Drives the explanatory comment in services.tf.j2
+    #: (and nothing else — the emitted percentages are the same shape
+    #: either way).
+    overridden: bool
+
+
+def _deployment_percents(
+    name: str,
+    spec: Any,
+    *,
+    mount_count: "int | None" = None,
+) -> DeploymentPercents:
+    """Resolve this service's rollout percentages. THE single decision point.
+
+    rc-6akx. Three places have to agree on these two numbers, and every one of
+    them is load-bearing:
+
+      1. ``services.tf.j2``          — what terraform applies to the service.
+      2. ``EC2TaskDemand``           — what the ASG is sized for (rc-anl6).
+      3. ``_force_new_deployments``  — what ``rc deploy --no-state`` writes
+                                       onto the LIVE service on every deploy.
+
+    (3) is why this is a shared helper rather than three inline literals: the
+    no-state roll runs on every deploy and would silently reset the service
+    back to 100/200, which is precisely the class of bug rc-usk0 fixed.
+
+    Defaults are unchanged from before this existed — (100, 200) for a
+    stateless service, (0, 100) for a stateful one — so a stack with no
+    ``deployment:`` block emits byte-identical terraform.
+
+    Raises ``ProviderConfigError`` on any input rc cannot honour, rather than
+    emitting terraform AWS will accept and then wedge on: a service whose
+    percentages cannot roll is not a failed plan, it is a service that can
+    never be deployed again.
+    """
+    stateful = _is_stateful_service(name, spec, mount_count=mount_count)
+    default = (
+        STATEFUL_DEPLOYMENT_PERCENTS
+        if stateful
+        else (DEPLOYMENT_MIN_HEALTHY_PERCENT_DEFAULT, DEPLOYMENT_MAX_PERCENT_DEFAULT)
+    )
+    raw = getattr(spec, "deployment", None) if spec is not None else None
+    if raw is None or raw == {}:
+        return DeploymentPercents(default[0], default[1], overridden=False)
+
+    where = f"service {name!r}: deployment"
+    if not isinstance(raw, dict):
+        raise ProviderConfigError(
+            f"{where} must be a mapping with keys {list(_DEPLOYMENT_KEYS)}, "
+            f"got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(_DEPLOYMENT_KEYS))
+    if unknown:
+        # Services have no unknown-key rejection at the config layer, so a
+        # typo here would otherwise parse into a mapping rc silently ignores
+        # — the user sets a knob, sees no change, and blames the feature.
+        raise ProviderConfigError(
+            f"{where}: unknown key(s) {unknown} "
+            f"(supported: {list(_DEPLOYMENT_KEYS)})"
+        )
+    if stateful:
+        raise ProviderConfigError(
+            f"{where} is not available on this service because rc rolls it "
+            f"stop-then-start ({_stateful_reason(name, spec, mount_count=mount_count)}). "
+            f"Those services are pinned at minimum_healthy_percent=0 / "
+            f"maximum_percent=100 so two tasks NEVER share the data directory "
+            f"— postgres initdb will wipe a volume the outgoing task still "
+            f"holds — and a rollout percentage that permits overlap would "
+            f"undo exactly that guarantee. Remove the deployment: block."
+        )
+
+    values: dict[str, int] = {}
+    for key in _DEPLOYMENT_KEYS:
+        if key not in raw:
+            continue
+        val = raw[key]
+        # bool is a subclass of int, and YAML turns `maximum_percent: yes`
+        # into True — which would sail through an isinstance(int) check and
+        # silently become 1.
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ProviderConfigError(
+                f"{where}.{key} must be an integer percentage, got {val!r}"
+            )
+        values[key] = val
+
+    min_pct = values.get("minimum_healthy_percent", default[0])
+    max_pct = values.get("maximum_percent", default[1])
+    if not 0 <= min_pct <= 100:
+        raise ProviderConfigError(
+            f"{where}.minimum_healthy_percent must be between 0 and 100, "
+            f"got {min_pct} — it is the floor on tasks kept RUNNING during a "
+            f"roll, as a percentage of replicas, so above 100 is meaningless."
+        )
+    if max_pct < 100:
+        raise ProviderConfigError(
+            f"{where}.maximum_percent must be at least 100, got {max_pct} — "
+            f"below 100 the service could not even hold its own steady-state "
+            f"task count while deploying."
+        )
+
+    replicas = getattr(spec, "replicas", 1) or 0
+    if replicas >= 1:
+        # ECS rounds minimumHealthyPercent UP and maximumPercent DOWN against
+        # desiredCount. A roll is only possible if it can either start a
+        # replacement first (needs room for replicas+1) or stop an old task
+        # first (needs the floor to sit below replicas). Neither => the
+        # service deadlocks and every future deploy hangs.
+        #
+        # This is the general form of the two cases people trip over:
+        # 100/100 cannot roll at ANY replica count, and anything above 0
+        # minimum with maximum=100 cannot roll at ONE replica.
+        min_running = math.ceil(replicas * min_pct / 100)
+        max_running = (replicas * max_pct) // 100
+        if max_running < replicas + 1 and replicas - 1 < min_running:
+            raise ProviderConfigError(
+                f"{where}: minimum_healthy_percent={min_pct} / "
+                f"maximum_percent={max_pct} with replicas={replicas} can never "
+                f"roll. ECS would have to keep {min_running} task(s) healthy "
+                f"while running at most {max_running}, so it can neither start "
+                f"a replacement nor stop an old task, and every deploy of this "
+                f"service hangs until it times out. Either lower "
+                f"minimum_healthy_percent to at most "
+                f"{_largest_rollable_min_percent(replicas)} (so a task can be "
+                f"stopped and replaced in place), or raise maximum_percent to "
+                f"at least {_smallest_rollable_max_percent(replicas)} (so a "
+                f"replacement can start alongside)."
+            )
+
+    return DeploymentPercents(min_pct, max_pct, overridden=True)
+
+
+def _largest_rollable_min_percent(replicas: int) -> int:
+    """Biggest minimum_healthy_percent that still permits a stop-then-replace.
+
+    Purely for the error message above — a number the user can paste beats
+    "lower it a bit". Independent of maximum_percent: stopping first needs no
+    extra capacity at all. Returns 0 at replicas=1, where replacing in place
+    necessarily means going to zero tasks for a moment.
+    """
+    for pct in range(100, -1, -1):
+        if math.ceil(replicas * pct / 100) <= replicas - 1:
+            return pct
+    return 0
+
+
+def _smallest_rollable_max_percent(replicas: int) -> int:
+    """Smallest maximum_percent leaving room for a replacement to start first.
+
+    ECS rounds maximumPercent DOWN, so the ceiling has to reach replicas+1
+    running tasks: 200 at one replica, but only 134 at three. "Raise it above
+    100" would be wrong advice for anyone already sitting between 100 and 200
+    — 150 at one replica still floors to 1 and still deadlocks.
+    """
+    return math.ceil((replicas + 1) * 100 / replicas)
 
 
 def _default_session_factory(ctx: DeployContext) -> Any:
@@ -1771,6 +1960,37 @@ class ECSProvider(Provider):
             # cost: a stateless service goes through stop-then-start
             # rolling deploy (slower) instead of overlap. Acceptable.
             stateful = _is_stateful_service(name, spec, mount_count=len(svc_mounts))
+            # rc-6akx: rollout percentages. Defaults reproduce the literals
+            # services.tf.j2 used to hardcode (100/200, or 0/100 stateful);
+            # an rc.yml `deployment:` block overrides them, and the same
+            # resolved numbers feed the ASG sizer below.
+            deployment = _deployment_percents(name, spec, mount_count=len(svc_mounts))
+            if (
+                deployment.overridden
+                and deployment.maximum <= 100
+                and launch_type != "EC2"
+            ):
+                # ECS refuses availability_zone_rebalancing alongside
+                # maximumPercent <= 100, so services.tf.j2 has to pin it OFF
+                # for this service. On EC2 that costs nothing (binpack already
+                # made the service ineligible, and rc-5a4g pins it there
+                # anyway), but on Fargate rc deliberately leaves rebalancing
+                # ON. Say so out loud: the alternative is a user discovering
+                # it in generated terraform, or not at all. Also worth
+                # knowing that the fleet-size argument for the knob does not
+                # apply here — Fargate bills per task and has no ASG to
+                # shrink, so this only caps concurrent tasks during the roll.
+                self._warn(
+                    f"service {name!r}: deployment.maximum_percent="
+                    f"{deployment.maximum} on a FARGATE service turns AZ "
+                    f"rebalancing OFF for it — ECS rejects "
+                    f"availability_zone_rebalancing with maximumPercent <= "
+                    f"100, so rc must pin it DISABLED. Fargate has no ASG to "
+                    f"size down, so the usual reason for this knob (a fleet "
+                    f"held at 2x steady state to cover the roll) does not "
+                    f"apply; keep it if you are capping concurrent tasks "
+                    f"during a roll on purpose, otherwise drop the block."
+                )
             # rc-kr7: a single-writer EFS volume (postgres data, sqlite) is one
             # access point; replicas>1 runs concurrent tasks against the same
             # dir and corrupts it. min_healthy=0 only protects the ROLL window —
@@ -1818,6 +2038,9 @@ class ECSProvider(Provider):
                 "launch_type": launch_type,
                 "mounts": svc_mounts,
                 "stateful": stateful,
+                "deployment_min_healthy_percent": deployment.minimum_healthy,
+                "deployment_max_percent": deployment.maximum,
+                "deployment_overridden": deployment.overridden,
                 "env": dict(spec.env or {}),
                 "command": list(spec.command or []),
                 # Pre-built image, from compose `image:` or from rc.yml
@@ -1889,9 +2112,14 @@ class ECSProvider(Provider):
                         # start, so no duplication) and 200 otherwise — so
                         # peak demand is modeled per-service rather than as a
                         # blanket doubling of the fleet.
-                        deployment_maximum_percent=(
-                            100 if stateful else DEPLOYMENT_MAX_PERCENT_DEFAULT
-                        ),
+                        #
+                        # rc-6akx: and 100 when rc.yml asked for an in-place
+                        # roll. This is where the knob actually pays: at
+                        # maximum_percent=100, peak_replicas collapses to
+                        # replicas, so the ASG is sized by steady state
+                        # instead of 2x it (and the fleet-pressure warning
+                        # below stops firing for that service).
+                        deployment_maximum_percent=deployment.maximum,
                     )
                 )
             if spec.public and spec.port and default_public is None:
@@ -4076,6 +4304,15 @@ class ECSProvider(Provider):
             if cluster_prefix.endswith(suffix):
                 cluster_prefix = cluster_prefix[: -len(suffix)]
                 break
+        # rc-6akx: resolve EVERY service's rollout percentages before rolling
+        # ANY of them. On the --no-state path terraform never runs, so this is
+        # the first (and only) validation an rc.yml `deployment:` block gets —
+        # resolving inside the loop would roll services 1..n-1 and only then
+        # raise on service n, leaving the stack half-deployed on a config rc
+        # could have rejected before touching AWS at all.
+        deployments = {
+            svc: _deployment_percents(svc, ctx.services.get(svc)) for svc in ordered
+        }
         rolled_names: list[str] = []
         for svc in ordered:
             spec = ctx.services.get(svc)
@@ -4093,13 +4330,22 @@ class ECSProvider(Provider):
             # celery-beat was rolled with an overlap window on every deploy —
             # two beat schedulers double-firing every periodic task — and each
             # deploy silently reverted any hand-applied correction.
+            #
+            # rc-6akx: for the same reason, the percentages come from
+            # _deployment_percents rather than being written out here. This
+            # call runs on EVERY --no-state deploy, so a literal 100/200
+            # would quietly overwrite an rc.yml `deployment:` override on the
+            # live service — the identical silent-revert failure, one field
+            # over. Stateful services keep dep_cfg=None (leave the live
+            # config alone), which is what they have always done.
             stateful = _is_stateful_service(svc, spec)
+            deployment = deployments[svc]
             dep_cfg = (
                 None
                 if stateful
                 else {
-                    "minimumHealthyPercent": 100,
-                    "maximumPercent": 200,
+                    "minimumHealthyPercent": deployment.minimum_healthy,
+                    "maximumPercent": deployment.maximum,
                     "deploymentCircuitBreaker": {"enable": True, "rollback": True},
                 }
             )

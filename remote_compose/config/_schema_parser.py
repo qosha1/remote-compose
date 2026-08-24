@@ -166,6 +166,11 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             ),
             auto_roll=raw["auto_roll"] if "auto_roll" in raw else True,
             stateful=raw["stateful"] if "stateful" in raw else False,
+            # rc-6akx: raw passthrough. The provider validates it (the rules
+            # — percent ranges, the roll-deadlock check, the stateful
+            # rejection — are all ECS semantics), so keep the shape intact
+            # rather than coercing here and losing the user's typo.
+            deployment=raw["deployment"] if "deployment" in raw else None,
             # Declared-network placement. Preserve raw shape so validate()
             # can flag a non-list / non-string; None means "rc defaults".
             security_groups=(
