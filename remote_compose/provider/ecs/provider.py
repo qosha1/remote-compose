@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
+from ...config.v2_schema import (
+    ConfigError,
+    resolve_task_groups,
+    validate_task_groups,
+)
 from ...defaults import VPC_CIDR_DEFAULT
 from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
@@ -975,6 +980,109 @@ def _service_prefix(ctx: DeployContext) -> str:
     return str(_ecs_cfg(ctx).get("service_name_prefix") or "")
 
 
+# Fields a task group takes from its ECS *service* / *task* rather than from a
+# container. Every member is validated to agree on the rc.yml inputs behind
+# these (see ``validate_task_groups``), so reading them off the first member is
+# well-defined -- and for a group of one it is simply that service's own value,
+# which is what keeps the rendered output byte-identical.
+_GROUP_TASK_FIELDS = (
+    "type",
+    "launch_type",
+    "replicas",
+    "stateful",
+    "deployment_min_healthy_percent",
+    "deployment_max_percent",
+    "deployment_overridden",
+    "ephemeral_storage",
+    "declared_iam_role",
+    "task_role_ref",
+    "subnets_ref",
+    "security_groups_ref",
+    "assign_public_ip",
+    "declared_subnet_group",
+    "declared_security_groups",
+)
+
+# Fields that describe how the ALB reaches the group. They come from the
+# INGRESS container, not from the first member: a target group names one
+# container_name/container_port pair, and only one container in a task can be
+# behind the load balancer.
+_GROUP_INGRESS_FIELDS = (
+    "public",
+    "port",
+    "domain",
+    "aliases",
+    "default_target",
+    "health_check_path",
+    "health_check_grace_period",
+)
+
+
+def _task_group_views(
+    resolved: dict[str, Any],
+    services_view: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fold per-service views into one view per ECS task.
+
+    One ``aws_ecs_task_definition`` + one ``aws_ecs_service`` per GROUP, with
+    the per-container block looping over ``group["containers"]``.
+
+    A group of one produces a view whose every task/service field is that
+    service's own, whose single container is that service, and whose name and
+    tf_name are unchanged -- so the degenerate case renders exactly what rc
+    emitted before task groups existed, without the template branching on it.
+    """
+    by_name = {sv["name"]: sv for sv in services_view}
+    out: list[dict[str, Any]] = []
+
+    for gname in sorted(resolved):
+        group = resolved[gname]
+        containers = [by_name[m] for m in group.members if m in by_name]
+        if not containers:
+            continue
+        anchor = containers[0]
+        ingress = by_name.get(group.ingress) if group.ingress else None
+
+        view: dict[str, Any] = {
+            "name": group.name,
+            "tf_name": _tf_name(group.name),
+            # Task-level memory is the SUM of the members unless rc.yml
+            # overrides it. One hard ceiling now covers N containers: they can
+            # share slack within the task (better than N separate hard
+            # reservations), but a runaway member can starve its siblings.
+            "memory": group.memory,
+            "containers": containers,
+            "is_implicit": group.is_implicit,
+            "retired_hostnames": list(group.retired_hostnames),
+            # Union of every member's mounts. These render the task-level
+            # `volume` blocks; each container keeps its own `mounts` for its
+            # mountPoints. Two members cannot claim one volume name (rc mints
+            # an access point per service per volume), which
+            # validate_task_groups rejects, so this needs no dedupe pass.
+            "mounts": [m for c in containers for m in c.get("mounts") or []],
+        }
+        for key in _GROUP_TASK_FIELDS:
+            view[key] = anchor.get(key)
+        # cpu sums for the same reason memory does. On FARGATE it is a required
+        # task-level reservation shared by every container, and AWS only accepts
+        # certain cpu/memory PAIRS -- taking one member's cpu beside the summed
+        # memory would produce combinations Fargate rejects (256 cpu next to
+        # 4096 memory). On EC2 it is not rendered at all (startsim-u88y), so
+        # summing costs nothing there. A group of one sums to that member's own
+        # value, which is what keeps the output byte-identical.
+        view["cpu"] = sum(int(c.get("cpu") or 0) for c in containers)
+        for key in _GROUP_INGRESS_FIELDS:
+            view[key] = (ingress or {}).get(key)
+        # container_name/container_port for the load_balancer block.
+        view["ingress_container"] = (ingress or {}).get("name")
+        # health_check is a CONTAINER field; a group has no single one. The
+        # template reads it off each container instead.
+        view["health_check"] = None
+        out.append(view)
+
+    return out
+
+
 def _ecs_service_name(ctx: DeployContext, compose_name: str) -> str:
     """compose service name -> the live ECS service name."""
     return f"{_service_prefix(ctx)}{compose_name}"
@@ -1717,7 +1825,6 @@ class ECSProvider(Provider):
 
         services_view = []
         default_public = None
-        ec2_demands: list[EC2TaskDemand] = []
         efs_volumes: dict[str, dict[str, Any]] = {}
         service_volume_mounts: list[dict[str, Any]] = []
         # Dev-mode source mounts (rc-e5u.45.8). Only populated when
@@ -2036,6 +2143,13 @@ class ECSProvider(Provider):
                 "health_check": spec.health_check,
                 "health_check_grace_period": effective_grace,
                 "launch_type": launch_type,
+                # rc-m2sn: containerDefinitions.essential. Default True — ECS's
+                # own default and what the template hardcoded before groups,
+                # so no existing task definition changes. Only load-bearing
+                # inside a MULTI-container task, where false means this
+                # container exiting leaves the task running without it (and
+                # never restarts it — see the ServiceSpec docstring).
+                "essential": bool(getattr(spec, "essential", True)),
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,
@@ -2092,51 +2206,66 @@ class ECSProvider(Provider):
             )
             svc_view.update(_service_role_view(spec, iam_plan=iam_plan))
             services_view.append(svc_view)
-            if launch_type == "EC2":
-                ec2_demands.append(
-                    EC2TaskDemand(
-                        name=name,
-                        # startsim-u88y: 0, not spec.cpu. services.tf.j2 omits
-                        # task-level cpu on EC2, so the task reserves no CPU —
-                        # and sizing the ASG for a reservation nobody makes just
-                        # moves the same 95% regression from the task definition
-                        # into the instance count. Memory and ENI slots still
-                        # drive the fleet; CPU is shared, which is the point.
-                        cpu_units=0,
-                        memory_mib=spec.memory,
-                        replicas=spec.replicas,
-                        # rc-anl6: capacity has to hold a ROLLING DEPLOY, not
-                        # just steady state. Take the same
-                        # deployment_maximum_percent services.tf.j2 renders
-                        # for this service — 100 for stateful (stop-then-
-                        # start, so no duplication) and 200 otherwise — so
-                        # peak demand is modeled per-service rather than as a
-                        # blanket doubling of the fleet.
-                        #
-                        # rc-6akx: and 100 when rc.yml asked for an in-place
-                        # roll. This is where the knob actually pays: at
-                        # maximum_percent=100, peak_replicas collapses to
-                        # replicas, so the ASG is sized by steady state
-                        # instead of 2x it (and the fleet-pressure warning
-                        # below stops firing for that service).
-                        deployment_maximum_percent=deployment.maximum,
-                    )
-                )
-            if spec.public and spec.port and default_public is None:
-                default_public = svc_view
 
-        # The loop above iterates services alphabetically, so default_public is
-        # the alphabetically-first public+port service — a silent, surprising
-        # choice when several services are public (e.g. celery-flower sorts
-        # before nginx and would wrongly become the catch-all). When a service
-        # explicitly sets default_target=true, honor it: it wins regardless of
-        # name order. First flagged service wins if more than one is set.
+        # ---- Task groups (rc-ib01) -------------------------------------
+        # One aws_ecs_task_definition + one aws_ecs_service per GROUP. With no
+        # task_groups block every service is an implicit group of one named
+        # after itself, so groups_view is services_view in the same order and
+        # the rendered terraform is unchanged.
+        #
+        # Structure was validated at parse time; the rejects below need the
+        # MERGED service set (compose union rc.yml), which only exists here.
+        try:
+            validate_task_groups(ctx.task_groups or {}, ctx.services)
+        except ConfigError as exc:
+            raise ProviderConfigError(str(exc)) from exc
+        resolved_groups = resolve_task_groups(ctx.task_groups or {}, ctx.services)
+        groups_view = _task_group_views(resolved_groups, services_view)
+
+        # Everything ALB-facing keys off GROUPS from here down: a target group
+        # attaches to an ECS service, and after grouping the ECS service is the
+        # group's, not the member's. For an ungrouped stack these iterate the
+        # same list in the same order as before.
+        #
+        # groups_view is sorted by name, so default_public is the
+        # alphabetically-first public+port group — a silent, surprising choice
+        # when several are public (e.g. celery-flower sorts before nginx and
+        # would wrongly become the catch-all). When one explicitly sets
+        # default_target=true, honor it: it wins regardless of name order.
+        # First flagged wins if more than one is set.
+        default_public = next(
+            (g for g in groups_view if g.get("public") and g.get("port")),
+            None,
+        )
         default_target_view = next(
-            (s for s in services_view if s.get("default_target") and s.get("port")),
+            (g for g in groups_view if g.get("default_target") and g.get("port")),
             None,
         )
         if default_target_view is not None:
             default_public = default_target_view
+
+        # rc-8xvk: the ASG is sized from GROUPS, not from compose services.
+        # auto_size's ENI dimension counts one branch ENI per EC2TaskDemand, so
+        # this — not the template change — is what converts grouping into fewer
+        # instances. Memory is the group's (the sum of its members unless
+        # rc.yml overrides), and deployment_maximum_percent is the group's, so
+        # rc-anl6's rolling-deploy headroom is modeled per TASK, which is the
+        # thing that actually holds an ENI mid-roll.
+        ec2_demands = [
+            EC2TaskDemand(
+                name=g["name"],
+                # startsim-u88y: 0, not the group's cpu. services.tf.j2 omits
+                # task-level cpu on EC2, so the task reserves none — sizing the
+                # ASG for a reservation nobody makes just moves the same 95%
+                # regression from the task definition into the instance count.
+                cpu_units=0,
+                memory_mib=g["memory"],
+                replicas=g["replicas"],
+                deployment_maximum_percent=g["deployment_max_percent"],
+            )
+            for g in groups_view
+            if g["launch_type"] == "EC2"
+        ]
 
         has_public_service = default_public is not None
         # Any service with a compose `build:` context drives BuildKit cache
@@ -2150,15 +2279,15 @@ class ECSProvider(Provider):
         # (host_header) + R53 alias record + ACM cert SAN. The default
         # listener action still forwards to default_public (catch-all).
         domained_services = sorted(
-            [s for s in services_view if s.get("domain")],
-            key=lambda s: s["domain"],
+            [g for g in groups_view if g.get("domain")],
+            key=lambda g: g["domain"],
         )
         # Aliases attach to public services as extra hostnames. They feed
         # into the cert SAN list + R53 records but do NOT generate listener
         # rules — the default action catches traffic for them.
         alias_hostnames: list[str] = []
-        for sv in services_view:
-            for a in sv.get("aliases", []) or []:
+        for gv in groups_view:
+            for a in gv.get("aliases", []) or []:
                 alias_hostnames.append(a)
         # Listener rules need distinct priorities. Step by 10 so users can
         # hand-write rules in between later. The base is 100 unless this project
@@ -2176,9 +2305,9 @@ class ECSProvider(Provider):
         # no rc-created aws_security_group.alb needed.
         if existing_alb:
             public_without_domain = [
-                s["name"]
-                for s in services_view
-                if s.get("public") and not s.get("domain")
+                g["name"]
+                for g in groups_view
+                if g.get("public") and not g.get("domain")
             ]
             if public_without_domain:
                 raise ProviderConfigError(
@@ -2221,9 +2350,16 @@ class ECSProvider(Provider):
             or dev_efs_volume is not None
         )
         # Service discovery is cheap (one Cloud Map namespace + one entry per
-        # service) and turns multi-service compose into ECS that actually
-        # talks to itself. Enable whenever there is more than one service.
-        has_service_discovery = len(ctx.services) > 1
+        # TASK GROUP) and turns multi-service compose into ECS that actually
+        # talks to itself. Enable whenever there is more than one group.
+        #
+        # Counts groups, not services: ECS allows exactly one service registry
+        # per service ("Multiple service registries for each service isn't
+        # supported"), so a group registers ONE name, and collapsing every
+        # service into a single group would otherwise emit a namespace plus a
+        # record nobody resolves. Identical to the old service count for any
+        # stack without task_groups.
+        has_service_discovery = len(groups_view) > 1
 
         # Secrets: split into file (terraform-created) vs aws_sm (pre-existing ARN ref).
         #
@@ -2552,6 +2688,11 @@ class ECSProvider(Provider):
             # out-of-band tag-scan reaper.
             "expires_at": ctx.expires_at,
             "services": services_view,
+            # rc-ib01: one entry per ECS task. services.tf.j2 and
+            # service_discovery.tf.j2 iterate THIS; outputs.tf.j2 still
+            # iterates `services` because ECR repos are per-service, not
+            # per-task.
+            "groups": groups_view,
             "has_public_service": has_public_service,
             "has_build_context_service": has_build_context_service,
             "has_ec2_service": has_ec2_service,

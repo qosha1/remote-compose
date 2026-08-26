@@ -973,6 +973,10 @@ def build_deploy_context(
         tf_backend_config=tf_backend,
         working_dir=project_dir,
         services=services,
+        # rc-ib01: carried through verbatim. Structure was validated at parse
+        # time; the semantic rejects need the MERGED service set above, so the
+        # provider runs validate_task_groups at emit.
+        task_groups=dict(v2.task_groups),
         secrets=secrets,
     )
 

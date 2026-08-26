@@ -199,6 +199,15 @@ class DeployContext:
     tf_backend_config: dict[str, Any]
     working_dir: Path
     services: dict[str, ServiceSpec] = field(default_factory=dict)
+    # rc-ib01: declared multi-container task groups, keyed by group name.
+    # Empty means every service is an implicit group of one named after
+    # itself, which is what every stack built before groups existed gets —
+    # and what keeps their rendered terraform byte-identical. NOTE the
+    # services dict above stays keyed by COMPOSE SERVICE NAME: grouping is
+    # additive, never a re-keying, because image building, per-service secret
+    # filtering, lifecycle hooks, `rc logs` and `rc exec` all resolve through
+    # that key.
+    task_groups: dict[str, Any] = field(default_factory=dict)
     secrets: list[SecretRef] = field(default_factory=list)
     # When set, this stack was deployed with a TTL. The provider should
     # add Ephemeral=true + ExpiresAt=<this> to its default tags so that

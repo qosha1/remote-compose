@@ -34,10 +34,11 @@ resource "aws_ecr_lifecycle_policy" "buildcache" {
 }
 {%- endif %}
 
-{%- for svc in services %}
-{%- if svc.owns_image_repo %}
-resource "aws_ecr_repository" "{{ svc.tf_name }}" {
-  name                 = "${var.project}/{{ svc.name }}"
+{%- for svc in groups %}
+{%- for c in svc.containers %}
+{%- if c.owns_image_repo %}
+resource "aws_ecr_repository" "{{ c.tf_name }}" {
+  name                 = "${var.project}/{{ c.name }}"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 
@@ -46,6 +47,7 @@ resource "aws_ecr_repository" "{{ svc.tf_name }}" {
   }
 }
 {%- endif %}
+{%- endfor %}
 
 resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   family                   = "${var.project}-{{ svc.name }}"
@@ -84,39 +86,48 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   task_role_arn            = aws_iam_role.task.arn
 {%- endif %}
 
-  container_definitions = jsonencode([{
-    name      = "{{ svc.name }}"
-{%- if svc.has_build_context %}
-    image     = "${aws_ecr_repository.{{ svc.image_repo_tf_name }}.repository_url}:latest"
-{%- elif svc.compose_image %}
-    image     = "{{ svc.compose_image }}"
+  container_definitions = jsonencode([{% for c in svc.containers %}{
+    name      = "{{ c.name }}"
+{%- if c.has_build_context %}
+    image     = "${aws_ecr_repository.{{ c.image_repo_tf_name }}.repository_url}:latest"
+{%- elif c.compose_image %}
+    image     = "{{ c.compose_image }}"
 {%- else %}
-    image     = "${aws_ecr_repository.{{ svc.image_repo_tf_name }}.repository_url}:latest"
+    image     = "${aws_ecr_repository.{{ c.image_repo_tf_name }}.repository_url}:latest"
 {%- endif %}
+{%- if c.essential %}
     essential = true
-{%- if svc.command %}
-    command = {{ svc.command | tojson }}
+{%- else %}
+    # rc-m2sn: services.{{ c.name }}.essential = false. This container exiting
+    # does NOT stop the task -- but ECS also never restarts an individual
+    # container, so it stays dead and the task keeps running without it. That
+    # is silent degradation, not the per-container restart a compose box gives
+    # you. `rc plan` warns about it.
+    essential = false
 {%- endif %}
-{%- if svc.env %}
+{%- if c.command %}
+    command = {{ c.command | tojson }}
+{%- endif %}
+{%- if c.env %}
     environment = [
-{%- for k, v in svc.env.items() %}
+{%- for k, v in c.env.items() %}
       { name = "{{ k }}", value = "{{ v | replace('\\', '\\\\') | replace('"', '\\"') | replace('$', '$$') }}" }{% if not loop.last %},{% endif %}
 {%- endfor %}
     ]
 {%- endif %}
-{%- if svc.port or svc.extra_ports %}
+{%- if c.port or c.extra_ports %}
     portMappings = [
-{%- if svc.port %}
-      { containerPort = {{ svc.port }}, protocol = "tcp" }{% if svc.extra_ports %},{% endif %}
+{%- if c.port %}
+      { containerPort = {{ c.port }}, protocol = "tcp" }{% if c.extra_ports %},{% endif %}
 {%- endif %}
-{%- for ep in svc.extra_ports %}
+{%- for ep in c.extra_ports %}
       { containerPort = {{ ep }}, protocol = "tcp" }{% if not loop.last %},{% endif %}
 {%- endfor %}
     ]
 {%- endif %}
-{%- if svc.mounts %}
+{%- if c.mounts %}
     mountPoints = [
-{%- for m in svc.mounts %}
+{%- for m in c.mounts %}
       {
         sourceVolume  = "{{ m.volume }}"
         containerPath = "{{ m.mount_path }}"
@@ -125,9 +136,9 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 {%- endfor %}
     ]
 {%- endif %}
-{%- if svc.secrets %}
+{%- if c.secrets %}
     secrets = [
-{%- for sec in svc.secrets %}
+{%- for sec in c.secrets %}
       {
         name      = "{{ sec.env_name }}"
         valueFrom = {{ sec.value_from_ref }}
@@ -135,16 +146,16 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
 {%- endfor %}
     ]
 {%- endif %}
-{%- if svc.health_check %}
+{%- if c.health_check %}
     # Container readiness check. With deployment_minimum_healthy_percent=100,
     # ECS keeps OLD tasks running until NEW ones pass this (not just reach
     # RUNNING) -- zero-downtime rolls for workers (no ALB) too.
     healthCheck = {
-      command     = {{ svc.health_check.command | tojson }}
-      interval    = {{ svc.health_check.interval }}
-      timeout     = {{ svc.health_check.timeout }}
-      retries     = {{ svc.health_check.retries }}
-      startPeriod = {{ svc.health_check.start_period }}
+      command     = {{ c.health_check.command | tojson }}
+      interval    = {{ c.health_check.interval }}
+      timeout     = {{ c.health_check.timeout }}
+      retries     = {{ c.health_check.retries }}
+      startPeriod = {{ c.health_check.start_period }}
     }
 {%- endif %}
     logConfiguration = {
@@ -152,10 +163,15 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.tasks.name
         "awslogs-region"        = var.region
-        "awslogs-stream-prefix" = "{{ svc.name }}"
+{%- if svc.containers | length > 1 %}
+        # Per CONTAINER, not per task: this is what keeps `rc logs {{ c.name }}`
+        # working for a member of a group -- it filters CloudWatch by the
+        # stream prefix and never looks at the ECS service name.
+{%- endif %}
+        "awslogs-stream-prefix" = "{{ c.name }}"
       }
     }
-  }])
+  }{% if not loop.last %}, {% endif %}{% endfor %}])
 
 {%- if svc.ephemeral_storage %}
   ephemeral_storage {
@@ -378,7 +394,7 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- else %}
     target_group_arn = aws_lb_target_group.default.arn
 {%- endif %}
-    container_name   = "{{ svc.name }}"
+    container_name   = "{{ svc.ingress_container }}"
     container_port   = {{ svc.port }}
   }
 
