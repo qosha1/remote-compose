@@ -158,6 +158,30 @@ class ServiceSpec:
     #   there is no separate switch to drift out of sync with the routing.
     security_groups: list[str] = field(default_factory=list)
     subnet_group: Optional[str] = None
+    # rc-m2sn: ECS containerDefinitions.essential. Default True — ECS's own
+    # default, and what services.tf.j2 hardcoded before task groups existed,
+    # so no already-deployed task definition changes.
+    #
+    # This is a CONTAINER property, which is why it lives on the service and
+    # not on the task group. In a group of one it is a no-op. In a multi-
+    # container task, essential=true means this container exiting stops the
+    # WHOLE task — and ECS then starts a fresh replacement task, so every
+    # container comes back.
+    #
+    # essential=false is NOT crash isolation, and it is easy to reach for
+    # expecting that it is. ECS never restarts an individual container: a
+    # non-essential container that exits stays dead, the task keeps running,
+    # and nothing alarms. That is silent degradation, strictly worse than the
+    # whole-task restart essential=true gives you. Use it only for a container
+    # whose absence is genuinely tolerable, and expect the plan-time warning.
+    #
+    # The knob that actually buys compose-like per-container recovery is ECS's
+    # container restart policy (agent 1.86.0+ on EC2), which restarts a
+    # container in place for TRANSIENT exits. rc does not emit it yet.
+    #
+    # At least one container in a task must be essential — AWS rejects a task
+    # definition where all of them are false. validate_task_groups enforces it.
+    essential: bool = True
     # Declared task role (rc.yml `iam_roles:`). A name here makes this
     # service's task definition carry that role instead of the shared
     # ${project}-task role — and therefore none of the grants
@@ -175,6 +199,15 @@ class DeployContext:
     tf_backend_config: dict[str, Any]
     working_dir: Path
     services: dict[str, ServiceSpec] = field(default_factory=dict)
+    # rc-ib01: declared multi-container task groups, keyed by group name.
+    # Empty means every service is an implicit group of one named after
+    # itself, which is what every stack built before groups existed gets —
+    # and what keeps their rendered terraform byte-identical. NOTE the
+    # services dict above stays keyed by COMPOSE SERVICE NAME: grouping is
+    # additive, never a re-keying, because image building, per-service secret
+    # filtering, lifecycle hooks, `rc logs` and `rc exec` all resolve through
+    # that key.
+    task_groups: dict[str, Any] = field(default_factory=dict)
     secrets: list[SecretRef] = field(default_factory=list)
     # When set, this stack was deployed with a TTL. The provider should
     # add Ephemeral=true + ExpiresAt=<this> to its default tags so that

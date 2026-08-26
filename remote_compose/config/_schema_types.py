@@ -16,9 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from ._errors import ConfigError  # noqa: F401  (re-export: historical import path)
+from ._errors import ConfigError
 from ._iam_types import IamRoleV2
 from ._network_types import NetworkV2, RepositoryV2
+from ._task_group_types import TaskGroupV2
 
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
 VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
@@ -261,6 +262,30 @@ class ServiceV2:
     #   there is no separate switch to get out of sync with the routing.
     security_groups: Optional[list[str]] = None
     subnets: Optional[str] = None
+    # rc-m2sn: ECS containerDefinitions.essential. Default True — ECS's own
+    # default, and what services.tf.j2 hardcoded before task groups existed,
+    # so no already-deployed task definition changes.
+    #
+    # This is a CONTAINER property, which is why it lives on the service and
+    # not on the task group. In a group of one it is a no-op. In a multi-
+    # container task, essential=true means this container exiting stops the
+    # WHOLE task — and ECS then starts a fresh replacement task, so every
+    # container comes back.
+    #
+    # essential=false is NOT crash isolation, and it is easy to reach for
+    # expecting that it is. ECS never restarts an individual container: a
+    # non-essential container that exits stays dead, the task keeps running,
+    # and nothing alarms. That is silent degradation, strictly worse than the
+    # whole-task restart essential=true gives you. Use it only for a container
+    # whose absence is genuinely tolerable, and expect the plan-time warning.
+    #
+    # The knob that actually buys compose-like per-container recovery is ECS's
+    # container restart policy (agent 1.86.0+ on EC2), which restarts a
+    # container in place for TRANSIENT exits. rc does not emit it yet.
+    #
+    # At least one container in a task must be essential — AWS rejects a task
+    # definition where all of them are false. validate_task_groups enforces it.
+    essential: bool = True
     # A name from the top-level ``iam_roles:`` block. When set, this service's
     # task definition carries THAT role instead of the shared
     # ${project}-task role — so it inherits none of the grants
@@ -669,6 +694,13 @@ class RcConfigV2:
     # every service keeps the shared ${project}-task role, which is what
     # already-deployed stacks reference.
     iam_roles: dict[str, IamRoleV2] = field(default_factory=dict)
+    # Declared multi-container task groups (see _task_group_types). Empty by
+    # default, and an empty map means every service is an implicit group of
+    # one named after itself — which renders byte-identical to what rc emitted
+    # before groups existed. Semantic validation lives in
+    # validate_task_groups, which the provider runs against the MERGED
+    # (compose union rc.yml) service set; only structure is checked here.
+    task_groups: dict[str, "TaskGroupV2"] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.version != 2:
@@ -694,3 +726,5 @@ class RcConfigV2:
             repo.validate()
         for role in self.iam_roles.values():
             role.validate()
+        for group in self.task_groups.values():
+            group.validate()
