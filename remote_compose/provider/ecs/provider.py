@@ -2354,6 +2354,9 @@ class ECSProvider(Provider):
                 # container exiting leaves the task running without it (and
                 # never restarts it — see the ServiceSpec docstring).
                 "essential": bool(getattr(spec, "essential", True)),
+                # rc-ib01.4: opt-in per-container restart. None emits nothing,
+                # so no already-deployed task definition changes.
+                "restart_policy": getattr(spec, "restart_policy", None),
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,

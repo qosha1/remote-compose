@@ -1073,7 +1073,36 @@ for it rather than a destroy/create.
   individual container, so a non-essential container that exits stays dead while
   the task runs on without it — quieter, not safer, than the whole-task restart
   `essential: true` gives you. Default is `true`, and a task must have at least
-  one essential container.
+  one essential container. `rc plan` warns when a container is non-essential
+  with no `restart_policy`.
+
+#### Restarting one container instead of the whole task
+
+`restart_policy` is the knob that actually gives a grouped task compose-like
+recovery — it restarts *that* container in place rather than replacing the task:
+
+```yaml
+services:
+  reingest:
+    essential: false
+    restart_policy:
+      enabled: true
+      ignored_exit_codes: [0]     # a clean finish is not a failure
+      attempt_period: 120         # seconds; AWS allows 60–1800, default 300
+```
+
+Declaring the block is the opt-in. It is never turned on for you: rc emits
+terraform offline, so it cannot check the container-agent version on your
+behalf, and this needs **agent 1.86.0+** on EC2 (rc's own ECS-optimized AL2 AMI
+ships far newer — 1.106.1 as of 2026-08-26). It works on essential and
+non-essential containers alike.
+
+**It fixes transient exits, not crash loops.** A container must run for
+`attempt_period` before a restart is attempted, so one that dies faster than
+that is *not* restarted and falls through to whatever `essential` says. The
+combination closest to a compose box is `essential: true` plus a restart policy:
+a one-off exit restarts the container alone, and a genuine crash loop still
+replaces the task.
 
 ### EC2 task density is capped by ENI limits, not just CPU/memory
 

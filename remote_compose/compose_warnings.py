@@ -1453,6 +1453,49 @@ def detect_task_group_retired_hostnames(compose: dict, rc_v2_raw: dict) -> list[
     return warnings
 
 
+# ---------------------------------------------------------------------------
+# Detector 15 — non-essential container with no restart policy (rc-ib01.4)
+# ---------------------------------------------------------------------------
+
+
+def detect_non_essential_without_restart_policy(rc_v2_raw: Any) -> list[str]:
+    """Warn about a container nobody will notice dying.
+
+    ``essential: false`` is easy to reach for expecting compose-like crash
+    isolation. It is not that: ECS never restarts an individual container, so
+    a non-essential container that exits stays dead, the task keeps running
+    without it, and nothing alarms. Quieter than the whole-task restart
+    ``essential: true`` gives you, not safer.
+
+    ``restart_policy`` is the pairing that makes the intent real (rc-ib01.4),
+    at least for transient exits. Warn when one is declared without the other.
+    """
+    warnings: list[str] = []
+    if not isinstance(rc_v2_raw, dict):
+        return warnings
+    services = rc_v2_raw.get("services")
+    if not isinstance(services, dict):
+        return warnings
+    for name, body in sorted(services.items()):
+        if not isinstance(body, dict):
+            continue
+        if body.get("essential") is not False:
+            continue
+        if body.get("restart_policy"):
+            continue
+        warnings.append(
+            f"WARN: service {name!r} sets essential: false but declares no "
+            f"restart_policy. ECS does not restart individual containers, so "
+            f"if {name!r} exits it stays dead while the rest of its task keeps "
+            f"running -- no restart, no alarm. That is quieter than "
+            f"essential: true, not safer. Add restart_policy: {{enabled: true}} "
+            f"to get it restarted in place on a transient exit (a container "
+            f"that exits inside restart_attempt_period is still not restarted), "
+            f"or drop essential: false so a failure replaces the whole task."
+        )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -1478,4 +1521,5 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_python_pyc_in_build_context(compose, compose_path))
     out.extend(detect_partially_wired_shared_volume(compose, rc_v2_raw))
     out.extend(detect_task_group_retired_hostnames(compose, rc_v2_raw))
+    out.extend(detect_non_essential_without_restart_policy(rc_v2_raw))
     return out

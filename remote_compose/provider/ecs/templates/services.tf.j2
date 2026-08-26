@@ -105,6 +105,22 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
     # you. `rc plan` warns about it.
     essential = false
 {%- endif %}
+{%- if c.restart_policy %}
+    # rc-ib01.4: restart THIS container in place instead of replacing the whole
+    # task. Requires ECS container agent 1.86.0+ on EC2 (rc's AMI ships far
+    # newer). Fixes TRANSIENT exits only -- a container that exits before
+    # restartAttemptPeriod elapses is not restarted, and falls through to
+    # whatever `essential` above says.
+    restartPolicy = {
+      enabled              = {{ 'true' if c.restart_policy.enabled else 'false' }}
+{%- if c.restart_policy.ignored_exit_codes is defined and c.restart_policy.ignored_exit_codes %}
+      ignoredExitCodes     = {{ c.restart_policy.ignored_exit_codes | tojson }}
+{%- endif %}
+{%- if c.restart_policy.attempt_period is defined and c.restart_policy.attempt_period %}
+      restartAttemptPeriod = {{ c.restart_policy.attempt_period }}
+{%- endif %}
+    }
+{%- endif %}
 {%- if c.command %}
     command = {{ c.command | tojson }}
 {%- endif %}
