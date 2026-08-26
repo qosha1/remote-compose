@@ -80,6 +80,21 @@ class InstanceShape:
             return None
         return self.max_enis - ENI_RESERVED_FOR_PRIMARY
 
+    def without_task_enis(self) -> "InstanceShape":
+        """This shape with the task-ENI dimension switched OFF entirely.
+
+        For ``network_mode: bridge`` (rc-u122), where tasks share the
+        container instance's ENI and no branch interface is allocated per
+        task. ``max_enis=None`` is the existing "not modeled" signal, so
+        ``task_eni_slots`` returns None and ``auto_size`` skips the ENI
+        dimension -- no new concept, and the memory/CPU dimensions are
+        untouched. ``trunked_task_limit`` goes with it so a later
+        ``with_trunking()`` cannot resurrect a ceiling that does not apply.
+        """
+        return replace(
+            self, max_enis=None, trunked_task_limit=None, task_slots_override=None
+        )
+
     def with_trunking(self) -> "InstanceShape":
         """This shape as it behaves with ``awsvpcTrunking`` enabled.
 

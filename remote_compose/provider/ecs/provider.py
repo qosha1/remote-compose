@@ -1603,6 +1603,51 @@ class ECSProvider(Provider):
                 f"'public' or 'private', got {default_subnet_placement!r}"
             )
 
+        # rc-u122: awsvpc is a CHOICE, not a law. Every awsvpc task takes a
+        # branch ENI, and an m6i.large tops out at 10 of them with trunking —
+        # so on a many-small-services stack the ENI dimension, not memory,
+        # decides the instance count. Measured on a 30-service estate: 4x
+        # m6i.large for 2,904 MiB of actually-used memory, and right-sizing
+        # every reservation moved ZERO boxes because ENI was binding. In
+        # bridge every task shares the host ENI, exactly as `rc dev up` has
+        # always done by running docker compose on the box.
+        #
+        # The default stays awsvpc forever. Bridge trades away per-task
+        # security groups (every task lands on the host ENI under the host
+        # SG), which is an isolation decision only the operator can make.
+        network_mode = ecs_cfg.get("network_mode", "awsvpc")
+        if network_mode not in {"awsvpc", "bridge"}:
+            raise ProviderConfigError(
+                "provider_config.ecs.network_mode must be 'awsvpc' or "
+                f"'bridge', got {network_mode!r}"
+            )
+        if network_mode == "bridge":
+            # Per-task network placement does not exist without a per-task
+            # ENI. Dropping these silently would remove an isolation boundary
+            # the author explicitly asked for, so refuse at plan time instead.
+            _sg = sorted(
+                n for n, sp in ctx.services.items() if getattr(sp, "security_groups", None)
+            )
+            if _sg:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' cannot be "
+                    f"combined with per-service security_groups ({', '.join(_sg)}). "
+                    "In bridge mode every task shares the container instance's "
+                    "ENI and its security group, so a per-task group has "
+                    "nothing to attach to. Either drop network_mode: bridge, "
+                    "or move that isolation to the instance SG."
+                )
+            _sn = sorted(
+                n for n, sp in ctx.services.items() if getattr(sp, "subnet_group", None)
+            )
+            if _sn:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' cannot be "
+                    f"combined with per-service subnets ({', '.join(_sn)}). "
+                    "A bridge task has no ENI of its own, so it is placed by "
+                    "whichever subnet its container instance sits in."
+                )
+
         # Existing-ALB adopt (rc-adopt, D4): reference a live ALB + its HTTPS
         # listener instead of creating one — for adopt-in-place of a stack
         # already fronted by an ALB (e.g. browser-mgr's Copilot ALB + the
@@ -2382,6 +2427,7 @@ class ECSProvider(Provider):
                 # rc-ib01.4: opt-in per-container restart. None emits nothing,
                 # so no already-deployed task definition changes.
                 "restart_policy": getattr(spec, "restart_policy", None),
+                "network_mode": network_mode,
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,
@@ -2818,7 +2864,10 @@ class ECSProvider(Provider):
 
         ec2_capacity_cfg = (
             self._resolve_ec2_capacity(
-                ecs_cfg, ec2_demands, eni_trunking=getattr(ctx, "eni_trunking", None)
+                ecs_cfg,
+                ec2_demands,
+                eni_trunking=getattr(ctx, "eni_trunking", None),
+                network_mode=network_mode,
             )
             if has_ec2_service
             else None
@@ -2975,6 +3024,7 @@ class ECSProvider(Provider):
             "shared_capacity_provider": shared_capacity_provider,
             "service_name_prefix": service_name_prefix,
             "has_service_discovery": has_service_discovery,
+            "network_mode": network_mode,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
             "has_created_efs": has_created_efs,
@@ -6428,6 +6478,7 @@ class ECSProvider(Provider):
         ecs_cfg: dict,
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
+        network_mode: str = "awsvpc",
     ) -> dict:
         """Merge user-supplied ec2_capacity with auto-sized defaults.
 
@@ -6498,7 +6549,7 @@ class ECSProvider(Provider):
             # modeled and skips this, same as a custom auto_size() ladder.
             known_shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
             if known_shape is not None:
-                effective = self._effective_shape(known_shape, eni_trunking)
+                effective = self._effective_shape(known_shape, eni_trunking, network_mode)
                 try:
                     check_fixed_shape_capacity(
                         effective,
@@ -6529,13 +6580,21 @@ class ECSProvider(Provider):
         return resolved
 
     @staticmethod
-    def _effective_shape(shape, eni_trunking: Optional[bool]):
+    def _effective_shape(shape, eni_trunking: Optional[bool], network_mode: str = "awsvpc"):
         """The shape as it behaves under the resolved trunking state.
 
         with_trunking() is a no-op for an ineligible type, so this is safe to
         apply unconditionally -- which is why the default t3 ladder needs no
         special-casing anywhere.
+
+        rc-u122: under ``network_mode: bridge`` there are no per-task ENIs to
+        run out of, so the dimension is dropped BEFORE trunking is considered
+        -- a trunked ceiling on a mode that allocates no branch interfaces
+        would be a ceiling on nothing, and would keep sizing the fleet from a
+        number that no longer describes it.
         """
+        if network_mode == "bridge":
+            return shape.without_task_enis()
         return shape.with_trunking() if eni_trunking else shape
 
     def _check_trunking_assertion(

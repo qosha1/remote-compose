@@ -50,7 +50,14 @@ resource "aws_lb_target_group" "default" {
   port        = {{ default_target_port }}
   protocol    = "HTTP"
   vpc_id      = {{ vpc_id_ref }}
+{%- if network_mode == "bridge" %}
+  # rc-u122: bridge tasks have no ENI of their own, so there is no task IP
+  # to register. The target is the container instance plus the ephemeral
+  # host port ECS assigned it, which the ECS service registers for us.
+  target_type = "instance"
+{%- else %}
   target_type = "ip"
+{%- endif %}
 
   health_check {
     path                = "{{ default_health_check_path }}"
@@ -138,7 +145,14 @@ resource "aws_lb_target_group" "{{ dsvc.tf_name }}" {
   port        = {{ dsvc.port }}
   protocol    = "HTTP"
   vpc_id      = {{ vpc_id_ref }}
+{%- if network_mode == "bridge" %}
+  # rc-u122: bridge tasks have no ENI of their own, so there is no task IP
+  # to register. The target is the container instance plus the ephemeral
+  # host port ECS assigned it, which the ECS service registers for us.
+  target_type = "instance"
+{%- else %}
   target_type = "ip"
+{%- endif %}
 
   health_check {
     path                = "{{ dsvc.health_check_path or '/' }}"
