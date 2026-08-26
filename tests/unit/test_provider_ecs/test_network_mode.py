@@ -200,3 +200,28 @@ class TestSizing:
         assert awsvpc.desired_size == 4  # 30 tasks / 10 ENI slots, +20% headroom
         assert bridge.desired_size < awsvpc.desired_size
         assert bridge.desired_size == 2  # 11,520 MiB of memory, nothing else
+
+
+class TestWarningsStayHonestUnderBridge:
+    def test_shared_root_volume_warns_harder_not_less(self, tmp_path):
+        """The density bound used to come only from the ENI ceiling, so under
+        bridge it went silent — exactly backwards. Removing the per-task ENI is
+        what lets one box hold 30 tasks instead of 10, so the shared-disk
+        hazard is at its WORST right where the old bound stopped existing."""
+        from remote_compose.provider.ecs.provider import ECSProvider
+        from remote_compose.provider.ecs.autosize import EC2TaskDemand
+
+        p = ECSProvider()
+        p._warnings = []
+        resolved = {
+            "instance_type": "m6i.large",
+            "desired_size": 1,
+            "root_volume_size": None,
+        }
+        demands = [
+            EC2TaskDemand(name=f"s{i}", cpu_units=0, memory_mib=256) for i in range(30)
+        ]
+        p._warn_on_shared_root_volume(resolved, demands, True, "bridge")
+        joined = " ".join(getattr(p, "_warnings", []) or [])
+        assert "root_volume_size" in joined
+        assert "30 bridge tasks" in joined

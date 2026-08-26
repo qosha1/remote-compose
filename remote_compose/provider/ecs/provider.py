@@ -2895,7 +2895,7 @@ class ECSProvider(Provider):
             ec2_capacity_cfg["subnets_ref"] = ec2_placement["subnets_ref"]
             ec2_capacity_cfg["assign_public_ip"] = ec2_placement["assign_public_ip"]
             self._warn_on_ec2_one_off_capacity(
-                ctx, ec2_capacity_cfg, ec2_demands, default_launch_type
+                ctx, ec2_capacity_cfg, ec2_demands, default_launch_type, network_mode
             )
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
@@ -6573,9 +6573,11 @@ class ECSProvider(Provider):
             **_resolve_root_volume_options(user_cfg),
             **_resolve_managed_scaling(user_cfg),
         }
-        self._warn_on_shared_root_volume(resolved, ec2_demands, eni_trunking)
+        self._warn_on_shared_root_volume(
+            resolved, ec2_demands, eni_trunking, network_mode
+        )
         self._warn_on_ec2_fleet_pressure(
-            resolved, ec2_demands, eni_trunking, ecs_cfg.get("region")
+            resolved, ec2_demands, eni_trunking, ecs_cfg.get("region"), network_mode
         )
         return resolved
 
@@ -6639,6 +6641,7 @@ class ECSProvider(Provider):
         resolved: dict,
         ec2_demands: list[EC2TaskDemand],
         default_launch_type: str,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag one-off tasks competing for EC2 capacity nothing sized for.
 
@@ -6667,13 +6670,13 @@ class ECSProvider(Provider):
         slots = ""
         if shape is not None:
             eni_slots = self._effective_shape(
-                shape, getattr(ctx, "eni_trunking", None)
+                shape, getattr(ctx, "eni_trunking", None), network_mode
             ).task_eni_slots
             if eni_slots is not None:
                 capacity = eni_slots * int(resolved.get("desired_size") or 1)
                 declared = sum(t.replicas for t in ec2_demands)
                 slots = (
-                    f" This fleet holds about {capacity} awsvpc task(s) against "
+                    f" This fleet holds about {capacity} {network_mode} task(s) against "
                     f"{declared} declared, leaving roughly "
                     f"{max(0, capacity - declared)} slot(s) for one-offs."
                 )
@@ -6695,6 +6698,7 @@ class ECSProvider(Provider):
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
         region: Optional[str] = None,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag EC2 fleets that are correct at rest and wrong during a deploy.
 
@@ -6727,7 +6731,7 @@ class ECSProvider(Provider):
         base_shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
         if base_shape is None:
             return
-        shape = self._effective_shape(base_shape, eni_trunking)
+        shape = self._effective_shape(base_shape, eni_trunking, network_mode)
         pressure = measure_fleet(shape, ec2_demands)
         self._warn_on_eni_bound_fleet(pressure, eni_trunking, region)
         instance_cpu = shape.vcpu * 1024
@@ -6785,6 +6789,7 @@ class ECSProvider(Provider):
         resolved: dict,
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag EC2 tasks sharing the AMI's default root volume (rc-hbjb).
 
@@ -6798,16 +6803,22 @@ class ECSProvider(Provider):
         the instance's own primary ENI) — for an awsvpc task that is a hard
         per-instance limit, so it is the honest upper bound on neighbours.
         Unmodeled instance types report nothing rather than guess.
+
+        rc-u122: under bridge there IS no ENI ceiling, so the bound falls back
+        to what the sized fleet packs. Going silent there would be exactly
+        backwards — removing the per-task ENI is what lets a box hold 30 tasks
+        instead of 10, so the shared-disk hazard is at its WORST precisely
+        where the old bound stopped existing.
         """
         if resolved.get("root_volume_size") is not None:
             return
         shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
         if shape is None:
             return
-        shape = self._effective_shape(shape, eni_trunking)
+        shape = self._effective_shape(shape, eni_trunking, network_mode)
         eni_ceiling = shape.task_eni_slots
-        if eni_ceiling is None:
-            return
+        if eni_ceiling is None and network_mode != "bridge":
+            return  # unmodeled instance type — report nothing rather than guess
         total_tasks = sum(t.replicas for t in ec2_demands)
         # With trunking the ENI ceiling stops being the real density (m5.xlarge
         # allows 20 tasks but CPU/memory bind long before that), so bound it by
@@ -6815,7 +6826,8 @@ class ECSProvider(Provider):
         # "30 GiB shared 20 ways" for a fleet that will never place 20 tasks on
         # one instance.
         desired = max(1, int(resolved.get("desired_size") or 1))
-        tasks_per_instance = min(eni_ceiling, math.ceil(total_tasks / desired))
+        packed = math.ceil(total_tasks / desired)
+        tasks_per_instance = packed if eni_ceiling is None else min(eni_ceiling, packed)
         neighbours = min(tasks_per_instance, total_tasks)
         if neighbours < 2:
             return
@@ -6826,7 +6838,7 @@ class ECSProvider(Provider):
             f"ECS-optimized AMI's default "
             f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB} GiB root volume — and that "
             f"one disk is SHARED by every task binpacked onto it. This shape "
-            f"holds up to {tasks_per_instance} awsvpc tasks, so a full "
+            f"holds up to {tasks_per_instance} {network_mode} tasks, so a full "
             f"instance leaves roughly {per_task} GiB of scratch per task, not "
             f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB}. Unlike Fargate's per-task "
             f"ephemeral_storage this space is not private: one task filling "
