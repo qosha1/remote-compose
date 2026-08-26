@@ -68,13 +68,27 @@ Then `rc-l6l8` (schema) → `rc-mvse` (multi-element container_definitions),
    task. Ship `rc-m2sn` with the grouping or you trade an ENI ceiling for a
    blast-radius regression — a frontend crash-loop would take down nginx and django.
    ECS also rejects a task where *all* containers are non-essential; validate that.
-2. **Cloud Map.** `service_discovery.tf.j2` emits one A record per service, and the
-   README's pitch is that compose hostnames (`db`, `cache`) keep resolving. In
-   awsvpc a whole task shares ONE IP. **Verify before designing around it:** AWS
-   documents `serviceRegistries` as a list but has historically limited an ECS
-   service to ONE registry. If that limit is real, "register both `postgres.x.local`
-   and `redis.x.local` against one grouped service" is dead and merged services need
-   an app-side address change. Confirm against the API, not the docs prose.
+2. **Cloud Map — SETTLED, do not spend a task re-verifying.** AWS ECS API
+   reference (`CreateService`, `serviceRegistries`): *"Each service may be
+   associated with one service registry. Multiple service registries for each
+   service isn't supported."* Corroborated on the live 30-service estate — every
+   service shows exactly one registry. So **a group gets ONE Cloud Map A record**
+   and merged members lose their own names; callers reach them at the group name
+   and disambiguate by port, since all containers in an awsvpc task share one IP.
+
+   The consequence the whole epic inherits: **grouping is not transparent to the
+   application.** The README promises compose hostnames (`db`, `cache`) keep
+   resolving; for grouped members that promise breaks. `rc plan` should WARN with
+   the exact list of hostnames a proposed group retires — an operator who misses
+   it gets a stack that comes up green and then fails to connect. That warning is
+   part of `rc-2zzd`'s deliverable, not a nicety.
+
+3. **The memory model is a decision, not a default.** `rc-mvse` carries it: a
+   group's task-level memory is the SUM of its members, so one hard ceiling now
+   covers N containers. Members can share slack *within* the task (better than
+   today), but a runaway member can starve its siblings. Pick task-level-hard-only
+   vs per-container soft `memoryReservation` deliberately rather than inheriting
+   it from the template.
 
 ## Rules for this repo
 
@@ -102,3 +116,7 @@ say so early rather than building around a bad premise.
 
 Downstream consumer: `start-simpli` epic **startsim-pzumh**, child **startsim-8omm9**
 is gated on this shipping. bd cannot express cross-store deps, so that gate is prose.
+Note that estate is also deleting 5 idle services first (`startsim-240t4`), so the
+real regroup input is 25 tasks -> 10 groups, not 30 -> 10. That does not change any
+`rc` requirement; it only means the numbers in this brief's table describe the
+estate as measured on 2026-08-26, before that cleanup lands.
