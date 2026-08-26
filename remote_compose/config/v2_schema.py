@@ -56,6 +56,8 @@ from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-co
 )
 from ._task_group_types import (
     UNIFORM_MEMBER_FIELDS,
+    container_named,
+    group_for_service,
     VALID_TASK_GROUP_KEYS,
     ResolvedTaskGroup,
     TaskGroupV2,
@@ -116,6 +118,8 @@ __all__ = [
     # Public functions
     "load",
     "parse",
+    "container_named",
+    "group_for_service",
     "resolve_task_groups",
     "validate_iam_role_refs",
     "validate_network_refs",

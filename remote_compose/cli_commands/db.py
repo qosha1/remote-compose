@@ -542,19 +542,31 @@ def db_psql(ctx, service, sql_command, db_name):
     sess = boto3.Session(profile_name=aws_profile, region_name=region)
     ecs = sess.client("ecs")
 
+    # rc-ib01.2: under task_groups this service is a CONTAINER inside its
+    # group's task, and the ECS service carries the group's name. `--container`
+    # below still names the member, which is what the container is called.
+    from ..config.v2_schema import container_named, group_for_service
+
+    ecs_service = group_for_service(rc_raw, service)
+
     # Find a running task for the service.
     task_arns = (
         ecs.list_tasks(
             cluster=cluster,
-            serviceName=service,
+            serviceName=ecs_service,
             desiredStatus="RUNNING",
         ).get("taskArns")
         or []
     )
     if not task_arns:
+        grouped = (
+            f" (container {service!r} runs in task group {ecs_service!r})"
+            if ecs_service != service
+            else ""
+        )
         raise click.ClickException(
-            f"rc db psql: no running task for service {service!r} in "
-            f"cluster {cluster!r}. Is the stack up?"
+            f"rc db psql: no running task for service {ecs_service!r} in "
+            f"cluster {cluster!r}{grouped}. Is the stack up?"
         )
     task_arn = task_arns[0]
     task_id = task_arn.rsplit("/", 1)[-1]
@@ -565,7 +577,12 @@ def db_psql(ctx, service, sql_command, db_name):
     task_desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
     task_def_arn = task_desc["tasks"][0]["taskDefinitionArn"]
     td = ecs.describe_task_definition(taskDefinition=task_def_arn)
-    container = td["taskDefinition"]["containerDefinitions"][0]
+    # By NAME, not [0]: in a grouped task the first container is whichever
+    # member rc emitted first (nginx, say), and reading POSTGRES_* off it would
+    # silently fall back to 5432/postgres/postgres against the wrong container.
+    container = container_named(
+        td["taskDefinition"].get("containerDefinitions"), service
+    )
     env_dict = {e["name"]: e["value"] for e in container.get("environment") or []}
     pg_port = env_dict.get("POSTGRES_PORT", "5432")
     pg_user = env_dict.get("POSTGRES_USER", "postgres")
