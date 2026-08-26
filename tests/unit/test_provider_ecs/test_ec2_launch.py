@@ -1268,3 +1268,62 @@ class TestManagedScalingIsConfigurable:
             self._capacity_tf(
                 tmp_path, minimum_scaling_step_size=5, maximum_scaling_step_size=2
             )
+
+
+class TestDesiredCapacityIsOwnedByManagedScaling:
+    """managed_scaling is ENABLED unconditionally, so ECS -- not terraform --
+    owns desired_capacity at runtime via a target-tracking policy on
+    CapacityProviderReservation.
+
+    terraform must therefore neither WAIT on that value nor reconcile it. Left
+    to its defaults it does both, and the two controllers deadlock:
+
+        Error: waiting for Auto Scaling Group (browser-mgr-ec2-asg) capacity
+        satisfied: timeout while waiting for state to become 'ok' (last state:
+        'want exactly 1 healthy instance(s) in Auto Scaling Group, have 2',
+        timeout: 10m0s)
+
+    Observed on browser-mgr-prod 2026-08-26: autosize emitted desired 1, ECS had
+    already scaled to 2 to fit the fleet, and EVERY deploy then burned 10 minutes
+    at apply and failed before reaching the roll. The stack was healthy the whole
+    time -- only the pipeline was broken, which is the worst kind of broken
+    because nothing alerts on it.
+
+    This is not tenant-specific: the capacity provider below emits
+    `status = "ENABLED"` for every EC2 stack rc builds, so every one of them has
+    the same latent deadlock.
+    """
+
+    def _capacity_tf(self, tmp_path, **cap):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            _ctx(
+                tmp_path,
+                {"web": _svc("web", "EC2", memory=512)},
+                ec2_capacity={"instance_type": "m6i.large", **cap},
+            ),
+            out,
+        )
+        return (out / "capacity.tf").read_text()
+
+    def test_apply_does_not_wait_on_a_value_ecs_owns(self, tmp_path):
+        assert 'wait_for_capacity_timeout = "0"' in self._capacity_tf(tmp_path)
+
+    def test_drift_in_desired_capacity_is_ignored(self, tmp_path):
+        tf = self._capacity_tf(tmp_path)
+        assert "ignore_changes = [desired_capacity]" in tf
+
+    def test_min_and_max_are_still_ours(self, tmp_path):
+        """max_size is the real control over fleet size — ignoring
+        desired_capacity must not quietly hand ECS the bounds as well."""
+        tf = self._capacity_tf(tmp_path)
+        # both bounds are still declared and still reconciled by terraform
+        assert "min_size            =" in tf
+        assert "max_size            =" in tf
+        # exactly one key is surrendered, and it is desired_capacity
+        assert "ignore_changes = [desired_capacity]" in tf
+
+    def test_desired_is_still_emitted_as_the_creation_value(self, tmp_path):
+        """ignore_changes governs UPDATES. The ASG still has to be born with a
+        size, so desired_capacity must still render."""
+        assert "desired_capacity    =" in self._capacity_tf(tmp_path)
