@@ -393,6 +393,61 @@ bootstrap:
       ecs_clusters:      [${cluster}, 'foundry-tenant-*']   # wildcard = StringLike
       pass_roles:        [${project}-task, ${project}-task-exec]
 
+# --- Multi-container task groups (optional) ---------------------------------
+# Put N compose services in ONE ECS task. Every awsvpc task burns one branch
+# ENI, and on a real 30-service estate the ENI dimension needed TWICE the
+# instances memory did (4x m6i.large where memory wanted 2) — so task
+# granularity, not instance size, is what sets the bill. Grouping keeps the
+# per-tenant security boundary (unlike network_mode: bridge, which collapses
+# every task onto the host ENI under one shared SG) and moves inter-container
+# traffic to localhost.
+#
+# Omit this block entirely and nothing changes: every service becomes its own
+# group named after itself, and rc emits byte-identical terraform.
+#
+# task_groups:
+#   nginx:                                     # group name == ECS service name
+#     services: [nginx, django, frontend]      #            == Cloud Map A record
+#     ingress: nginx                           # which container the ALB targets;
+#                                              # required when >1 member is public
+#   postgres:
+#     services: [postgres, redis]
+#     memory: 1536                             # optional; default = SUM of members
+#
+# Everything else — replicas, stateful, auto_roll, deployment, launch_type,
+# subnets, security_groups, iam_role — is read off the MEMBER services, and rc
+# REJECTS a group whose members disagree. That is deliberate: silently making
+# the app group stateful would turn a rolling deploy into a stop-then-start
+# outage from an rc.yml that reads innocent.
+#
+# THE ONE THING GROUPING CHANGES FOR YOUR APP — read this before you group.
+# AWS ECS allows exactly ONE service registry per service ("Multiple service
+# registries for each service isn't supported" — CreateService), so a group
+# gets ONE Cloud Map A record, at the GROUP's name. Members whose name is not
+# the group's LOSE their own hostname. The promise that compose hostnames like
+# `db` and `cache` just keep resolving has this exception, and nothing else.
+#
+# Reach a merged member at the group name on its own port (containers in one
+# awsvpc task share an IP, and rc validates that their ports don't collide),
+# or at localhost from inside the group. `rc plan` warns with the exact list of
+# hostnames a proposed group retires, and names any compose env var still
+# dialling one.
+#
+# So NAME THE GROUP AFTER THE MEMBER whose hostname you most want to keep —
+# preferably the ALB-fronted one. That member keeps its Cloud Map record, its
+# ECS service name, its task-def family, its terraform address and its ALB
+# target group, which also turns a brownfield regroup into an in-place task-def
+# revision for it instead of a destroy/create.
+#
+# Two more consequences worth knowing up front:
+#   * rolling ANY member rolls the whole group — the task is the unit of
+#     deployment, so there is nothing smaller to roll.
+#   * `rc run` starts the whole TASK (run_task starts a task, not a container),
+#     so a one-off against a member of a stateless group brings its siblings up
+#     too. rc refuses it outright for a stateful group, where it would mean a
+#     second postgres on the same EFS access point. `rc exec` reuses the
+#     already-running task and has neither problem.
+
 services:
   postgres:
     type: infrastructure
@@ -931,6 +986,95 @@ agent config. Tasks keep their own task role either way.
 `http_endpoint` is deliberately not configurable: disabling IMDS entirely stops
 the ECS agent registering the instance, so the stack would never run a task.
 
+### Multi-container task groups
+
+Every ECS task uses `awsvpc` network mode, so **every task burns one ENI** — and
+by default rc renders one task per compose service. On a measured 30-service
+estate that made ENI, not memory, the dimension that set the fleet size: the ENI
+math wanted 4x `m6i.large` while memory alone wanted 2, and the account had
+already hit a real `AssociationLimitExceeded` placement failure. 61.3 GB of
+memory was registered against 5.9 GB actually in use.
+
+`task_groups:` puts N compose services in ONE task, behind one ENI:
+
+```yaml
+task_groups:
+  nginx:                                  # group name == ECS service name
+    services: [nginx, django, frontend]   #            == Cloud Map A record
+    ingress: nginx                        # ALB target; required if >1 is public
+  postgres:
+    services: [postgres, redis]
+    memory: 1536                          # optional; default = SUM of members
+```
+
+Same estate, regrouped 5 tenants x 2 tasks: 10 ENIs, which fits **one**
+`m6i.xlarge`. Note that resizing alone buys nothing — 30 ungrouped tasks still
+need 2x `m6i.xlarge`, the same $/mo as 4x `m6i.large`. Task granularity is the
+lever, not instance size.
+
+**Omit the block and nothing changes.** Every service becomes an implicit group
+of one named after itself, and rc emits byte-identical terraform — guarded by a
+golden fixture that renders through the same template loop as a group of N.
+
+**Why not `network_mode: bridge`?** It removes the ENI dimension outright, and
+it was rejected on evidence rather than taste: bridge puts every task on the
+host ENI under one shared security group, collapsing per-tenant isolation into
+a single boundary. Grouping keeps each tenant's own SG and moves
+inter-container traffic to localhost.
+
+**Group properties derive from members, and disagreement is an error.**
+`replicas`, `stateful`, `auto_roll`, `deployment`, `launch_type`, `subnets`,
+`security_groups`, `iam_role` and `ephemeral_storage` are all read off the
+member services; rc rejects a group whose members disagree instead of picking a
+winner. That is deliberate — silently making the app group `stateful` would turn
+a rolling deploy into a stop-then-start outage from an rc.yml that reads
+innocent, and member order would decide it. `memory` and `cpu` SUM (on Fargate
+`cpu` is a required task-level reservation and AWS only accepts certain
+cpu/memory pairs). Note that `iam_role` uniformity is not a limitation rc chose:
+`task_role_arn` is a task-level field, so a group genuinely has one task role.
+
+#### The one thing grouping changes for your application
+
+AWS ECS allows exactly **one service registry per service** — *"Multiple service
+registries for each service isn't supported"* (`CreateService`). So a group gets
+ONE Cloud Map A record, at the **group's** name, and members whose name is not
+the group's **lose their own hostname**. rc's promise that compose hostnames
+like `db` and `cache` keep resolving has this one exception.
+
+Reach a merged member at the group name on its own port — containers in one
+awsvpc task share an IP, and rc validates their ports don't collide — or at
+`localhost` from inside the group. `rc plan` warns with the exact list of
+hostnames a proposed group retires and names any compose env var still dialling
+one, so this is visible before you apply rather than after the stack comes up
+green and fails to connect.
+
+**Name the group after the member whose hostname you most want to keep**,
+preferably the ALB-fronted one. That member keeps its Cloud Map record, ECS
+service name, task-def family, terraform address, ALB target group and listener
+rule — which also turns a brownfield regroup into an in-place task-def revision
+for it rather than a destroy/create.
+
+#### Operational consequences
+
+- **Rolling any member rolls the whole group.** The task is the unit of
+  deployment; there is nothing smaller. `rc deploy --services django` restarts
+  its groupmates too, which is why members must agree on `auto_roll` — otherwise
+  a groupmate in the default roll set would drag an opted-out member along.
+- **`rc run` starts the whole task.** `run_task` starts a task, not a container,
+  and `containerOverrides` only changes the named one's command. rc refuses it
+  for a member of a *stateful* group (it would put a second postgres on the same
+  EFS access point) and warns for a stateless one, since a migrate hook would
+  bring the siblings up as a throwaway task. `rc exec` reuses the running task
+  and has neither problem.
+- **`rc status` reports one entry per group**, because desired/running counts
+  belong to the task.
+- **`rc logs <member>` is unaffected.** Log stream prefixes stay per-container.
+- **`essential: false` is not crash isolation.** ECS never restarts an
+  individual container, so a non-essential container that exits stays dead while
+  the task runs on without it — quieter, not safer, than the whole-task restart
+  `essential: true` gives you. Default is `true`, and a task must have at least
+  one essential container.
+
 ### EC2 task density is capped by ENI limits, not just CPU/memory
 
 Only relevant when a service sets `launch_type: EC2`. Every ECS task uses
@@ -1118,7 +1262,10 @@ What's built and live-verified on the `portable-deploy` branch:
 - **Explicit `ec2_capacity.instance_type` density validation** — CPU/memory/ENI feasibility checked against a verified table (t3/t3a/t4g/m5/m6i/c5/c6i) even when auto-sizing is bypassed, so an infeasible shape+demand combo fails at `emit_terraform` instead of leaving tasks `PENDING` in real ECS ([details](#ec2-task-density-is-capped-by-eni-limits-not-just-cpumemory))
 - **`existing_alb`/`adopt_owned.alb` + `launch_type: EC2`** — EC2 capacity instances admit ALB traffic from the adopted/existing ALB's own security groups, same source the `tasks` SG already uses; no rc-created ALB security group required
 - ECS cluster (Container Insights off by default — expensive CloudWatch metric ingestion; opt in with `provider_config.ecs.container_insights: true`)
-- Per-service: ECR repo, task def, ECS service, Cloud Map service-discovery entry
+- Per-service: ECR repo. Per **task group**: task def, ECS service, Cloud Map
+  service-discovery entry — and with no `task_groups:` block every service is
+  its own group, so that is one of each per service (see
+  [Multi-container task groups](#multi-container-task-groups))
 - ALB with HTTP→HTTPS redirect (when `domain` is set) + ACM cert + R53 alias records
 - EFS file system + access point per stateful volume; per-service posix uid/gid/mode
 - AWS Secrets Manager: one secret per `.env` file, JSON-blobbed, individual keys exposed via ECS `arn:KEY::` selectors
