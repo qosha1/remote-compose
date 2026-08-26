@@ -16,6 +16,10 @@ from __future__ import annotations
 
 import pytest
 
+from remote_compose.config._task_group_types import (
+    DERIVED_UNIFORM_FIELDS,
+    UNIFORM_MEMBER_FIELDS,
+)
 from remote_compose.config.v2_schema import (
     ConfigError,
     TaskGroupV2,
@@ -283,19 +287,12 @@ class TestUniformityRejects:
     @pytest.mark.parametrize(
         "field,value,yml_key",
         [
-            ("launch_type", "FARGATE", "launch_type"),
-            ("stateful", True, "stateful"),
             ("auto_roll", False, "auto_roll"),
             ("replicas", 3, "replicas"),
             ("iam_role", "worker-role", "iam_role"),
             # The message names the rc.yml key an operator would edit
             # (``subnets``), not the ServiceSpec attribute (``subnet_group``).
             ("subnet_group", "private", "subnets"),
-            (
-                "deployment",
-                {"minimum_healthy_percent": 50, "maximum_percent": 100},
-                "deployment",
-            ),
             ("ephemeral_storage", 40, "ephemeral_storage"),
         ],
     )
@@ -311,19 +308,30 @@ class TestUniformityRejects:
 
     def test_uniform_non_default_value_is_accepted(self):
         specs = _tenant_specs(
-            nginx={"launch_type": "EC2"},
-            django={"launch_type": "EC2"},
-            frontend={"launch_type": "EC2"},
-            reingest={"launch_type": "EC2"},
+            nginx={"replicas": 2},
+            django={"replicas": 2},
+            frontend={"replicas": 2},
+            reingest={"replicas": 2},
         )
         validate_task_groups(_tenant_groups(), specs)
 
     def test_the_error_names_both_members_and_the_field(self):
-        specs = _tenant_specs(django={"stateful": True})
+        specs = _tenant_specs(django={"replicas": 3})
         with pytest.raises(ConfigError) as exc:
             validate_task_groups(_tenant_groups(), specs)
         msg = str(exc.value)
-        assert "django" in msg and "nginx" in msg and "stateful" in msg
+        assert "django" in msg and "nginx" in msg and "replicas" in msg
+
+    @pytest.mark.parametrize("field", DERIVED_UNIFORM_FIELDS)
+    def test_derived_fields_are_not_checked_here(self, field):
+        """launch_type / stateful / deployment are DERIVED, so the rc.yml value
+        is not the rendered one. Checking them against the raw spec would both
+        miss real conflicts (postgres is stateful via its EFS volume, not via
+        the flag) and invent false ones (launch_type is None until
+        default_launch_type applies). The ECS provider re-checks all three
+        against the computed views — see _validate_group_render_uniformity and
+        TestStatefulIsComputedNotDeclared."""
+        assert field not in UNIFORM_MEMBER_FIELDS
 
 
 class TestVolumeRejects:
@@ -418,3 +426,53 @@ class TestIngressRejects:
         resolved = resolve_task_groups(_tenant_groups(), _tenant_specs())
         assert resolved["nginx"].ingress == "nginx"
         assert resolved["postgres"].ingress is None
+
+
+class TestStrandedDomain:
+    """A group gets ONE load_balancer block. A domain on a non-ingress member
+    is routed nowhere and parse()'s duplicate-hostname check will not catch it,
+    because the hostname is perfectly unique — it simply stops resolving."""
+
+    def _groups(self):
+        return parse(
+            _cfg(
+                task_groups={
+                    "nginx": {
+                        "services": ["nginx", "django", "frontend", "reingest"],
+                        "ingress": "nginx",
+                    },
+                    "postgres": {"services": ["postgres", "redis"]},
+                }
+            )
+        ).task_groups
+
+    def test_domain_on_a_non_ingress_member_is_rejected(self):
+        specs = _tenant_specs(
+            nginx={"domain": "acme.example.com"},
+            django={"public": True, "domain": "api.example.com"},
+        )
+        with pytest.raises(ConfigError, match="routed nowhere"):
+            validate_task_groups(self._groups(), specs)
+
+    def test_domain_on_the_ingress_member_is_fine(self):
+        specs = _tenant_specs(nginx={"domain": "acme.example.com"})
+        validate_task_groups(self._groups(), specs)
+
+    def test_domain_on_an_ungrouped_service_is_fine(self):
+        specs = _tenant_specs()
+        specs["standalone"] = _spec(
+            "standalone", public=True, port=8080, domain="solo.example.com"
+        )
+        validate_task_groups(self._groups(), specs)
+
+
+class TestExcludedMemberErrorNamesTheCause:
+    def test_missing_member_error_mentions_compose_filtering(self):
+        """`deploy_names` is filtered by compose.include/exclude BEFORE the
+        provider validates, so 'not in compose or rc.yml' is often a lie."""
+        groups = parse(
+            _cfg(task_groups={"nginx": {"services": ["nginx", "reingest"]}})
+        ).task_groups
+        specs = {k: v for k, v in _tenant_specs().items() if k != "reingest"}
+        with pytest.raises(ConfigError, match="compose.exclude"):
+            validate_task_groups(groups, specs)

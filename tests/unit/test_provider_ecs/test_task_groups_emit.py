@@ -281,6 +281,9 @@ class TestVolumes:
         services["postgres"].volumes = [
             {"name": "pgdata", "mount": "/var/lib/postgresql/data"}
         ]
+        # the EFS mount makes postgres stateful, so its groupmate has to be
+        # too — a group is one ECS service and carries one rollout policy
+        services["redis"].stateful = True
         tf = (_emit(tmp_path, services, _groups()) / "services.tf").read_text()
         pg = re.search(
             r'resource "aws_ecs_task_definition" "postgres" \{(.*?)\n\}\n', tf, re.S
@@ -291,6 +294,8 @@ class TestVolumes:
         services = _tenant_services()
         services["postgres"].volumes = [{"name": "data", "mount": "/pg"}]
         services["redis"].volumes = [{"name": "data", "mount": "/redis"}]
+        # both mount EFS, so both are stateful — the group is uniform and the
+        # rejection below is about the volume NAME, not the rollout policy
         with pytest.raises(ProviderConfigError, match="both mount volume"):
             _emit(tmp_path, services, _groups())
 
@@ -384,3 +389,108 @@ class TestAsgSizedFromGroups:
             return int(re.search(r"desired_capacity\s+= (\d+)", tf).group(1))
 
         assert desired(grouped) <= desired(ungrouped)
+
+
+class TestStatefulIsComputedNotDeclared:
+    """`stateful` is DERIVED (_is_stateful_service fires on EFS volumes and on
+    singleton-scheduler names, not only on the rc.yml flag), so uniformity has
+    to be checked on the computed value. Comparing the raw flag lets a group of
+    [stateless, EFS-backed] pass validation and then render whichever rollout
+    policy the FIRST member happens to imply — two postgres containers against
+    one access point if the stateless member sorts first."""
+
+    @staticmethod
+    def _services():
+        return {
+            "django": _svc("django", memory=2048, port=8000, image="django:1"),
+            "postgres": _svc(
+                "postgres",
+                memory=1024,
+                port=5432,
+                image="postgres:16",
+                volumes=[{"name": "pgdata", "mount": "/var/lib/postgresql/data"}],
+            ),
+        }
+
+    def test_grouping_a_stateless_service_with_an_efs_one_is_rejected(self, tmp_path):
+        groups = {"django": TaskGroupV2(name="django", services=["django", "postgres"])}
+        with pytest.raises(ProviderConfigError, match="stateful"):
+            _emit(tmp_path, self._services(), groups)
+
+    def test_rejected_regardless_of_declared_member_order(self, tmp_path):
+        """The bug is order-dependent rendering; the reject must not be."""
+        groups = {"django": TaskGroupV2(name="django", services=["postgres", "django"])}
+        with pytest.raises(ProviderConfigError, match="stateful"):
+            _emit(tmp_path, self._services(), groups)
+
+    def test_a_singleton_scheduler_cannot_hide_in_a_stateless_group(self, tmp_path):
+        services = {
+            "django": _svc("django", memory=2048, port=8000, image="django:1"),
+            "celery-beat": _svc("celery-beat", memory=512, image="celery:1"),
+        }
+        groups = {
+            "django": TaskGroupV2(name="django", services=["django", "celery-beat"])
+        }
+        with pytest.raises(ProviderConfigError, match="stateful"):
+            _emit(tmp_path, services, groups)
+
+    def test_a_uniformly_stateful_group_is_accepted_and_renders_stop_then_start(
+        self, tmp_path
+    ):
+        services = self._services()
+        services["django"].stateful = True
+        groups = {"django": TaskGroupV2(name="django", services=["django", "postgres"])}
+        tf = (_emit(tmp_path, services, groups) / "services.tf").read_text()
+        assert "deployment_minimum_healthy_percent = 0" in tf
+        assert "deployment_maximum_percent         = 100" in tf
+        assert 'availability_zone_rebalancing = "DISABLED"' in tf
+
+
+class TestLaunchTypeUniformityUsesTheResolvedValue:
+    def test_explicit_ec2_beside_the_ec2_default_is_not_a_conflict(self, tmp_path):
+        """Both members resolve to EC2; only one says so out loud. Comparing the
+        raw field would reject a config that renders identically."""
+        services = {
+            "web": _svc("web", memory=512, public=True, port=80, image="web:1"),
+            "worker": _svc("worker", memory=512, image="worker:1", launch_type="EC2"),
+        }
+        groups = {"web": TaskGroupV2(name="web", services=["web", "worker"])}
+        out = _emit(tmp_path, services, groups, default_launch_type="EC2")
+        assert 'requires_compatibilities = ["EC2"]' in (out / "services.tf").read_text()
+
+
+class TestGroupedStackFailsHonestlyOnUnportedPaths:
+    """emit_terraform renders one service per group, but _ecs_service_name and
+    _force_new_deployments still map a MEMBER name onto a live service. Until
+    rc-ib01.2 / rc-ib01.1 land, those paths must say so rather than exhaust the
+    name-probe chain and surface a bare AWS ServiceNotFound."""
+
+    def _ctx(self, tmp_path):
+        return _ctx(tmp_path, _tenant_services(), _groups())
+
+    def test_force_roll_refuses_a_grouped_stack(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="does not support task_groups"):
+            ECSProvider()._force_new_deployments(self._ctx(tmp_path), ["django"])
+
+    def test_the_error_names_the_declared_groups(self, tmp_path):
+        with pytest.raises(ProviderConfigError) as exc:
+            ECSProvider()._force_new_deployments(self._ctx(tmp_path), ["django"])
+        msg = str(exc.value)
+        assert "nginx = [nginx, django, frontend, reingest]" in msg
+        assert "rc-ib01" in msg
+
+    def test_exec_refuses_a_grouped_stack(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="rc exec"):
+            ECSProvider().exec(self._ctx(tmp_path), "django", ["true"])
+
+    def test_run_refuses_a_grouped_stack(self, tmp_path):
+        with pytest.raises(ProviderConfigError, match="rc run"):
+            ECSProvider().run_one_off(self._ctx(tmp_path), "django", ["true"])
+
+    def test_an_ungrouped_stack_is_unaffected(self, tmp_path):
+        """The guard must be inert for every existing rc user."""
+        from remote_compose.provider.ecs.provider import (
+            _reject_grouped_service_lookup,
+        )
+
+        _reject_grouped_service_lookup(_ctx(tmp_path, _tenant_services()), "rc deploy")

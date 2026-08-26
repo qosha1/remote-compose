@@ -1083,6 +1083,113 @@ def _task_group_views(
     return out
 
 
+# The rendered counterparts of config's DERIVED_UNIFORM_FIELDS: what actually
+# lands in the task definition / service, after default_launch_type,
+# _is_stateful_service and _deployment_percents have had their say.
+_GROUP_RENDERED_UNIFORM_FIELDS = (
+    ("launch_type", "launch_type"),
+    ("stateful", "stateful"),
+    ("deployment_min_healthy_percent", "deployment.minimum_healthy_percent"),
+    ("deployment_max_percent", "deployment.maximum_percent"),
+)
+
+
+def _validate_group_render_uniformity(
+    resolved: dict[str, Any],
+    services_view: list[dict[str, Any]],
+    specs: dict[str, Any],
+) -> None:
+    """Reject a group whose members render DIFFERENT task/service settings.
+
+    The config layer compares what rc.yml says; this compares what rc emits.
+    They diverge exactly where a field is derived rather than declared, and
+    the divergence is not cosmetic:
+
+      * ``stateful`` also fires on an EFS volume and on a singleton-scheduler
+        name. A group of [django, postgres-with-volumes] has two False flags in
+        rc.yml, so the config check passes -- and then the group renders
+        whichever policy ``containers[0]`` implies. With django first that is
+        min_healthy=100 / max=200, i.e. two postgres containers against one EFS
+        access point for the length of a roll, which is the split-brain the
+        stateful branch exists to prevent. Reversing the declared member order
+        silently flips the behaviour.
+      * ``launch_type`` is None until ``default_launch_type`` is applied, so
+        comparing the raw field would REJECT two members that resolve
+        identically.
+
+    Rejecting rather than coercing, for the reason the whole feature does:
+    quietly making the app group stateful is a real outage produced by an
+    rc.yml that reads innocent. The message names the members and, for
+    stateful, which of the three signals fired.
+    """
+    by_name = {sv["name"]: sv for sv in services_view}
+    for gname in sorted(resolved):
+        group = resolved[gname]
+        if group.is_implicit or len(group.members) < 2:
+            continue
+        members = [m for m in group.members if m in by_name]
+        if len(members) < 2:
+            continue
+        anchor = members[0]
+        for key, label in _GROUP_RENDERED_UNIFORM_FIELDS:
+            base = by_name[anchor].get(key)
+            for member in members[1:]:
+                other = by_name[member].get(key)
+                if other == base:
+                    continue
+                detail = ""
+                if key == "stateful":
+                    # _stateful_reason names which of the three signals fired
+                    # and is only meaningful for the member that IS stateful --
+                    # its final branch is a fallback, so calling it on a
+                    # stateless service invents a scheduler that isn't there.
+                    stateful_one = anchor if base else member
+                    other_one = member if base else anchor
+                    detail = (
+                        f" {stateful_one!r} is stateful because "
+                        f"{_stateful_reason(stateful_one, specs.get(stateful_one))}"
+                        f"; {other_one!r} is not."
+                    )
+                raise ProviderConfigError(
+                    f"task_groups.{gname}: {anchor!r} and {member!r} resolve to "
+                    f"different {label} ({base!r} vs {other!r}), and one task "
+                    f"has one.{detail} rc will not pick a winner here -- the "
+                    f"member order would decide it. Split the group, or make "
+                    f"them agree."
+                )
+
+
+def _reject_grouped_service_lookup(ctx: DeployContext, operation: str) -> None:
+    """Fail clearly on the paths that still resolve a MEMBER to an ECS service.
+
+    ``emit_terraform`` renders one ECS service per GROUP, but
+    ``_ecs_service_name`` (7 call sites) and ``_force_new_deployments`` still
+    map an rc.yml service name straight onto a live service name. On a grouped
+    stack that name does not exist, so without this the operator gets a raw AWS
+    ServiceNotFound after the probe chain (rendered / bare / cluster-prefix)
+    quietly exhausts itself -- and on a force-roll, N members of one group would
+    issue N update_service calls against the same service.
+
+    rc-ib01.2 adds the member->group indirection and rc-ib01.1 the force-roll
+    dedupe. Until they land, a declared group is renderable but not rollable,
+    and saying so is better than a confusing failure.
+    """
+    if not (ctx.task_groups or {}):
+        return
+    groups = ", ".join(
+        f"{name} = [{', '.join(g.services)}]"
+        for name, g in sorted((ctx.task_groups or {}).items())
+    )
+    raise ProviderConfigError(
+        f"{operation} does not support task_groups yet. This stack declares "
+        f"{groups}, so each group is ONE ECS service and its members no longer "
+        f"have services of their own -- looking one up by name would fail "
+        f"against AWS with a bare ServiceNotFound. `rc plan` / `rc up` "
+        f"(terraform apply) work; rolling and per-service commands land with "
+        f"rc-ib01.1 and rc-ib01.2."
+    )
+
+
 def _ecs_service_name(ctx: DeployContext, compose_name: str) -> str:
     """compose service name -> the live ECS service name."""
     return f"{_service_prefix(ctx)}{compose_name}"
@@ -2220,6 +2327,10 @@ class ECSProvider(Provider):
         except ConfigError as exc:
             raise ProviderConfigError(str(exc)) from exc
         resolved_groups = resolve_task_groups(ctx.task_groups or {}, ctx.services)
+        # The three DERIVED fields config cannot compare (launch_type is None
+        # before default_launch_type; stateful and the deployment percentages
+        # are computed) get checked here, against what rc will actually render.
+        _validate_group_render_uniformity(resolved_groups, services_view, ctx.services)
         groups_view = _task_group_views(resolved_groups, services_view)
 
         # Everything ALB-facing keys off GROUPS from here down: a target group
@@ -4434,6 +4545,7 @@ class ECSProvider(Provider):
             type_ = spec.type if spec else "application"
             return (self._DEPLOY_ORDER.get(type_, 1), svc_name)
 
+        _reject_grouped_service_lookup(ctx, "rc deploy (force-roll)")
         ordered = sorted(services, key=priority)
         # rc-5h8.11: legacy stacks may have ECS service names prefixed with
         # the original project name (e.g. cluster 'ss-debuggai-prod' →
@@ -5386,6 +5498,7 @@ class ECSProvider(Provider):
         and returns the container's real exit code; without it, returns the
         task ARN immediately (exit 0).
         """
+        _reject_grouped_service_lookup(ctx, "rc run")
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)
@@ -5537,6 +5650,7 @@ class ECSProvider(Provider):
         """
         import os as _os
 
+        _reject_grouped_service_lookup(ctx, "rc exec")
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         region = ecs_cfg.get("region")

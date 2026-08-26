@@ -61,15 +61,33 @@ VALID_TASK_GROUP_KEYS = {"services", "ingress", "memory"}
 #:
 #: Maps the ServiceSpec attribute onto the rc.yml key an operator would edit.
 UNIFORM_MEMBER_FIELDS = {
-    "launch_type": "launch_type",
     "replicas": "replicas",
-    "stateful": "stateful",
     "auto_roll": "auto_roll",
-    "deployment": "deployment",
     "iam_role": "iam_role",
     "subnet_group": "subnets",
     "ephemeral_storage": "ephemeral_storage",
 }
+
+# DERIVED task/service fields are deliberately NOT in the map above, even
+# though a group must be uniform in them too. They cannot be compared here
+# because the rc.yml value is not the rendered value:
+#
+#   launch_type  -- None until the provider applies default_launch_type, so two
+#                   members that both resolve to EC2 (one explicit, one by
+#                   default) would be reported as a conflict they do not have.
+#   stateful     -- ``_is_stateful_service`` also fires on an EFS volume and on
+#                   a singleton-scheduler name, so comparing the raw flag lets
+#                   [django, postgres-with-volumes] pass while rendering
+#                   whichever rollout policy the FIRST member implies. At
+#                   min_healthy=100/max=200 that is two postgres containers on
+#                   one EFS access point during a roll.
+#   deployment   -- ``_deployment_percents`` folds `stateful` in, so it
+#                   inherits the same problem.
+#
+# The ECS provider re-checks these three against the COMPUTED per-service views
+# just before it folds them into a group. See
+# ``_validate_group_render_uniformity``.
+DERIVED_UNIFORM_FIELDS = ("launch_type", "stateful", "deployment")
 
 
 @dataclass
@@ -275,8 +293,10 @@ def validate_task_groups(
             if member not in known:
                 raise ConfigError(
                     f"task_groups.{gname} names service {member!r}, which is "
-                    f"in neither rc.yml services: nor docker-compose.yml "
-                    f"(known: {sorted(known) or 'none'})"
+                    f"not in the deploy set. Either it is in neither rc.yml "
+                    f"services: nor docker-compose.yml, or compose.include / "
+                    f"compose.exclude filtered it out. "
+                    f"Deploying: {sorted(known) or 'nothing'}"
                 )
         # A group name that equals one of its OWN members is the recommended
         # form — it keeps that member's terraform address, ECS service name,
@@ -387,3 +407,23 @@ def _validate_one_group(group: ResolvedTaskGroup, specs: dict[str, Any]) -> None
             f"task_groups.{group.name}: ingress {group.ingress!r} declares no "
             f"port, so there is nothing for the ALB target group to forward to."
         )
+    # A group gets ONE load_balancer block, pointed at the ingress container.
+    # A domain on any other member would be read from nowhere: no target group,
+    # no listener rule, no cert SAN, no R53 record -- and parse()'s
+    # duplicate-hostname check does not catch it either, because the hostname is
+    # unique. It would just stop resolving, which is exactly the silent
+    # half-broken outcome this whole feature is trying not to produce.
+    stranded = [
+        m for m in members if m != group.ingress and getattr(specs[m], "domain", None)
+    ]
+    if stranded:
+        for m in stranded:
+            domain = getattr(specs[m], "domain", None)
+            raise ConfigError(
+                f"task_groups.{group.name}: {m!r} declares domain {domain!r} but "
+                f"is not this group's ingress "
+                f"({group.ingress!r}). A task gets ONE load balancer target, so "
+                f"that hostname would be routed nowhere. Move {m!r} out of the "
+                f"group, make it the ingress, or drop its domain and route the "
+                f"hostname at {group.ingress!r} instead."
+            )
