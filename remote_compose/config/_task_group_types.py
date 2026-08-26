@@ -427,3 +427,44 @@ def _validate_one_group(group: ResolvedTaskGroup, specs: dict[str, Any]) -> None
                 f"group, make it the ingress, or drop its domain and route the "
                 f"hostname at {group.ingress!r} instead."
             )
+
+
+def group_for_service(rc_yml_raw: Any, service: str) -> str:
+    """The ECS service name that runs ``service``, from a RAW rc.yml mapping.
+
+    The dict-level twin of the provider's ``_ecs_service_name`` indirection,
+    for CLI paths that talk to AWS without ever building a DeployContext
+    (``rc db``). Returns ``service`` unchanged when it is ungrouped, when it is
+    a group's own name, or when rc.yml declares no groups at all.
+
+    Tolerant of a malformed block on purpose: this runs on the way to a psql
+    prompt, and a confusing traceback there is worse than falling back to the
+    name the user typed.
+    """
+    if not isinstance(rc_yml_raw, dict):
+        return service
+    groups = rc_yml_raw.get("task_groups")
+    if not isinstance(groups, dict):
+        return service
+    for gname, body in sorted(groups.items()):
+        members = (body or {}).get("services") if isinstance(body, dict) else None
+        if isinstance(members, list) and service in members:
+            return str(gname)
+    return service
+
+
+def container_named(containers: Any, name: str) -> Any:
+    """The container definition called ``name``, else the first one.
+
+    ``containerDefinitions[0]`` was a safe shorthand while every task held
+    exactly one container. In a group it is whichever member sorts first, so a
+    caller reading POSTGRES_* off it would silently get nginx's environment and
+    fall back to 5432/postgres/postgres. The fallback is kept for a task whose
+    containers rc did not name (an adopted/hand-written task definition).
+    """
+    if not isinstance(containers, list) or not containers:
+        return {}
+    for c in containers:
+        if isinstance(c, dict) and c.get("name") == name:
+            return c
+    return containers[0]

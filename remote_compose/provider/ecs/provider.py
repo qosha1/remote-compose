@@ -21,7 +21,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple, Optional
+from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 
 from ...config.v2_schema import (
     ConfigError,
@@ -1159,40 +1159,120 @@ def _validate_group_render_uniformity(
                 )
 
 
-def _reject_grouped_service_lookup(ctx: DeployContext, operation: str) -> None:
-    """Fail clearly on the paths that still resolve a MEMBER to an ECS service.
+def _group_roll_policy(
+    ctx: DeployContext, group_name: str, members: list[str]
+) -> "tuple[bool, DeploymentPercents, int]":
+    """(stateful, percentages, replicas) for one group, or a clear rejection.
 
-    ``emit_terraform`` renders one ECS service per GROUP, but
-    ``_ecs_service_name`` (7 call sites) and ``_force_new_deployments`` still
-    map an rc.yml service name straight onto a live service name. On a grouped
-    stack that name does not exist, so without this the operator gets a raw AWS
-    ServiceNotFound after the probe chain (rendered / bare / cluster-prefix)
-    quietly exhausts itself -- and on a force-roll, N members of one group would
-    issue N update_service calls against the same service.
+    A group is ONE ECS service, so it carries one rollout policy and one
+    desired count. The emit path validates this against the rendered views, but
+    ``rc deploy --no-state`` bypasses terraform entirely -- this is then the
+    only place the conflict can be caught before it reaches AWS, which is
+    exactly the position rc-6akx put the percentage validation in.
 
-    rc-ib01.2 adds the member->group indirection and rc-ib01.1 the force-roll
-    dedupe. Until they land, a declared group is renderable but not rollable,
-    and saying so is better than a confusing failure.
+    Computed, not declared: ``_is_stateful_service`` also fires on an EFS
+    volume and on a singleton-scheduler name, so comparing rc.yml's ``stateful``
+    flag would let [django, postgres-with-volumes] through and then roll it at
+    100/200 -- two postgres containers on one access point (rc-ib01.3).
     """
-    if not (ctx.task_groups or {}):
-        return
-    groups = ", ".join(
-        f"{name} = [{', '.join(g.services)}]"
-        for name, g in sorted((ctx.task_groups or {}).items())
-    )
-    raise ProviderConfigError(
-        f"{operation} does not support task_groups yet. This stack declares "
-        f"{groups}, so each group is ONE ECS service and its members no longer "
-        f"have services of their own -- looking one up by name would fail "
-        f"against AWS with a bare ServiceNotFound. `rc plan` / `rc up` "
-        f"(terraform apply) work; rolling and per-service commands land with "
-        f"rc-ib01.1 and rc-ib01.2."
-    )
+    anchor = members[0]
+    a_spec = ctx.services.get(anchor)
+    a_stateful = _is_stateful_service(anchor, a_spec)
+    a_dep = _deployment_percents(anchor, a_spec)
+    a_replicas = getattr(a_spec, "replicas", 1) if a_spec else 1
+
+    for member in members[1:]:
+        spec = ctx.services.get(member)
+        if _is_stateful_service(member, spec) != a_stateful:
+            stateful_one = anchor if a_stateful else member
+            other_one = member if a_stateful else anchor
+            raise ProviderConfigError(
+                f"task_groups.{group_name}: cannot roll -- {anchor!r} and "
+                f"{member!r} resolve to different stateful. {stateful_one!r} is "
+                f"stateful because "
+                f"{_stateful_reason(stateful_one, ctx.services.get(stateful_one))}"
+                f"; {other_one!r} is not. One task has one rollout policy, so "
+                f"rolling this group would apply the wrong one to half of it."
+            )
+        dep = _deployment_percents(member, spec)
+        if (dep.minimum_healthy, dep.maximum) != (
+            a_dep.minimum_healthy,
+            a_dep.maximum,
+        ):
+            raise ProviderConfigError(
+                f"task_groups.{group_name}: cannot roll -- {anchor!r} wants "
+                f"deployment {a_dep.minimum_healthy}/{a_dep.maximum} and "
+                f"{member!r} wants {dep.minimum_healthy}/{dep.maximum}. A group "
+                f"is one ECS service and rolls under one deploymentConfiguration."
+            )
+        replicas = getattr(spec, "replicas", 1) if spec else 1
+        if replicas != a_replicas:
+            raise ProviderConfigError(
+                f"task_groups.{group_name}: cannot roll -- {anchor!r} declares "
+                f"replicas={a_replicas} and {member!r} declares "
+                f"replicas={replicas}. Containers in one task scale together."
+            )
+
+    return a_stateful, a_dep, a_replicas
+
+
+def _member_to_group(ctx: DeployContext) -> dict[str, str]:
+    """rc.yml service name -> the task group that runs it (rc-ib01.2).
+
+    Empty for any stack without ``task_groups``, which is the fast path and
+    every stack built before groups existed.
+    """
+    groups = getattr(ctx, "task_groups", None) or {}
+    if not groups:
+        return {}
+    out: dict[str, str] = {}
+    for gname in sorted(groups):
+        for member in getattr(groups[gname], "services", None) or []:
+            out[member] = gname
+    return out
 
 
 def _ecs_service_name(ctx: DeployContext, compose_name: str) -> str:
-    """compose service name -> the live ECS service name."""
-    return f"{_service_prefix(ctx)}{compose_name}"
+    """compose service name -> the live ECS service name.
+
+    Under ``task_groups`` a member has NO ECS service of its own: it is a
+    container inside its group's task, and the group's name is the service
+    name. This is the single chokepoint for that indirection -- ``rc exec``,
+    ``rc run`` and ``rc db`` already pass ``--container <member>``, and the
+    container name inside a group task IS the member name, so fixing the
+    SERVICE lookup here is all they need.
+
+    A name that is not a member (including a group's own name, and any name rc
+    does not own) passes through unchanged.
+    """
+    resolved = _member_to_group(ctx).get(compose_name, compose_name)
+    return f"{_service_prefix(ctx)}{resolved}"
+
+
+def _ecs_service_names(ctx: DeployContext, compose_names: Iterable[str]) -> list[str]:
+    """Distinct live ECS service names for a set of rc.yml service names.
+
+    Deduping is not an optimisation. N members of one group resolve to ONE
+    service, and describing it N times is merely wasteful while ROLLING it N
+    times is N sequential deployments of the same task. Order follows first
+    appearance so callers keep whatever ordering they arrived with.
+    """
+    seen: dict[str, None] = {}
+    for name in compose_names:
+        seen.setdefault(_ecs_service_name(ctx, name), None)
+    return list(seen)
+
+
+def _ecs_group_names(ctx: DeployContext) -> list[str]:
+    """Every task group in the stack, by name, sorted.
+
+    The unit an ECS *service* corresponds to. For an ungrouped stack this is
+    exactly ``sorted(ctx.services)``, so callers that switch to it see no
+    change.
+    """
+    owner = _member_to_group(ctx)
+    names = {owner.get(n, n) for n in ctx.services}
+    return sorted(names)
 
 
 def _compose_service_name(ctx: DeployContext, ecs_name: str) -> str:
@@ -4540,13 +4620,39 @@ class ECSProvider(Provider):
         session = self.session_factory(ctx)
         client = session.client("ecs")
 
-        def priority(svc_name: str) -> tuple[int, str]:
-            spec = ctx.services.get(svc_name)
-            type_ = spec.type if spec else "application"
-            return (self._DEPLOY_ORDER.get(type_, 1), svc_name)
+        # rc-ib01.1: roll GROUPS, not members. N members of one group are N
+        # containers in ONE task, so rolling them individually is N sequential
+        # deployments of the same service -- and asking for any one of them
+        # necessarily rolls all of them, because the task is the unit.
+        owner = _member_to_group(ctx)
+        group_members: dict[str, list[str]] = {}
+        for svc_name in services:
+            gname = owner.get(svc_name, svc_name)
+            group_members.setdefault(gname, [])
+        # Members come from the GROUP, not from the caller's filter: rolling
+        # `--services django` restarts nginx and frontend too, so the policy
+        # has to be computed over everything that will actually be replaced.
+        for gname in group_members:
+            declared = getattr((ctx.task_groups or {}).get(gname), "services", None)
+            group_members[gname] = [
+                m for m in (declared or [gname]) if m in ctx.services
+            ] or [gname]
 
-        _reject_grouped_service_lookup(ctx, "rc deploy (force-roll)")
-        ordered = sorted(services, key=priority)
+        def priority(group_name: str) -> tuple[int, str]:
+            # A group inherits its HIGHEST-priority member's type, so an
+            # infrastructure group still primes before an app group. Ordering
+            # WITHIN a group is meaningless -- containers in a task start
+            # together -- which is why _DEPLOY_ORDER now applies one level up.
+            ranks = [
+                self._DEPLOY_ORDER.get(
+                    (ctx.services[m].type if ctx.services.get(m) else "application"),
+                    1,
+                )
+                for m in group_members[group_name]
+            ]
+            return (min(ranks) if ranks else 1, group_name)
+
+        ordered = sorted(group_members, key=priority)
         # rc-5h8.11: legacy stacks may have ECS service names prefixed with
         # the original project name (e.g. cluster 'ss-debuggai-prod' →
         # services 'ss-debuggai-django') even after the rc.yml project
@@ -4563,12 +4669,12 @@ class ECSProvider(Provider):
         # resolving inside the loop would roll services 1..n-1 and only then
         # raise on service n, leaving the stack half-deployed on a config rc
         # could have rejected before touching AWS at all.
-        deployments = {
-            svc: _deployment_percents(svc, ctx.services.get(svc)) for svc in ordered
+        policies = {
+            gname: _group_roll_policy(ctx, gname, group_members[gname])
+            for gname in ordered
         }
         rolled_names: list[str] = []
         for svc in ordered:
-            spec = ctx.services.get(svc)
             # Stateful services roll one-at-a-time (min=0/max=100); everything
             # else gets zero-downtime config: keep 100% of old tasks until new
             # ones are healthy, up to 200% during the roll, + circuit breaker to
@@ -4591,8 +4697,7 @@ class ECSProvider(Provider):
             # live service — the identical silent-revert failure, one field
             # over. Stateful services keep dep_cfg=None (leave the live
             # config alone), which is what they have always done.
-            stateful = _is_stateful_service(svc, spec)
-            deployment = deployments[svc]
+            stateful, deployment, group_replicas = policies[svc]
             dep_cfg = (
                 None
                 if stateful
@@ -4624,11 +4729,13 @@ class ECSProvider(Provider):
                     )
                     if dep_cfg is not None:
                         kwargs["deploymentConfiguration"] = dep_cfg
-                    if reconcile_scale and spec is not None:
+                    if reconcile_scale:
                         # rc-wji.2: mirror services.tf.j2 desired_count so a
                         # --no-state roll applies rc.yml replicas (terraform is
-                        # bypassed and won't set it otherwise).
-                        kwargs["desiredCount"] = spec.replicas
+                        # bypassed and won't set it otherwise). rc-ib01.1: the
+                        # GROUP's replicas -- members are validated to agree,
+                        # since a task scales as a unit.
+                        kwargs["desiredCount"] = group_replicas
                     client.update_service(**kwargs)
                     last_err = None
                     rolled_names.append(name)
@@ -5041,7 +5148,9 @@ class ECSProvider(Provider):
         # are unioned -- so they have to be in the same namespace or a prefixed
         # stack drains nothing and "missed" reports every live service as
         # unknown.
-        ec2_services = [_ecs_service_name(ctx, n) for n in self._ec2_service_names(ctx)]
+        # rc-ib01.2: deduped -- members of one group resolve to a single ECS
+        # service, and draining it once is the whole job.
+        ec2_services = _ecs_service_names(ctx, self._ec2_service_names(ctx))
         # rc-915l: ctx.services is built with require_compose_file=False on
         # this path, so a compose-only service is missing from it entirely
         # once the compose file is gone (ephemeral stacks delete theirs the
@@ -5278,10 +5387,13 @@ class ECSProvider(Provider):
 
         session = self.session_factory(ctx)
         client = session.client("ecs")
-        for svc in targets:
+        # rc-ib01.2: one update_service per distinct ECS service. Rolling
+        # django + nginx + frontend of one group is ONE deployment of one task,
+        # not three sequential ones.
+        for rendered in _ecs_service_names(ctx, targets):
             client.update_service(
                 cluster=cluster,
-                service=_ecs_service_name(ctx, svc),
+                service=rendered,
                 forceNewDeployment=True,
             )
         return DeployResult(
@@ -5301,13 +5413,19 @@ class ECSProvider(Provider):
         session = self.session_factory(ctx)
         client = session.client("ecs")
 
-        service_names = sorted(ctx.services.keys())
+        # rc-ib01.2: one entry per TASK GROUP, not per compose service. An ECS
+        # service's desired/running counts belong to the task, so a group of
+        # four containers has ONE set of them -- reporting per member would
+        # describe a service that does not exist and call every container
+        # "service not found". Identical to sorted(ctx.services) when no
+        # task_groups are declared.
+        service_names = _ecs_group_names(ctx)
         if not service_names:
             return StatusReport(services=[], cluster_health="inactive")
 
         resp = client.describe_services(
             cluster=cluster,
-            services=[_ecs_service_name(ctx, n) for n in service_names],
+            services=_ecs_service_names(ctx, service_names),
         )
         # Key the report by the COMPOSE name: everything downstream (and the
         # user) refers to services the way rc.yml does, not the way they are
@@ -5498,7 +5616,6 @@ class ECSProvider(Provider):
         and returns the container's real exit code; without it, returns the
         task ARN immediately (exit 0).
         """
-        _reject_grouped_service_lookup(ctx, "rc run")
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)
@@ -5650,7 +5767,6 @@ class ECSProvider(Provider):
         """
         import os as _os
 
-        _reject_grouped_service_lookup(ctx, "rc exec")
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         region = ecs_cfg.get("region")
