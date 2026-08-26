@@ -143,6 +143,18 @@ resource "aws_autoscaling_group" "ec2" {
   min_size            = 1
   max_size            = 2
   desired_capacity    = 1
+  # managed_scaling below is ENABLED unconditionally, which makes ECS the OWNER
+  # of desired_capacity via an AWS-managed target-tracking policy on
+  # CapacityProviderReservation. terraform must therefore neither wait on nor
+  # reconcile that value, or it fights a controller it cannot win against:
+  #   Error: waiting for Auto Scaling Group (...) capacity satisfied: timeout
+  #   while waiting for state to become 'ok' (last state: 'want exactly 1
+  #   healthy instance(s) in Auto Scaling Group, have 2', timeout: 10m0s)
+  # Observed on browser-mgr-prod 2026-08-26: autosize emitted desired 1, ECS had
+  # scaled to 2 to fit the fleet, and EVERY deploy failed at apply for 10 minutes
+  # before reaching the roll. desired_size stays meaningful as the value the ASG
+  # is CREATED with; after that it belongs to ECS.
+  wait_for_capacity_timeout = "0"
   launch_template {
     id      = aws_launch_template.ec2.id
     version = "$Latest"
@@ -172,6 +184,14 @@ resource "aws_autoscaling_group" "ec2" {
     key                 = "ManagedBy"
     value               = "remote-compose"
     propagate_at_launch = true
+  }
+
+  lifecycle {
+    # Same reason as wait_for_capacity_timeout above: ECS managed scaling moves
+    # desired_capacity at runtime, so terraform seeing "drift" here is the system
+    # working as designed. min_size/max_size are still ours -- max is the real
+    # control over fleet size.
+    ignore_changes = [desired_capacity]
   }
 }
 
