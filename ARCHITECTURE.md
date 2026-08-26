@@ -543,18 +543,30 @@ should provision, verify, and destroy within ~10 minutes; the reap cron
   via TTL, dev-mode hot-reload). rc.yml v2 + migrate CLI. Terraform/
   image modules. AWS Copilot importer. Compose-only scaffolder.
   Audit sweep. Local pg_dump → S3 → restore round-trip.
+  Multi-container task groups (`task_groups:` — N compose services in
+  one ECS task, behind one ENI; see README →
+  Multi-container task groups). NOTE: task groups are built and
+  covered by tests but have never been `terraform apply`-ed against
+  real AWS (rc-ib01.5) — the same standing caveat rc-ero carries for
+  the declared network.
 
-  **Test count: 1,397 unit + contract pass, 4 skip; 36 integration
-  pass (real terraform binary + moto).** Run them via the canonical
-  3-tier invocation in CLAUDE.md → Testing.
+  **Test count (measured 2026-08-26): 3,097 unit + contract pass, 4
+  skip; 70 integration pass, 3 skip (real terraform binary + moto); 5
+  e2e collected but gated behind `RC_E2E=1` + real AWS.** Run them via
+  the canonical 3-tier invocation in CLAUDE.md → Testing. This number
+  drifts every week — treat it as a scale indicator, not a contract,
+  and re-measure rather than citing it.
 
-- **Open** (tracked in bd, see `bd list --status=open` for the
-  authoritative list): Kubernetes provider (rc-e5u.8), direct EC2-VM
-  provider for active service mgmt + agents (remote-compose-7ao),
-  legacy-service deprecation tracker (remote-compose-sdb.5),
-  FakeProvider relocation out of installed package
-  (remote-compose-sdb.10), and the e2e-tier execution beads under
-  remote-compose-oug for sentinal/Mini-v4/multi-domain.
+- **Open** — `bd list --status=open` is the authoritative list; the
+  named items below are a snapshot. Kubernetes provider (rc-e5u.8),
+  EFS encryption on fresh accounts (rc-e5u.26), field verification of
+  multi-container task groups (rc-ib01.5), and the brownfield regroup
+  procedure (rc-93ol).
+
+  (Four bead IDs previously cited here — remote-compose-7ao,
+  remote-compose-sdb.5, remote-compose-sdb.10, remote-compose-oug —
+  do not exist in the bd database and were removed rather than
+  guessed at. If that work is still wanted it needs re-filing.)
 
 - **Legacy**: the imperative pipeline in `remote_compose/services/`
   is ~18,850 lines across ~40 files (efs_service 1396, compose_converter

@@ -28,7 +28,7 @@ rc up --from-compose docker-compose.yml
 
 Reads your compose, asks for the handful of things compose can't express (CPU/memory, secrets, public hostname, EFS uid), generates a clean ECS terraform module, applies it. Then everyday verbs: `rc deploy`, `rc lifecycle migrate`, `rc db push`, `rc destroy`. The module is yours — `cd terraform/ && terraform apply` works without `rc`.
 
-> **Status: alpha. Hand-tested against a real production Django stack.** Active branch: **`portable-deploy`**. Legacy v1 (SSH/Django-app) lives below for users on `main`. See [ARCHITECTURE.md](ARCHITECTURE.md) for design + validation, [AGENTS.md](AGENTS.md) for workflow.
+> **Status: alpha. Hand-tested against a real production Django stack.** The portable provider line (rc.yml **v2**) is what this README documents and is what ships on `main`. The original SSH/Django-app path (**v1**) is still supported for stacks that have not migrated — see [Legacy v1](#legacy-v1-ssh--django-app) at the end, and `rc migrate` to move. For design + validation see [ARCHITECTURE.md](ARCHITECTURE.md); for workflow, [AGENTS.md](AGENTS.md).
 
 ---
 
@@ -322,6 +322,43 @@ provider_config:
     # would replace/destroy a traffic-serving ALB). Before apply, rc boto3-
     # verifies the given ARNs are actually live and hard-errors if not — a bad
     # ARN here would otherwise have terraform create a brand-new ALB instead.
+
+    # --- Smaller provider_config.ecs knobs ------------------------------------
+    # All optional; every default keeps the emitted terraform as it was before
+    # the setting existed.
+    #   container_insights: false     # ECS Container Insights. Off by default —
+    #                                 # real per-cluster CloudWatch ingestion cost.
+    #   idle_timeout: 60              # ALB connection idle timeout, seconds. AWS's
+    #                                 # own default; raise for WebSockets / SSE /
+    #                                 # streaming, or the LB drops the socket
+    #                                 # mid-stream. Emitted explicitly so the value
+    #                                 # is tracked in rc.yml instead of drifting
+    #                                 # out-of-band on the live LB.
+    #   share_image_repos: true       # services that share a build identity share
+    #                                 # ONE ECR repo (the owner emits it, siblings
+    #                                 # reference it). false = one repo per service.
+    #   ignore_task_definition_changes: false
+    #                                 # emit lifecycle { ignore_changes =
+    #                                 # [container_definitions] } on every task def,
+    #                                 # AND ignore_changes=[task_definition] on the
+    #                                 # service. For stacks whose container defs are
+    #                                 # owned out-of-band (a secrets reconcile
+    #                                 # script, `rc deploy --no-state` force-rolls).
+    #                                 # Without it a stateful apply re-registers a
+    #                                 # revision that reverts them — notably
+    #                                 # STRIPPING reconciled secrets. `rc plan`
+    #                                 # warns when an apply would replace such a
+    #                                 # task def anyway (ignore_changes cannot
+    #                                 # suppress a ForceNew replacement).
+    #   existing_cloud_map_namespace_id: ns-abc123
+    #                                 # adopt a Cloud Map private DNS namespace
+    #                                 # instead of creating one — for joining an
+    #                                 # existing service mesh.
+    # Per-VOLUME EFS adoption lives on the service, not here:
+    #   services.<svc>.volumes[].efs_id: fs-abc          # mount an EXISTING file
+    #   services.<svc>.volumes[].access_point_id: fsap-x # system / access point
+    #                                 # rather than having rc create them.
+    #                                 # access_point_id requires efs_id.
 
     # --- App-IAM grants on the task role (optional) ---------------------------
     # rc emits ONE shared task role (aws_iam_role.task) for all services. By
@@ -1155,23 +1192,38 @@ for ENIs specifically during rolling deploys, raise
 duplication away at the source with `services.<svc>.deployment`
 (`maximum_percent: 100` rolls in place and consumes no extra ENI slot).
 
-**Why not ENI trunking (`awsvpcTrunking`) instead?** AWS does offer an
-account-level ECS setting (`aws_ecs_account_setting_default` with
-`name = "awsvpcTrunking"`) that raises the ENI ceiling for *newly launched*
-instances of eligible types. It was evaluated and rejected for now: (1) it's
-an AWS account/region-wide setting — turning it on changes ECS behavior for
-every workload in that account/region, including ones rc doesn't manage, which
-is a real, unwanted side effect for a tool that deploys into a user's existing
-account; and (2) it would be a no-op for rc's default ladder regardless —
-checked AWS's own published list of ENI-trunking-eligible instance types
-(general purpose, compute optimized, memory optimized, storage optimized,
-accelerated computing, HPC — all six family tables), and **no `t3.*` entry
-appears in any of them, at any size**. Using it at
-all would require a custom ladder pinned to trunking-eligible families (m5,
-c5, r5, and their newer generations), on top of the account-wide opt-in — a
-meaningfully bigger, riskier feature than sizing around the ceiling. Revisit
-if a workload's replica-count-driven instance sprawl becomes a real cost
-problem that a bigger `instance_type` doesn't fix.
+**ENI trunking (`awsvpcTrunking`) — supported, and it changes the math.**
+AWS offers an account/region-level ECS setting that gives each task a *branch*
+interface off a shared trunk instead of its own ENI, raising the per-instance
+ceiling dramatically: `m6i.xlarge` goes from 3 usable task slots to 20. rc
+models this (`rc-hguq`) — `auto_size` consults a verified `trunked_task_limit`
+per shape, so a trunked fleet is sized against the real ceiling rather than the
+untrunked one.
+
+**rc does not turn it on for you**, and that is deliberate: it is an
+account/region-wide setting, so enabling it changes ECS behaviour for every
+workload in that account — including ones rc does not manage. Instead rc
+*detects* it. At plan time it calls `ListAccountSettings` (effective settings,
+which is what actually governs behaviour) and sizes accordingly. Override with
+`provider_config.ecs.ec2_capacity.eni_trunking: true|false`; leave it unset for
+`auto`. A failed lookup renders as "rc has not checked", never as "trunking is
+off" — that distinction is the point, since silently assuming *off* over-provisions
+and silently assuming *on* leaves tasks `PENDING`.
+
+**The catch is the instance ladder.** Trunking is not available on the whole T
+family — checked against AWS's published eligibility tables (general purpose,
+compute optimized, memory optimized, storage optimized, accelerated computing,
+HPC), and **no `t3.*` entry appears in any of them, at any size**. So benefiting
+from trunking means pinning `instance_type` to an eligible family (m5/m6i,
+c5/c6i and their newer generations). That also rules out Graviton for trunked
+fleets (`rc-gw2c`).
+
+**Trunking and task groups are two levers on the same ceiling**, and they
+compose. Trunking raises the slots per instance; [task
+groups](#multi-container-task-groups) reduce the tasks that need one. On the
+estate this was measured against, grouping alone took a trunked fleet from 4x
+`m6i.large` to 1x `m6i.xlarge` — and note that trunking alone would not have:
+30 untrunked-topology tasks still need 2x `m6i.xlarge`.
 
 **Setting `ec2_capacity.instance_type` explicitly is validated too.**
 `auto_size()` never runs when `instance_type` is given directly — rc used to
@@ -1268,7 +1320,7 @@ validate` — copy-paste starting point, not illustrative pseudo-YAML.
 
 ## Feature index
 
-What's built and live-verified on the `portable-deploy` branch:
+What's built and live-verified:
 
 ### Provider abstraction
 
@@ -1308,6 +1360,7 @@ What's built and live-verified on the `portable-deploy` branch:
 
 | command | does |
 |---|---|
+| `rc up` | one-shot: scaffold rc.yml if missing, deploy, push secrets. What Quick start uses |
 | `rc init` | scaffold a v2 rc.yml |
 | `rc migrate --in rc.yml --out rc.v2.yml` | convert legacy v1 |
 | `rc plan` | terraform plan summary |
@@ -1324,6 +1377,18 @@ What's built and live-verified on the `portable-deploy` branch:
 | `rc copilot import` | migrate an AWS Copilot app to rc.yml v2 + docker-compose; supports `--env <name>` for per-environment overrides ([guide](#aws-copilot-migration)) |
 | `rc doctor` | preflight: terraform/docker/python/boto/AWS creds checked |
 | `rc install` | platform package-manager fix for missing deps |
+| `rc preflight` | check every deploy prerequisite before touching anything (superset of `doctor`: also state backend, IAM actions, terraform version) |
+| `rc logs <service>` | recent CloudWatch logs for a service. Filters by log-stream prefix, so a service grouped into a multi-container task still resolves |
+| `rc restart [<service>]` | force a new deployment without rebuilding. Under `task_groups`, rolls the whole group — the task is the unit |
+| `rc run <service> -- <cmd...>` | run a one-off ECS task on the service's task definition. Unlike `exec`, it gets the task role + SM secrets, so it is the right primitive for migrations. Starts the whole task, so on a grouped stack it brings the siblings up too |
+| `rc adopt` | bring a live AWS stack under terraform management by walking AWS and generating imports. `--from-local-tfstate` is declared but **not implemented** — it exits with an error |
+| `rc audit` | find AWS resources matching this project — orphans, leftovers, post-destroy verification |
+| `rc reap` | destroy ephemeral stacks past their TTL |
+| `rc list` | list rc-managed stacks (today: ephemeral only) |
+| `rc compose <sub>` | docker-compose interop helpers (`import` scaffolds rc.yml from a compose file) |
+| `rc fix <sub>` | one-shot scaffolders for common ECS gotchas (e.g. `nginx-conf` rewrites an upstream block for Cloud Map) |
+| `rc provision` | v1 imperative VPC/ALB/SG/secrets setup. Legacy path — v2 stacks get this from terraform |
+| `rc v1 <sub>` | v1 → v2 migration helpers for stacks deployed with rc v1 |
 
 ### CI bootstrap — committed deploy-role stack
 
@@ -1596,16 +1661,15 @@ bd show rc-e5u                # the umbrella epic
 bd list --status=open         # everything still open
 ```
 
-High-signal open items (as of this writing):
+High-signal open items. `bd list --status=open` is the authoritative list —
+this one is a snapshot and will drift:
 
 - **Kubernetes provider** (`rc-e5u.8`) — proves the multi-cloud claim
-- **Private subnets + NAT** (`rc-e5u.25`) — currently public-subnet Fargate for cost
 - **EFS encryption on fresh accounts** (`rc-e5u.26`) — KMS key bootstrap
-- **`rc audit`** (`rc-e5u.37.4`) — post-destroy AWS-side cleanup verification
-- **`rc db dump-local`** (`rc-e5u.37.3`) — wraps `docker exec pg_dump` with port autodiscovery
-- **`rc compose import`** (`rc-e5u.41.3`) — scaffold rc.yml from a compose file
-- **Framework presets** (`rc-e5u.35.7`) — auto-default lifecycle hooks for django/rails/phoenix/laravel
-- **Provider auto-import of orphan log groups** (`rc-e5u.37.5`) — terraform import on first-run conflicts
+- **Field-verify multi-container task groups** (`rc-ib01.5`) — the feature is
+  built and tested, but no grouped stack has been `terraform apply`-ed yet
+- **Brownfield regroup procedure** (`rc-93ol`) — plan-time detection ships; the
+  migration runbook is written but has never been executed
 
 ---
 
@@ -1631,11 +1695,16 @@ See [AGENTS.md](AGENTS.md) for the day-to-day workflow.
 
 ---
 
-# Legacy v1 (pre-portable)
+# Legacy v1 (SSH / Django app)
 
-The content below describes the v1 SSH/Django-app deploy path on `main`.
-The portable provider work above lives on `portable-deploy`. v1 still ships
-for users on the older path; v2 is the active line.
+Everything above describes **v2**, the portable provider line, which is the
+active one. What follows is **v1**: the original SSH/Django-app deploy path.
+It still ships and is still in production use, so it is documented rather than
+deleted — but new stacks should start on v2, and existing ones can move with
+`rc migrate --in rc.yml --out rc.v2.yml`.
+
+Both live on `main`. (Earlier revisions of this file described v2 as living on
+a `portable-deploy` branch; that branch merged long ago and no longer exists.)
 
 ## Features (v1)
 
@@ -1654,8 +1723,10 @@ for users on the older path; v2 is the active line.
 - **Deployment History**: Full deployment tracking with rollback capability
 
 For the full v1 reference (Django settings, management commands, API
-viewsets, etc.) see the file history of this README in `git log` —
-the prior version is preserved at `git show main:README.md`.
+viewsets, etc.) see this file's own history: `git log --follow -p README.md`,
+or `git show <commit>:README.md` for a revision that predates the v2 rewrite.
+The v1 code itself lives in `remote_compose/services/` and is reached through
+`cli_commands/_legacy.py`.
 
 ## License
 
