@@ -1,3 +1,26 @@
+> **SUPERSEDED — 2026-08-26.** The epic this brief scoped is built and merged
+> (PRs #76, #77, #78). Keep it only as a record of how the work was framed; do
+> not use it as a spec. The system of record is bd: `bd show rc-ib01`, and
+> `bd show rc-4seu` for the design decision this brief asked for.
+>
+> **Three claims below were corrected during implementation:**
+>
+> 1. The brief says grouping "keeps the per-tenant boundary". True at tenant
+>    granularity, false *within* a tenant: `task_role_arn` is task-level, so a
+>    group collapses per-service IAM onto one role. rc now rejects members that
+>    disagree on `iam_role`.
+> 2. The brief treats `essential: false` as crash isolation ("a crashing
+>    container restarts alone"). It is not — ECS never restarts an individual
+>    container, so a non-essential container that exits stays dead and silent.
+>    The mechanism that delivers the intent is `restartPolicy` (rc-ib01.4).
+> 3. The brief's validation list compares rc.yml values. `stateful`,
+>    `launch_type` and `deployment` are DERIVED, and comparing the declared
+>    value instead of the rendered one produced two real order-dependent bugs
+>    (rc-ib01.3).
+>
+> Its "may be wrong" section invited exactly this. The 2-task-per-tenant seam
+> it proposed held up; the Cloud Map finding was correct.
+
 # Brief: rc-ib01 — multi-container task groups
 
 Repo: `remote-compose` (`~/Repos/devtools/remote-compose`), branch off `origin/main`.
