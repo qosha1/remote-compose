@@ -267,12 +267,11 @@ remote_compose/
 │
 └── services/                    # Legacy imperative deploy pipeline
     │                            # ~18,850 lines across ~40 files. Retained
-    │                            # on main and on portable-deploy because v1
-    │                            # commands (provision, deploy fallback,
-    │                            # secrets push fallback, status fallback,
-    │                            # db backup/restore) still use it. Will be
-    │                            # deleted as a single PR after rc-e5u.28
-    │                            # cuts start-simpli to v2.
+    │                            # because v1 commands (provision, deploy
+    │                            # fallback, secrets push fallback, status
+    │                            # fallback, db backup/restore) still use it.
+    │                            # Will be deleted as a single PR after
+    │                            # rc-e5u.28 cuts start-simpli to v2.
     └── ...
 ```
 
