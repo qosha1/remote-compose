@@ -2427,7 +2427,6 @@ class ECSProvider(Provider):
                 # rc-ib01.4: opt-in per-container restart. None emits nothing,
                 # so no already-deployed task definition changes.
                 "restart_policy": getattr(spec, "restart_policy", None),
-                "network_mode": network_mode,
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,

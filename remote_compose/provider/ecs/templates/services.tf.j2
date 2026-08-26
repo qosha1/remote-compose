@@ -51,7 +51,7 @@ resource "aws_ecr_repository" "{{ c.tf_name }}" {
 
 resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   family                   = "${var.project}-{{ svc.name }}"
-  network_mode             = "{{ svc.network_mode }}"
+  network_mode             = "{{ network_mode }}"
   requires_compatibilities = ["{{ svc.launch_type }}"]
 {%- if svc.launch_type != "EC2" %}
   cpu                      = "{{ svc.cpu }}"
@@ -355,7 +355,7 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
 {%- endif %}
 
-{%- if svc.network_mode == "awsvpc" %}
+{%- if network_mode == "awsvpc" %}
 
   network_configuration {
 {%- if svc.declared_subnet_group or svc.declared_security_groups %}

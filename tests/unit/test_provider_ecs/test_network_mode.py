@@ -225,3 +225,78 @@ class TestWarningsStayHonestUnderBridge:
         joined = " ".join(getattr(p, "_warnings", []) or [])
         assert "root_volume_size" in joined
         assert "30 bridge tasks" in joined
+
+
+class TestComposesWithTaskGroups:
+    """rc-ib01 (task_groups) and rc-u122 (network_mode) landed independently and
+    both cut the ENI bill, by different means: grouping reduces task COUNT,
+    bridge removes the ENI dimension outright. They are not alternatives and
+    nothing stops a stack asking for both, so the combination has to emit a
+    coherent task definition rather than one feature's half of one."""
+
+    def _services(self):
+        return {
+            "nginx": ServiceSpec(
+                name="nginx", cpu=256, memory=512, port=80, public=True, image="nginx:1"
+            ),
+            "django": ServiceSpec(
+                name="django", cpu=256, memory=2048, port=8000, image="django:1"
+            ),
+            "postgres": ServiceSpec(
+                name="postgres", cpu=256, memory=1024, port=5432, image="postgres:16"
+            ),
+            "redis": ServiceSpec(
+                name="redis", cpu=256, memory=512, port=6379, image="redis:7"
+            ),
+        }
+
+    def _groups(self):
+        from remote_compose.config._task_group_types import TaskGroupV2
+
+        return {
+            "nginx": TaskGroupV2(name="nginx", services=["nginx", "django"]),
+            "postgres": TaskGroupV2(name="postgres", services=["postgres", "redis"]),
+        }
+
+    def _emit_both(self, tmp_path):
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(
+            DeployContext(
+                project="tenant",
+                compose_path=tmp_path / "docker-compose.yml",
+                rc_yml_v2={},
+                provider_config={
+                    "ecs": {
+                        "region": "us-west-2",
+                        "cluster": "t-cluster",
+                        "vpc_cidr": "10.0.0.0/16",
+                        "network_mode": "bridge",
+                    }
+                },
+                tf_backend_config={"type": "local"},
+                working_dir=tmp_path,
+                services=self._services(),
+                task_groups=self._groups(),
+                secrets=[],
+            ),
+            out,
+        )
+        return out
+
+    def test_grouped_bridge_emits_one_bridge_task_def_per_group(self, tmp_path):
+        tf = (self._emit_both(tmp_path) / "services.tf").read_text()
+        assert tf.count('resource "aws_ecs_task_definition"') == 2
+        assert tf.count('network_mode             = "bridge"') == 2
+        assert '"awsvpc"' not in tf
+
+    def test_grouped_bridge_still_omits_network_configuration(self, tmp_path):
+        """The guard is on the stack mode, not the group, so a multi-container
+        task must drop the block exactly like a single-container one."""
+        tf = (self._emit_both(tmp_path) / "services.tf").read_text()
+        assert "network_configuration {" not in tf
+
+    def test_grouped_bridge_keeps_both_containers_in_each_task(self, tmp_path):
+        """Neither feature may quietly drop the other's work."""
+        tf = (self._emit_both(tmp_path) / "services.tf").read_text()
+        for c in ("nginx", "django", "postgres", "redis"):
+            assert f'name      = "{c}"' in tf
