@@ -182,6 +182,30 @@ class ServiceSpec:
     # At least one container in a task must be essential — AWS rejects a task
     # definition where all of them are false. validate_task_groups enforces it.
     essential: bool = True
+    # rc-ib01.4: ECS containerDefinitions.restartPolicy — restart THIS container
+    # in place instead of replacing the whole task. None (the default) emits
+    # nothing, so no existing task definition changes.
+    #
+    # This is the knob that actually gives a grouped task compose-like recovery.
+    # `essential: false` does NOT: ECS never restarts an individual container,
+    # so a non-essential container that exits stays dead and the task runs on
+    # without it.
+    #
+    # Shape: {enabled: bool, ignored_exit_codes: [int], attempt_period: int}.
+    # Declaring the block IS the opt-in — `enabled` defaults to true when
+    # present. Rendered with AWS's own field names (ignoredExitCodes,
+    # restartAttemptPeriod).
+    #
+    # Verified against AWS 2026-08-26: EC2 needs container agent 1.86.0+, and
+    # rc's AMI (/aws/service/ecs/optimized-ami/amazon-linux-2/recommended)
+    # ships 1.106.1. Works on essential AND non-essential containers.
+    # attempt_period default 300s, min 60, max 1800 — and a container that
+    # exits INSIDE that period is NOT restarted, so this fixes transient exits,
+    # not crash loops.
+    #
+    # Opt-in and never auto-defaulted: rc emits offline, so it cannot
+    # capability-check the agent version on the operator's behalf.
+    restart_policy: Optional[dict[str, Any]] = None
     # Declared task role (rc.yml `iam_roles:`). A name here makes this
     # service's task definition carry that role instead of the shared
     # ${project}-task role — and therefore none of the grants

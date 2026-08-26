@@ -253,6 +253,159 @@ def render_replacement_warning(
 # ---------------------------------------------------------------------------
 
 
+ECS_SERVICE_TYPE = "aws_ecs_service"
+
+
+@dataclass
+class TaskGroupRegroup:
+    """A plan that MERGES existing ECS services into task groups (rc-93ol)."""
+
+    #: Services terraform will destroy — their containers reappear inside a
+    #: survivor's task, but the service (and its Cloud Map record) goes away.
+    destroyed: list[str] = field(default_factory=list)
+    #: Services that remain afterwards, whether created fresh or updated in
+    #: place. These are the groups.
+    surviving: list[str] = field(default_factory=list)
+    #: The subset of ``surviving`` terraform creates from scratch.
+    created: list[str] = field(default_factory=list)
+    #: The subset of ``surviving`` terraform updates in place — the naming
+    #: lever paid off for these: same terraform address, same ECS service
+    #: name, same task-def family, same Cloud Map record, same ALB wiring.
+    updated: list[str] = field(default_factory=list)
+
+
+def _service_name(rc: dict) -> str:
+    name = rc.get("name")
+    if isinstance(name, str) and name:
+        return name
+    address = str(rc.get("address") or "")
+    return address.rsplit(".", 1)[-1] if address else ""
+
+
+def detect_task_group_regroup(plan_json: dict) -> "TaskGroupRegroup | None":
+    """Spot a plan that collapses several ECS services into task groups.
+
+    Regrouping a live estate is destructive in terraform: the merged members'
+    ``aws_ecs_service`` resources are DESTROYED and their containers come back
+    inside a survivor's task. On a real estate that means each tenant's
+    postgres stops and restarts — which must not read like a routine deploy.
+
+    The signature is >= 2 ``aws_ecs_service`` deletions alongside at least one
+    ``aws_ecs_service`` that survives. Both halves matter:
+
+      * a single deletion beside untouched services is a service REMOVAL, not
+        a merge, and calling it a regroup would be a false alarm;
+      * deletions with NO survivor is a teardown (``rc destroy``), where
+        telling the operator to expect a merge would be actively wrong.
+
+    Returns None when the plan is anything else, so callers can render
+    unconditionally on the result.
+    """
+    changes = plan_json.get("resource_changes") if isinstance(plan_json, dict) else None
+    if not isinstance(changes, list):
+        return None
+
+    destroyed: list[str] = []
+    created: list[str] = []
+    updated: list[str] = []
+    for rc in changes:
+        if not isinstance(rc, dict) or rc.get("type") != ECS_SERVICE_TYPE:
+            continue
+        change = rc.get("change")
+        if not isinstance(change, dict):
+            continue
+        actions = change.get("actions")
+        if not isinstance(actions, list):
+            continue
+        name = _service_name(rc)
+        if not name:
+            continue
+        if "delete" in actions and "create" not in actions:
+            destroyed.append(name)
+        elif "create" in actions and "delete" in actions:
+            # replaced: the old service is torn down either way
+            destroyed.append(name)
+        elif "create" in actions:
+            created.append(name)
+        elif "update" in actions:
+            updated.append(name)
+
+    surviving = sorted(set(created) | set(updated))
+    if len(destroyed) < 2 or not surviving:
+        return None
+    return TaskGroupRegroup(
+        destroyed=sorted(set(destroyed)),
+        surviving=surviving,
+        created=sorted(set(created)),
+        updated=sorted(set(updated)),
+    )
+
+
+def render_regroup_warning(regroup: "TaskGroupRegroup | None") -> str:
+    """Prose for a regroup, in the self-contained compose_warnings style.
+
+    Deliberately says what has NOT been verified. No grouped stack has been
+    applied against real AWS yet (the same caveat rc-ero carries for the
+    declared network), and a runbook that hides that is worse than none.
+    """
+    if regroup is None:
+        return ""
+
+    lines = [
+        "WARN: this is NOT a routine deploy — it MERGES ECS services into task "
+        "groups.",
+        "",
+        f"  Destroyed ({len(regroup.destroyed)}): " f"{', '.join(regroup.destroyed)}",
+        "    These services stop. Their containers come back inside a "
+        "survivor's task,",
+        "    but each one's own Cloud Map A record goes away with the service "
+        "-- anything",
+        "    still resolving those names breaks. `rc plan` lists them " "separately.",
+        "",
+        f"  Surviving ({len(regroup.surviving)}): " f"{', '.join(regroup.surviving)}",
+    ]
+    if regroup.updated:
+        lines.append(
+            f"    {', '.join(regroup.updated)} update IN PLACE -- same ECS "
+            "service, same task-def"
+        )
+        lines.append(
+            "    family, same DNS record, same ALB target group. That is the "
+            "naming lever:"
+        )
+        lines.append(
+            "    a group named after one of its members keeps that member's "
+            "identity."
+        )
+    if regroup.created:
+        lines.append(
+            f"    {', '.join(regroup.created)} are created fresh, so every "
+            "merged member's"
+        )
+        lines.append(
+            "    name retires. Naming the group after a member would have kept " "one."
+        )
+    lines += [
+        "",
+        "  BEFORE YOU APPLY:",
+        "    1. Take a database BACKUP. A destroyed service's task stops; for a "
+        "stateful",
+        "       one that is a real stop-then-start against live data.",
+        "    2. Check EFS. Volumes survive (the file system and access points "
+        "are separate",
+        "       resources), but the new task runs under the GROUP's task role "
+        "-- confirm it",
+        "       still carries the elasticfilesystem grants the old per-service "
+        "role had.",
+        "       UNVERIFIED against live AWS: no grouped stack has been applied " "yet.",
+        "    3. Expect a gap. Each destroyed service is down from its stop "
+        "until the",
+        "       survivor's new task passes its health check -- not a "
+        "zero-downtime roll.",
+    ]
+    return "\n".join(lines)
+
+
 @dataclass
 class BinpackRebalancingConflict:
     """A service the plan gives binpack while leaving AZ rebalancing on."""

@@ -8,7 +8,7 @@ themselves in _schema_types.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -188,6 +188,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             # rc-m2sn: container-level essential. Default True keeps every
             # existing task definition byte-identical.
             essential=(bool(raw["essential"]) if "essential" in raw else True),
+            # rc-ib01.4: opt-in per-container restart. None means the block is
+            # absent, which emits nothing.
+            restart_policy=_parse_restart_policy(name, raw.get("restart_policy")),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -430,6 +433,71 @@ def _parse_bootstrap(raw: dict[str, Any]) -> BootstrapConfig:
         github_oidc_deploy_role=role,
         output_dir=raw.get("output_dir", "bootstrap/terraform"),
     )
+
+
+VALID_RESTART_POLICY_KEYS = {"enabled", "ignored_exit_codes", "attempt_period"}
+
+# AWS: "You can set a minimum restartAttemptPeriod of 60 seconds and a maximum
+# restartAttemptPeriod of 1800 seconds."
+RESTART_ATTEMPT_PERIOD_MIN = 60
+RESTART_ATTEMPT_PERIOD_MAX = 1800
+
+
+def _parse_restart_policy(name: str, raw: Any) -> Optional[dict[str, Any]]:
+    """Parse ``services.<name>.restart_policy`` (rc-ib01.4).
+
+    Declaring the block is the opt-in, so ``enabled`` defaults to true when it
+    is present and absent from the body. Validation is rc's rather than
+    deferred to AWS because the bounds are documented constants and a rejected
+    RegisterTaskDefinition surfaces mid-apply.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"service {name!r}: restart_policy must be a mapping "
+            f"{{enabled, ignored_exit_codes, attempt_period}}, got "
+            f"{type(raw).__name__}"
+        )
+    unknown = set(raw) - VALID_RESTART_POLICY_KEYS
+    if unknown:
+        raise ConfigError(
+            f"service {name!r}: unknown restart_policy keys {sorted(unknown)} "
+            f"(supported: {sorted(VALID_RESTART_POLICY_KEYS)}). rc uses "
+            f"snake_case; the AWS spellings ignoredExitCodes / "
+            f"restartAttemptPeriod are rendered for you."
+        )
+    out: dict[str, Any] = {"enabled": bool(raw.get("enabled", True))}
+
+    if "ignored_exit_codes" in raw:
+        codes = raw["ignored_exit_codes"]
+        if not isinstance(codes, list) or not all(
+            isinstance(c, int) and not isinstance(c, bool) for c in codes
+        ):
+            raise ConfigError(
+                f"service {name!r}: restart_policy.ignored_exit_codes must be a "
+                f"list of integers (exit codes NOT to restart on, e.g. [0] for "
+                f"a container that is allowed to finish), got {codes!r}"
+            )
+        out["ignored_exit_codes"] = list(codes)
+
+    if "attempt_period" in raw:
+        period = raw["attempt_period"]
+        if (
+            not isinstance(period, int)
+            or isinstance(period, bool)
+            or not (RESTART_ATTEMPT_PERIOD_MIN <= period <= RESTART_ATTEMPT_PERIOD_MAX)
+        ):
+            raise ConfigError(
+                f"service {name!r}: restart_policy.attempt_period must be an "
+                f"integer between {RESTART_ATTEMPT_PERIOD_MIN} and "
+                f"{RESTART_ATTEMPT_PERIOD_MAX} seconds (AWS limits), got "
+                f"{period!r}. A container must run this long before a restart "
+                f"is attempted, so one that exits sooner is NOT restarted."
+            )
+        out["attempt_period"] = period
+
+    return out
 
 
 def _parse_task_groups(raw: Any) -> dict[str, TaskGroupV2]:

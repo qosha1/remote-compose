@@ -1355,6 +1355,147 @@ def detect_partially_wired_shared_volume(
     return warnings
 
 
+# ---------------------------------------------------------------------------
+# Detector 14 — task groups retire compose hostnames (rc-2zzd)
+# ---------------------------------------------------------------------------
+
+
+def _compose_env_pairs(svc_compose: dict) -> list[tuple[str, str]]:
+    """(KEY, value) from compose ``environment:``, in either supported shape."""
+    env = svc_compose.get("environment")
+    out: list[tuple[str, str]] = []
+    if isinstance(env, dict):
+        for k, v in env.items():
+            out.append((str(k), "" if v is None else str(v)))
+    elif isinstance(env, list):
+        for entry in env:
+            if isinstance(entry, str) and "=" in entry:
+                k, _, v = entry.partition("=")
+                out.append((k, v))
+    return out
+
+
+def detect_task_group_retired_hostnames(compose: dict, rc_v2_raw: dict) -> list[str]:
+    """Warn which compose hostnames a declared ``task_groups`` block retires.
+
+    This is the one part of grouping that is NOT transparent to the
+    application. AWS ECS allows exactly one service registry per service
+    ("Multiple service registries for each service isn't supported" --
+    CreateService), so a group of N containers gets ONE Cloud Map A record, at
+    the GROUP's name. Every member whose name is not the group's loses its own.
+
+    The README promises compose hostnames like ``db`` and ``cache`` keep
+    resolving; for merged members that promise breaks. An operator who does not
+    notice gets a stack that comes up green and then fails to connect -- which
+    is why this is a plan-time warning rather than a line in a changelog.
+
+    Naming a group after one of its members is the lever that shrinks the
+    damage: that member keeps its record and only the others retire.
+
+    Where it can, the warning also names the compose service and env var that
+    dial a retiring name, because a bare list of names is a puzzle and a named
+    referrer is a work item.
+    """
+    warnings: list[str] = []
+    groups = (rc_v2_raw or {}).get("task_groups")
+    if not isinstance(groups, dict) or not groups:
+        return warnings
+    services = compose.get("services") or {}
+    if not isinstance(services, dict):
+        return warnings
+
+    project = str((rc_v2_raw or {}).get("project") or "")
+    namespace = f"{project}.local" if project else "<project>.local"
+
+    for gname, body in sorted(groups.items()):
+        if not isinstance(body, dict):
+            continue
+        members = body.get("services")
+        if not isinstance(members, list):
+            continue
+        known = [m for m in members if isinstance(m, str) and m in services]
+        retired = [m for m in known if m != gname]
+        if not retired:
+            continue
+
+        # Who still dials a name that is about to stop resolving? Match on a
+        # host-ish boundary so "redis-cluster.example.com" is not mistaken for
+        # a reference to "redis".
+        referrers: list[str] = []
+        for svc_name, svc_compose in sorted(services.items()):
+            if not isinstance(svc_compose, dict):
+                continue
+            for key, value in _compose_env_pairs(svc_compose):
+                for name in retired:
+                    if re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", value):
+                        referrers.append(f"{svc_name}.{key}")
+                        break
+
+        msg = (
+            f"WARN: task group {gname!r} retires the Cloud Map hostname(s) "
+            f"{', '.join(retired)}. ECS allows ONE service registry per "
+            f"service, so these containers share a single A record at "
+            f"{gname}.{namespace} and their own names stop resolving. "
+            f"Reach them at {gname} (or {gname}.{namespace}) on their own "
+            f"ports -- containers in one task share an IP -- or, inside the "
+            f"group, at localhost."
+        )
+        if referrers:
+            msg += (
+                f" Still referencing a retiring name: {', '.join(referrers)}. "
+                f"Update these before the regroup, or the stack comes up green "
+                f"and then fails to connect."
+            )
+        if gname in known:
+            msg += f" ({gname} itself keeps its record.)"
+        warnings.append(msg)
+
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Detector 15 — non-essential container with no restart policy (rc-ib01.4)
+# ---------------------------------------------------------------------------
+
+
+def detect_non_essential_without_restart_policy(rc_v2_raw: Any) -> list[str]:
+    """Warn about a container nobody will notice dying.
+
+    ``essential: false`` is easy to reach for expecting compose-like crash
+    isolation. It is not that: ECS never restarts an individual container, so
+    a non-essential container that exits stays dead, the task keeps running
+    without it, and nothing alarms. Quieter than the whole-task restart
+    ``essential: true`` gives you, not safer.
+
+    ``restart_policy`` is the pairing that makes the intent real (rc-ib01.4),
+    at least for transient exits. Warn when one is declared without the other.
+    """
+    warnings: list[str] = []
+    if not isinstance(rc_v2_raw, dict):
+        return warnings
+    services = rc_v2_raw.get("services")
+    if not isinstance(services, dict):
+        return warnings
+    for name, body in sorted(services.items()):
+        if not isinstance(body, dict):
+            continue
+        if body.get("essential") is not False:
+            continue
+        if body.get("restart_policy"):
+            continue
+        warnings.append(
+            f"WARN: service {name!r} sets essential: false but declares no "
+            f"restart_policy. ECS does not restart individual containers, so "
+            f"if {name!r} exits it stays dead while the rest of its task keeps "
+            f"running -- no restart, no alarm. That is quieter than "
+            f"essential: true, not safer. Add restart_policy: {{enabled: true}} "
+            f"to get it restarted in place on a transient exit (a container "
+            f"that exits inside restart_attempt_period is still not restarted), "
+            f"or drop essential: false so a failure replaces the whole task."
+        )
+    return warnings
+
+
 def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     """Run every compose-warning detector and return a flat list.
 
@@ -1379,4 +1520,6 @@ def collect_compose_warnings(compose_path: Path, rc_v2_raw: dict) -> list[str]:
     out.extend(detect_dev_mode_command(compose))
     out.extend(detect_python_pyc_in_build_context(compose, compose_path))
     out.extend(detect_partially_wired_shared_volume(compose, rc_v2_raw))
+    out.extend(detect_task_group_retired_hostnames(compose, rc_v2_raw))
+    out.extend(detect_non_essential_without_restart_policy(rc_v2_raw))
     return out

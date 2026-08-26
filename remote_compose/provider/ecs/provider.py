@@ -61,7 +61,9 @@ from .deploy_preflight import run_preflight
 from .plan_analysis import (
     detect_binpack_az_rebalancing_conflicts,
     detect_task_definition_replacements,
+    detect_task_group_regroup,
     render_binpack_conflict_warning,
+    render_regroup_warning,
     render_replacement_warning,
 )
 from .network_plan import (
@@ -2354,6 +2356,9 @@ class ECSProvider(Provider):
                 # container exiting leaves the task running without it (and
                 # never restarts it — see the ServiceSpec docstring).
                 "essential": bool(getattr(spec, "essential", True)),
+                # rc-ib01.4: opt-in per-container restart. None emits nothing,
+                # so no already-deployed task definition changes.
+                "restart_policy": getattr(spec, "restart_policy", None),
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,
@@ -4180,6 +4185,14 @@ class ECSProvider(Provider):
         if conflict_msg:
             self._warn(conflict_msg)
             messages.append(conflict_msg)
+        # rc-93ol: a regroup destroys the merged members' ECS services. It must
+        # not read like a routine deploy -- this is the difference between a
+        # migration an operator can execute and one that half-breaks a live
+        # estate while the plan output looks ordinary.
+        regroup_msg = render_regroup_warning(detect_task_group_regroup(plan_json))
+        if regroup_msg:
+            self._warn(regroup_msg)
+            messages.append(regroup_msg)
         return messages
 
     def _warn_on_task_def_replacement(self, runner: Any, plan_file: Path) -> list[str]:
