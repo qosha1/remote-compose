@@ -1180,6 +1180,7 @@ def _group_roll_policy(
     a_stateful = _is_stateful_service(anchor, a_spec)
     a_dep = _deployment_percents(anchor, a_spec)
     a_replicas = getattr(a_spec, "replicas", 1) if a_spec else 1
+    a_auto_roll = bool(getattr(a_spec, "auto_roll", True)) if a_spec else True
 
     for member in members[1:]:
         spec = ctx.services.get(member)
@@ -1204,6 +1205,22 @@ def _group_roll_policy(
                 f"deployment {a_dep.minimum_healthy}/{a_dep.maximum} and "
                 f"{member!r} wants {dep.minimum_healthy}/{dep.maximum}. A group "
                 f"is one ECS service and rolls under one deploymentConfiguration."
+            )
+        # rc-7ga's opt-out is per-service, but the roll is per-TASK: a
+        # groupmate that IS in the default roll set drags the opted-out member
+        # along with it, silently defeating the exclusion. postgres carries
+        # auto_roll: false precisely because rolling it opens a Cloud Map DNS
+        # gap on a single-task EFS service, so this has to reject rather than
+        # let the group decide.
+        if bool(getattr(spec, "auto_roll", True)) != a_auto_roll:
+            optout = anchor if not a_auto_roll else member
+            other = member if not a_auto_roll else anchor
+            raise ProviderConfigError(
+                f"task_groups.{group_name}: cannot roll -- {optout!r} sets "
+                f"auto_roll: false but its groupmate {other!r} does not. They "
+                f"are containers in ONE task, so rolling {other!r} restarts "
+                f"{optout!r} too and the opt-out means nothing. Set auto_roll "
+                f"on every member, or split {optout!r} into its own group."
             )
         replicas = getattr(spec, "replicas", 1) if spec else 1
         if replicas != a_replicas:
@@ -5588,6 +5605,60 @@ class ECSProvider(Provider):
         ).get("events", [])
         return iter(e["message"] for e in events)
 
+    def _check_run_one_off_group(self, ctx: DeployContext, service: str) -> None:
+        """Guard ``rc run`` against a grouped task (rc-ib01).
+
+        ``run_task`` starts a task, not a container: every container in the task
+        definition comes up, and ``containerOverrides`` only changes the command
+        of the one named. On a grouped stack that has two consequences.
+
+        The dangerous one: a group is uniformly stateful or uniformly not
+        (validate_task_groups enforces it), so running a one-off against a
+        member of a STATEFUL group starts a second copy of every member --
+        including a postgres already mounting that EFS access point. That is
+        the split-brain the stateful rollout config exists to prevent, arriving
+        through `rc run` instead of through a roll. Refuse it.
+
+        The merely expensive one: a migrate hook on a 4-container app group
+        spins up nginx, frontend and reingest alongside django as a throwaway
+        task, costing an ENI slot and the group's SUMMED memory -- the exact
+        resource this epic exists to conserve. Warn, because a hook that
+        quietly doubles a tenant's footprint reads as a mystery ENI ceiling
+        later.
+        """
+        owner = _member_to_group(ctx)
+        gname = owner.get(service)
+        if gname is None:
+            return
+        members = [
+            m
+            for m in (
+                getattr((ctx.task_groups or {}).get(gname), "services", None) or []
+            )
+            if m in ctx.services
+        ]
+        if len(members) < 2:
+            return
+        if any(_is_stateful_service(m, ctx.services.get(m)) for m in members):
+            stateful = [
+                m for m in members if _is_stateful_service(m, ctx.services.get(m))
+            ]
+            raise ProviderConfigError(
+                f"rc run: {service!r} is a container in task group {gname!r} "
+                f"({', '.join(members)}), and ECS run_task starts the whole "
+                f"TASK -- every one of those containers, not just {service!r}. "
+                f"{stateful} in that group is stateful, so this would start a "
+                f"second copy alongside the live one against the same EFS "
+                f"access point. Use `rc exec {service} ...` to run inside the "
+                f"task that is already up, or move {service!r} out of the group."
+            )
+        self._emit(
+            f"  WARN: {service!r} is a container in task group {gname!r}; "
+            f"run_task starts the whole task, so {', '.join(members)} all come "
+            f"up for this one-off (one ENI slot + the group's summed memory). "
+            f"`rc exec` reuses the running task instead."
+        )
+
     def run_one_off(
         self,
         ctx: DeployContext,
@@ -5616,6 +5687,7 @@ class ECSProvider(Provider):
         and returns the container's real exit code; without it, returns the
         task ARN immediately (exit 0).
         """
+        self._check_run_one_off_group(ctx, service)
         ecs_cfg = _ecs_cfg(ctx)
         cluster = ecs_cfg.get("cluster") or f"{ctx.project}-cluster"
         session = self.session_factory(ctx)

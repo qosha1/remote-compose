@@ -249,3 +249,53 @@ class TestRawDictHelpers:
         from remote_compose.config.v2_schema import container_named
 
         assert container_named(cdefs, "postgres") == {}
+
+
+class TestRunOneOffOnAGroupedTask:
+    """ECS run_task starts a TASK, not a container: every container in the task
+    def comes up and containerOverrides only changes the command of the named
+    one."""
+
+    @staticmethod
+    def _provider(emitted):
+        provider = ECSProvider()
+        provider._emit = lambda msg: emitted.append(msg)
+        return provider
+
+    def _stateful_ctx(self, tmp_path):
+        services = _services()
+        services["postgres"].volumes = [{"name": "pgdata", "mount": "/var/lib/pg"}]
+        services["redis"].stateful = True
+        return DeployContext(
+            project="tenant",
+            compose_path=tmp_path / "docker-compose.yml",
+            rc_yml_v2={},
+            provider_config={"ecs": {"region": "us-west-2", "cluster": "c"}},
+            tf_backend_config={"type": "local"},
+            working_dir=tmp_path,
+            services=services,
+            task_groups=_groups(),
+            secrets=[],
+        )
+
+    def test_a_member_of_a_stateful_group_is_refused(self, tmp_path):
+        """Would start a SECOND postgres against the same EFS access point —
+        the split-brain, arriving through rc run instead of through a roll."""
+        from remote_compose.provider.base import ProviderConfigError
+
+        provider = self._provider([])
+        with pytest.raises(ProviderConfigError, match="second copy"):
+            provider._check_run_one_off_group(self._stateful_ctx(tmp_path), "redis")
+
+    def test_a_stateless_group_warns_about_the_whole_task_starting(self, tmp_path):
+        emitted: list[str] = []
+        self._provider(emitted)._check_run_one_off_group(_ctx(tmp_path), "django")
+        assert emitted and "whole task" in emitted[0]
+        assert "nginx" in emitted[0] and "frontend" in emitted[0]
+
+    def test_an_ungrouped_service_neither_warns_nor_raises(self, tmp_path):
+        emitted: list[str] = []
+        self._provider(emitted)._check_run_one_off_group(
+            _ctx(tmp_path, grouped=False), "django"
+        )
+        assert emitted == []

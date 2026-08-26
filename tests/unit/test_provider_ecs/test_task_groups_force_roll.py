@@ -215,3 +215,80 @@ class TestUngroupedStackIsUnchanged:
 
         src = Path(prov.__file__).read_text()
         assert "_reject_grouped_service_lookup" not in src
+
+
+class TestAutoRollUniformity:
+    """rc-7ga's opt-out is per-service; the roll is per-task. A groupmate in the
+    default roll set drags the opted-out member along with it."""
+
+    def test_mixed_auto_roll_within_a_group_is_rejected(self, tmp_path):
+        services = _services(postgres={"auto_roll": False})
+        with pytest.raises(ProviderConfigError, match="auto_roll"):
+            _roll(_ctx(tmp_path, services), ["redis"])
+
+    def test_the_error_names_the_opted_out_member(self, tmp_path):
+        services = _services(postgres={"auto_roll": False})
+        with pytest.raises(ProviderConfigError) as exc:
+            _roll(_ctx(tmp_path, services), ["redis"])
+        assert "'postgres'" in str(exc.value) and "'redis'" in str(exc.value)
+
+    def test_a_uniformly_opted_out_group_still_rolls_when_asked_explicitly(
+        self, tmp_path
+    ):
+        """auto_roll only filters the DEFAULT set; an explicit target overrides."""
+        services = _services(postgres={"auto_roll": False}, redis={"auto_roll": False})
+        calls = _roll(_ctx(tmp_path, services), ["postgres"])
+        assert [c.kwargs["service"] for c in calls] == ["postgres"]
+
+
+class TestUniformityFieldsAreNotDriftingApart:
+    """Uniformity is enforced in three places with three field sets. This is the
+    anti-drift guard: every field a group must agree on has to be covered by at
+    least one of them, or it silently stops being checked (auto_roll did)."""
+
+    MUST_BE_UNIFORM = {
+        "launch_type",
+        "replicas",
+        "stateful",
+        "auto_roll",
+        "deployment",
+        "iam_role",
+        "subnet_group",
+        "ephemeral_storage",
+        "security_groups",
+    }
+
+    def test_every_field_is_covered_somewhere(self):
+        import inspect
+
+        from remote_compose.config._task_group_types import (
+            DERIVED_UNIFORM_FIELDS,
+            UNIFORM_MEMBER_FIELDS,
+            _validate_one_group,
+        )
+        from remote_compose.provider.ecs.provider import _group_roll_policy
+
+        covered = set(UNIFORM_MEMBER_FIELDS) | set(DERIVED_UNIFORM_FIELDS)
+        # security_groups is compared as a sorted list, outside the map
+        covered |= {
+            f
+            for f in self.MUST_BE_UNIFORM
+            if f in inspect.getsource(_validate_one_group)
+        }
+        covered |= {
+            f
+            for f in self.MUST_BE_UNIFORM
+            if f in inspect.getsource(_group_roll_policy)
+        }
+        assert self.MUST_BE_UNIFORM <= covered, self.MUST_BE_UNIFORM - covered
+
+    def test_the_no_state_roll_path_covers_everything_it_can_reach(self):
+        """--no-state bypasses emit_terraform entirely, so _group_roll_policy is
+        the ONLY check for anything that changes how a group rolls."""
+        import inspect
+
+        from remote_compose.provider.ecs.provider import _group_roll_policy
+
+        src = inspect.getsource(_group_roll_policy)
+        for field in ("stateful", "auto_roll", "replicas", "deployment"):
+            assert field in src, field
