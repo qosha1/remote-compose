@@ -49,9 +49,19 @@ from ._schema_parser import (  # noqa: F401  (re-export facade for tests/back-co
     _parse_repositories,
     _parse_secret,
     _parse_service,
+    _parse_task_groups,
     _parse_terraform,
     load,
     parse,
+)
+from ._task_group_types import (
+    UNIFORM_MEMBER_FIELDS,
+    VALID_TASK_GROUP_KEYS,
+    ResolvedTaskGroup,
+    TaskGroupV2,
+    resolve_task_groups,
+    validate_task_group_membership,
+    validate_task_groups,
 )
 from ._schema_types import (
     VALID_BOOTSTRAP_PERMISSIONS,
@@ -88,6 +98,9 @@ __all__ = [
     "TerraformBackend",
     "TerraformConfig",
     "TlsConfig",
+    # Multi-container task groups
+    "ResolvedTaskGroup",
+    "TaskGroupV2",
     # Declared network / repository primitives
     "NetworkRuleV2",
     "NetworkV2",
@@ -103,8 +116,11 @@ __all__ = [
     # Public functions
     "load",
     "parse",
+    "resolve_task_groups",
     "validate_iam_role_refs",
     "validate_network_refs",
+    "validate_task_group_membership",
+    "validate_task_groups",
     # Public constants
     "GATEWAY_ENDPOINT_SERVICES",
     "MAX_MANAGED_POLICIES",
@@ -116,5 +132,7 @@ __all__ = [
     "VALID_LAUNCH_TYPES",
     "VALID_SECRET_SOURCES",
     "VALID_SERVICE_TYPES",
+    "VALID_TASK_GROUP_KEYS",
     "VALID_TLS_MODES",
+    "UNIFORM_MEMBER_FIELDS",
 ]

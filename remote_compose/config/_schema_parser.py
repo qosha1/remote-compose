@@ -37,6 +37,11 @@ from ._schema_types import (
     TerraformConfig,
     TlsConfig,
 )
+from ._task_group_types import (
+    VALID_TASK_GROUP_KEYS,
+    TaskGroupV2,
+    validate_task_group_membership,
+)
 
 
 def _parse_backend(raw: dict[str, Any]) -> TerraformBackend:
@@ -180,6 +185,9 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             # Declared task role. Same treatment: keep the raw shape so
             # validate() can flag a non-string; None means the shared role.
             iam_role=raw["iam_role"] if "iam_role" in raw else None,
+            # rc-m2sn: container-level essential. Default True keeps every
+            # existing task definition byte-identical.
+            essential=(bool(raw["essential"]) if "essential" in raw else True),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -424,6 +432,44 @@ def _parse_bootstrap(raw: dict[str, Any]) -> BootstrapConfig:
     )
 
 
+def _parse_task_groups(raw: Any) -> dict[str, TaskGroupV2]:
+    """Parse the ``task_groups:`` block. Structure only — see the module docs
+    on ``_task_group_types`` for why membership is checked later."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"task_groups must be a mapping of group name -> "
+            f"{{services: [...]}}, got {type(raw).__name__}"
+        )
+    groups: dict[str, TaskGroupV2] = {}
+    for name, body in raw.items():
+        if not isinstance(body, dict):
+            raise ConfigError(
+                f"task_groups.{name} must be a mapping, got " f"{type(body).__name__}"
+            )
+        unknown = set(body) - VALID_TASK_GROUP_KEYS
+        if unknown:
+            raise ConfigError(
+                f"unknown task_groups.{name} keys: {sorted(unknown)} "
+                f"(supported: {sorted(VALID_TASK_GROUP_KEYS)}). Everything "
+                f"else — replicas, stateful, launch_type, iam_role — is read "
+                f"off the member services, which must agree."
+            )
+        if "services" not in body:
+            raise ConfigError(f"task_groups.{name} requires 'services'")
+        groups[name] = TaskGroupV2(
+            name=str(name),
+            services=body["services"],
+            ingress=body.get("ingress"),
+            memory=body.get("memory"),
+        )
+    for group in groups.values():
+        group.validate()
+    validate_task_group_membership(groups)
+    return groups
+
+
 def parse(raw: dict[str, Any]) -> RcConfigV2:
     """Parse a rc.yml v2 dict into a validated RcConfigV2."""
     if not isinstance(raw, dict):
@@ -499,6 +545,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
     network = _parse_network(raw.get("network"))
     repositories = _parse_repositories(raw.get("repositories"))
     iam_roles = _parse_iam_roles(raw.get("iam_roles"))
+    task_groups = _parse_task_groups(raw.get("task_groups"))
     network.validate()
     for repo in repositories.values():
         repo.validate()
@@ -548,6 +595,7 @@ def parse(raw: dict[str, Any]) -> RcConfigV2:
         network=network,
         repositories=repositories,
         iam_roles=iam_roles,
+        task_groups=task_groups,
     )
     cfg.validate()
     return cfg
