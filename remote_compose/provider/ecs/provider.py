@@ -1626,7 +1626,9 @@ class ECSProvider(Provider):
             # ENI. Dropping these silently would remove an isolation boundary
             # the author explicitly asked for, so refuse at plan time instead.
             _sg = sorted(
-                n for n, sp in ctx.services.items() if getattr(sp, "security_groups", None)
+                n
+                for n, sp in ctx.services.items()
+                if getattr(sp, "security_groups", None)
             )
             if _sg:
                 raise ProviderConfigError(
@@ -1646,6 +1648,29 @@ class ECSProvider(Provider):
                     f"combined with per-service subnets ({', '.join(_sn)}). "
                     "A bridge task has no ENI of its own, so it is placed by "
                     "whichever subnet its container instance sits in."
+                )
+            # Fargate supports awsvpc and nothing else. This is the easiest
+            # way to reach an invalid stack by accident, because the launch
+            # type DEFAULTS to FARGATE: adding one line (network_mode: bridge)
+            # to an otherwise untouched rc.yml renders terraform that AWS
+            # rejects. Catch it at plan time with the fix named, rather than
+            # at RegisterTaskDefinition with "network mode not supported".
+            _default_lt = ecs_cfg.get("default_launch_type", "FARGATE")
+            _fargate = sorted(
+                n
+                for n, sp in ctx.services.items()
+                if (getattr(sp, "launch_type", None) or _default_lt) == "FARGATE"
+            )
+            if _fargate:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' requires the "
+                    f"EC2 launch type, but these services are FARGATE: "
+                    f"{', '.join(_fargate)}. Fargate has no container instance "
+                    "to share an ENI with, so it supports awsvpc only — the "
+                    "ENI-per-task cost bridge exists to avoid is not "
+                    "avoidable on Fargate at all. Either set "
+                    "provider_config.ecs.default_launch_type: EC2 (and give "
+                    "the stack ec2_capacity), or drop network_mode: bridge."
                 )
 
         # Existing-ALB adopt (rc-adopt, D4): reference a live ALB + its HTTPS
@@ -6548,7 +6573,9 @@ class ECSProvider(Provider):
             # modeled and skips this, same as a custom auto_size() ladder.
             known_shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
             if known_shape is not None:
-                effective = self._effective_shape(known_shape, eni_trunking, network_mode)
+                effective = self._effective_shape(
+                    known_shape, eni_trunking, network_mode
+                )
                 try:
                     check_fixed_shape_capacity(
                         effective,
@@ -6581,7 +6608,9 @@ class ECSProvider(Provider):
         return resolved
 
     @staticmethod
-    def _effective_shape(shape, eni_trunking: Optional[bool], network_mode: str = "awsvpc"):
+    def _effective_shape(
+        shape, eni_trunking: Optional[bool], network_mode: str = "awsvpc"
+    ):
         """The shape as it behaves under the resolved trunking state.
 
         with_trunking() is a no-op for an ineligible type, so this is safe to

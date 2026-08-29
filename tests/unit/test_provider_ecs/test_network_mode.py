@@ -35,7 +35,13 @@ from remote_compose.provider import DeployContext, ServiceSpec
 from remote_compose.provider.base import ProviderConfigError
 from remote_compose.provider.ecs import ECSProvider
 
-BRIDGE = {"network_mode": "bridge"}
+# Bridge implies EC2. Fargate supports awsvpc and nothing else, so a
+# {"network_mode": "bridge"} stack left on the default FARGATE launch type is
+# one AWS rejects — these tests would then be asserting the render of a
+# configuration that could never deploy, which is exactly the gap this feature
+# is under scrutiny for. Pin the launch type here so every bridge case below
+# describes a stack that could actually run.
+BRIDGE = {"network_mode": "bridge", "default_launch_type": "EC2"}
 
 
 def _ctx(tmp_path: Path, services, ecs_over=None, network=None) -> DeployContext:
@@ -78,7 +84,10 @@ def _web():
 
 def _pair():
     # >1 service so service discovery is emitted at all
-    return {"web": _web(), "api": ServiceSpec(name="api", cpu=256, memory=512, port=8000)}
+    return {
+        "web": _web(),
+        "api": ServiceSpec(name="api", cpu=256, memory=512, port=8000),
+    }
 
 
 class TestAwsvpcRemainsTheDefault:
@@ -147,7 +156,11 @@ class TestValidation:
         dropping them would remove an isolation boundary the author explicitly
         asked for, which is the one failure mode this feature must not have."""
         svc = ServiceSpec(
-            name="web", cpu=256, memory=512, port=80, public=True,
+            name="web",
+            cpu=256,
+            memory=512,
+            port=80,
+            public=True,
             security_groups=["runners"],
         )
         net = {"security_groups": {"runners": {"egress": [{"to": "cidr:0.0.0.0/0"}]}}}
@@ -195,8 +208,12 @@ class TestSizing:
         demands = [
             EC2TaskDemand(name=f"s{i}", cpu_units=0, memory_mib=384) for i in range(30)
         ]
-        awsvpc = auto_size(demands, ladder=[ECSProvider._effective_shape(m6i, True, "awsvpc")])
-        bridge = auto_size(demands, ladder=[ECSProvider._effective_shape(m6i, True, "bridge")])
+        awsvpc = auto_size(
+            demands, ladder=[ECSProvider._effective_shape(m6i, True, "awsvpc")]
+        )
+        bridge = auto_size(
+            demands, ladder=[ECSProvider._effective_shape(m6i, True, "bridge")]
+        )
         assert awsvpc.desired_size == 4  # 30 tasks / 10 ENI slots, +20% headroom
         assert bridge.desired_size < awsvpc.desired_size
         assert bridge.desired_size == 2  # 11,520 MiB of memory, nothing else
@@ -271,6 +288,8 @@ class TestComposesWithTaskGroups:
                         "cluster": "t-cluster",
                         "vpc_cidr": "10.0.0.0/16",
                         "network_mode": "bridge",
+                        # Bridge implies EC2 — see the BRIDGE constant above.
+                        "default_launch_type": "EC2",
                     }
                 },
                 tf_backend_config={"type": "local"},
@@ -300,3 +319,76 @@ class TestComposesWithTaskGroups:
         tf = (self._emit_both(tmp_path) / "services.tf").read_text()
         for c in ("nginx", "django", "postgres", "redis"):
             assert f'name      = "{c}"' in tf
+
+
+class TestBridgeRejectsFargate:
+    """rc-u122 follow-up: Fargate supports awsvpc and nothing else.
+
+    This is the easiest invalid stack to reach by accident, because the launch
+    type defaults to FARGATE — adding a single `network_mode: bridge` line to
+    an otherwise untouched rc.yml produces terraform AWS refuses. Caught at
+    plan time rather than at RegisterTaskDefinition.
+    """
+
+    def _ctx(self, tmp_path, monkeypatch, ecs_extra):
+        import yaml
+        from remote_compose.cli_v2 import build_deploy_context, load_rc_yml
+
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:alpine\n"
+        )
+        rc = tmp_path / "rc.yml"
+        rc.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 2,
+                    "project": "bfg",
+                    "compose_file": "docker-compose.yml",
+                    "provider": "ecs",
+                    "provider_config": {
+                        "ecs": {
+                            "region": "us-west-2",
+                            "vpc_cidr": "10.0.0.0/16",
+                            **ecs_extra,
+                        }
+                    },
+                    "services": {
+                        "web": {"cpu": 256, "memory": 512, "port": 80, "public": True}
+                    },
+                    "terraform": {"backend": {"type": "local"}},
+                }
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        _v, raw, v2 = load_rc_yml(rc)
+        return build_deploy_context(v2, raw, rc)
+
+    def test_bridge_with_default_fargate_is_rejected(self, tmp_path, monkeypatch):
+        import pytest
+
+        from remote_compose.provider.base import ProviderConfigError
+        from remote_compose.provider.ecs.provider import ECSProvider
+
+        ctx = self._ctx(tmp_path, monkeypatch, {"network_mode": "bridge"})
+        with pytest.raises(ProviderConfigError) as exc:
+            ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+        assert "bridge" in str(exc.value) and "EC2 launch type" in str(exc.value)
+
+    def test_bridge_with_ec2_is_accepted(self, tmp_path, monkeypatch):
+        from remote_compose.provider.ecs.provider import ECSProvider
+
+        ctx = self._ctx(
+            tmp_path,
+            monkeypatch,
+            {"network_mode": "bridge", "default_launch_type": "EC2"},
+        )
+        ECSProvider().emit_terraform(ctx, tmp_path / "tf")
+        rendered = (tmp_path / "tf" / "services.tf").read_text()
+        assert 'network_mode             = "bridge"' in rendered
+
+    def test_awsvpc_with_fargate_is_untouched(self, tmp_path, monkeypatch):
+        # The guard must not fire on the default configuration.
+        from remote_compose.provider.ecs.provider import ECSProvider
+
+        ctx = self._ctx(tmp_path, monkeypatch, {})
+        ECSProvider().emit_terraform(ctx, tmp_path / "tf")
