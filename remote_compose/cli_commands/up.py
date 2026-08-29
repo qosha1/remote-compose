@@ -12,7 +12,7 @@ from typing import Optional
 import click
 import yaml
 
-from ._dispatchers import _secrets_push_v2
+from ._dispatchers import _push_existing_secrets_before_apply, _secrets_push_v2
 
 
 @click.command(name="up")
@@ -265,6 +265,24 @@ def up_cmd(
         dispatch_if_v2,
         run_auto_on_deploy_hooks_for_path,
     )
+
+    # rc-mbav: push secret VALUES BEFORE the deploy, not just after it.
+    #
+    # The push below (after dispatch_if_v2) was always too late for a bundle
+    # that gained a NEW key: terraform's apply points aws_ecs_service at the
+    # task def referencing that key, ECS starts placing tasks immediately, and
+    # placement fails with "did not contain json key ..." minutes before this
+    # function gets to push anything. The circuit breaker then rolls back onto
+    # a previous task def whose sibling services the same apply may already
+    # have destroyed — a ~12 minute production outage, observed 2026-08-26.
+    #
+    # rc-1bk's skip_force_roll deferral does NOT cover this. It only holds back
+    # rc's own force-new-deployment; terraform updating the service starts a
+    # rollout on its own.
+    #
+    # This pass skips secrets that do not exist yet (nothing is running against
+    # them), so the post-deploy push below still owns first-apply population.
+    _push_existing_secrets_before_apply(str(target))
 
     if not dispatch_if_v2(
         str(target),

@@ -82,6 +82,7 @@ def test_rc_up_does_not_force_roll_until_secrets_populated(runner, tmp_path):
     rc_yml = _write_v2_stack(tmp_path)
 
     boto_calls: list[tuple[str, str]] = []
+    sm_store: dict[str, str] = {}
 
     def fake_session(profile_name=None, region_name=None):
         sess = MagicMock()
@@ -99,13 +100,23 @@ def test_rc_up_does_not_force_roll_until_secrets_populated(runner, tmp_path):
 
                 client.update_service.side_effect = update_service
             if svc_name == "secretsmanager":
-
+                # rc-mbav: a stateful fake. This used to return "{}" from
+                # get_secret_value no matter what had been pushed, which made
+                # Secrets Manager a black hole — the read-back that now gates
+                # a rollout could never observe its own write. Reflecting the
+                # put is what lets the ordering assertions below mean
+                # something: "pushed" and "readable" are the same fact here,
+                # exactly as they must be before a task def rolls.
                 def put_secret_value(**kw):
                     boto_calls.append(("sm.put_secret_value", kw.get("SecretId", "")))
+                    sm_store[kw.get("SecretId", "")] = kw.get("SecretString", "{}")
                     return {}
 
+                def get_secret_value(**kw):
+                    return {"SecretString": sm_store.get(kw.get("SecretId", ""), "{}")}
+
                 client.put_secret_value.side_effect = put_secret_value
-                client.get_secret_value.return_value = {"SecretString": "{}"}
+                client.get_secret_value.side_effect = get_secret_value
             return client
 
         sess.client.side_effect = client_factory

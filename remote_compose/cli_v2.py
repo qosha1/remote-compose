@@ -914,6 +914,19 @@ def build_deploy_context(
                 security_groups=list(getattr(svc, "security_groups", None) or []),
                 subnet_group=getattr(svc, "subnets", None),
                 iam_role=getattr(svc, "iam_role", None),
+                # rc-1ce9: these two were parsed into ServiceV2 and then
+                # dropped here, because this call names every field by hand
+                # and rc-m2sn/rc-ib01.4 added theirs to the parser and the
+                # renderer without adding them to this list. ServiceSpec's
+                # defaults (essential=True, restart_policy=None) then looked
+                # exactly like "the user didn't set it", so a stack that
+                # declared `essential: false` rendered, planned and applied
+                # with essential=true and reported "No changes".
+                #
+                # test_build_deploy_context_forwards_every_rc_yml_field is the
+                # structural guard that stops the next field from doing this.
+                essential=getattr(svc, "essential", True),
+                restart_policy=getattr(svc, "restart_policy", None),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker

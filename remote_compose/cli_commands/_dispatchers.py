@@ -99,7 +99,115 @@ def _detect_empty_file_secrets(
     return empty
 
 
-def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
+def _secret_exists(sm: Any, sm_name: str) -> bool:
+    """True when the SM secret is present and readable (rc-mbav).
+
+    A denied or throttled read returns False, which makes the pre-apply pass
+    skip it — the provider's blocking check still runs, so a skip here costs
+    ergonomics, never safety.
+    """
+    try:
+        sm.describe_secret(SecretId=sm_name)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _readback_timeout_s() -> float:
+    """Seconds to wait for pushed keys to read back (rc-mbav).
+
+    ``RC_SECRET_READBACK_TIMEOUT_S`` overrides the default. The test suite
+    pins it low so the wait's ORDERING is exercised without the wall clock;
+    production keeps a window wide enough to absorb a slow propagation but
+    narrow enough that a genuinely stuck push is reported, not waited on.
+    """
+    import os
+
+    try:
+        return max(0.0, float(os.environ.get("RC_SECRET_READBACK_TIMEOUT_S", "30")))
+    except ValueError:
+        return 30.0
+
+
+def _wait_for_secret_keys(
+    sm: Any,
+    sm_name: str,
+    keys: list[str],
+    timeout_s: Optional[float] = None,
+) -> bool:
+    """Block until every key in ``keys`` reads back from ``sm_name``.
+
+    rc-mbav. ``put_secret_value`` returning tells us the write was accepted,
+    not that a subsequent reader sees it — and the reader that matters is the
+    ECS agent fetching secrets during task placement, which we cannot poll
+    directly. Reading the keys back ourselves is the closest observable proxy:
+    it is empirical, not a contractual guarantee from AWS, and it is here so
+    that "rc pushed the secret" and "the keys are readable" stop being two
+    different moments a task def rollout can slip between.
+
+    Returns True once every key is visible, False on timeout. Never raises —
+    a flaky read must not fail a push that succeeded.
+    """
+    import json
+    import time
+
+    if timeout_s is None:
+        timeout_s = _readback_timeout_s()
+    deadline = time.monotonic() + timeout_s
+    wanted = set(keys)
+    delay = 0.2
+    while True:
+        try:
+            body = sm.get_secret_value(SecretId=sm_name).get("SecretString") or ""
+            parsed = json.loads(body) if body else {}
+            if isinstance(parsed, dict) and wanted <= set(parsed):
+                return True
+        except Exception:  # noqa: BLE001 — a failed read is "not yet", not fatal
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+        delay = min(delay * 2, 2.0)
+
+
+def _push_existing_secrets_before_apply(config_path: str) -> None:
+    """rc-mbav: push secret VALUES before terraform can roll a task def.
+
+    ``rc up``'s push has always run after the deploy returns, which is after
+    ``terraform apply`` pointed ``aws_ecs_service`` at a task definition
+    referencing the new keys — so ECS started placing tasks against a secret
+    that did not have them yet. Pushing first closes that window.
+
+    Best-effort by design. A secret that does not exist yet cannot be pushed
+    to and does not need to be: terraform is about to create it, so there is
+    no running task to protect and no previous revision to roll back onto.
+    The post-apply push still runs and covers exactly that case. Any failure
+    here degrades to a warning, because the provider's
+    ``verify_secret_keys_readable`` is the check that actually blocks.
+    """
+    loaded = _load_v2_if_present(config_path, strict=False)
+    if loaded is None:
+        return
+    _path, _raw, v2 = loaded
+    if not (v2.secrets or []):
+        return
+    try:
+        _secrets_push_v2(config_path, rollout=False, only_existing=True)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            f"  WARN: pre-apply secrets push skipped ({exc}); "
+            f"the deploy will refuse if any key is missing (rc-mbav).",
+            err=True,
+        )
+
+
+def _secrets_push_v2(
+    config_path: Optional[str],
+    rollout: bool = True,
+    only_existing: bool = False,
+) -> bool:
     """If rc.yml is v2, push file-sourced secrets and return True.
 
     Returns False for v1 so the caller falls back to the legacy pipeline.
@@ -158,6 +266,7 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
 
     project_dir = path.parent
     total_keys = 0
+    pushed_names: list[str] = []
     for sec in file_secrets:
         env_path = Path(sec.path)
         if not env_path.is_absolute():
@@ -171,10 +280,40 @@ def _secrets_push_v2(config_path: Optional[str], rollout: bool = True) -> bool:
             click.echo(f"  {sec.name}: {env_path} has no entries, skipping")
             continue
         sm_name = f"{v2.project}/{sec.name}"
+        if only_existing and not _secret_exists(sm, sm_name):
+            # rc-mbav pre-apply pass: terraform has not created this one yet.
+            # Nothing is running against it, so there is nothing to protect —
+            # the post-apply push populates it.
+            continue
         click.echo(f"  {sec.name} → {sm_name} ({len(body)} keys)...", nl=False)
         sm.put_secret_value(SecretId=sm_name, SecretString=json.dumps(body))
         total_keys += len(body)
-        click.echo(" done")
+        pushed_names.append(sec.name)
+        # rc-mbav: a returned put_secret_value is not proof a later reader
+        # sees the new keys. Read them back before anything rolls a task def
+        # that references them.
+        if not _wait_for_secret_keys(sm, sm_name, list(body)):
+            click.echo(" TIMED OUT", err=True)
+            click.echo(
+                f"  ! {sm_name}: pushed, but the new keys did not read back "
+                f"within the wait. Deploying now risks the rc-mbav rollout "
+                f"failure — re-run `rc secrets push` and confirm before "
+                f"rolling services.",
+                err=True,
+            )
+        else:
+            click.echo(" done")
+
+    if only_existing:
+        # Pre-apply pass. The orphan-key report below reads LIVE task defs,
+        # which this apply is about to replace — running it here would
+        # describe the old topology. The post-apply push reports it.
+        if pushed_names:
+            click.echo(
+                f"  Pre-staged {total_keys} key(s) across "
+                f"{len(pushed_names)} secret(s) before apply (rc-mbav)."
+            )
+        return True
 
     click.echo(f"\n  Pushed {total_keys} keys across {len(file_secrets)} secret(s).")
 

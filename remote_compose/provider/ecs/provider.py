@@ -737,6 +737,29 @@ def _smallest_rollable_max_percent(replicas: int) -> int:
     return math.ceil((replicas + 1) * 100 / replicas)
 
 
+def _live_secret_keys(client: Any, sm_name: str) -> Optional[set[str]]:
+    """JSON keys currently readable in ``sm_name``, or None when unknowable.
+
+    rc-mbav. None means "do not compare": the secret does not exist yet
+    (terraform is about to create it), this principal cannot read it, or the
+    body is not a JSON object. Only a successful read of a JSON object yields
+    a key set, so the caller never blocks a deploy on a failed lookup.
+    """
+    import json
+
+    try:
+        body = client.get_secret_value(SecretId=sm_name).get("SecretString") or ""
+    except Exception:  # noqa: BLE001 — absent / denied / throttled all mean "unknown"
+        return None
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return set(parsed)
+
+
 def _default_session_factory(ctx: DeployContext) -> Any:
     """Return a boto3 Session configured from ctx.provider_config.ecs.
 
@@ -3246,6 +3269,12 @@ class ECSProvider(Provider):
         for _w in warnings:
             self._emit(f"  warning: {_w}")
         self.deploy_preflight(ctx, out_dir)
+        # rc-mbav: refuse the apply if a task def it would register references
+        # a secret key that is not readable yet. Deliberately here — after the
+        # render (which is what determines the referenced keys) and before
+        # ANY terraform call, because the damage is done the moment terraform
+        # points aws_ecs_service at the new revision.
+        self.verify_secret_keys_readable(ctx)
         # rc-ysh: detect held local state lock BEFORE invoking terraform so
         # we surface the holder PID in <1s instead of inheriting terraform's
         # subprocess-output buffering and retry loops.
@@ -3982,6 +4011,115 @@ class ECSProvider(Provider):
         import sys
 
         print(message, file=sys.stderr)
+
+    def required_secret_keys(self, ctx: DeployContext) -> dict[str, list[str]]:
+        """SM secret name -> the JSON keys the emitted task defs reference.
+
+        rc-mbav. For a source=file secret the task-def ``secrets[]`` entries
+        are generated one-per-key from the LOCAL env file (see the
+        ``file_keys`` loop in emit_terraform), so the local file is the
+        authority on what the new task definitions will demand. Names are
+        fully-qualified (``<project>/<secret>``) to match Secrets Manager.
+        """
+        project_dir = ctx.compose_path.parent if ctx.compose_path else Path.cwd()
+        required: dict[str, list[str]] = {}
+        for sec in ctx.secrets or []:
+            if sec.source != "file" or not sec.path:
+                continue
+            file_path = Path(sec.path)
+            if not file_path.is_absolute():
+                file_path = (project_dir / file_path).resolve()
+            try:
+                required[f"{ctx.project}/{sec.name}"] = list(env_file_keys(file_path))
+            except EnvFileError:
+                # emit_terraform raises on this with a better message; the
+                # guard must not be the thing that reports a bad env file.
+                continue
+        return required
+
+    def verify_secret_keys_readable(self, ctx: DeployContext) -> None:
+        """Refuse to apply a task def whose secret keys are not yet readable.
+
+        rc-mbav — this took a production tenant down for ~12 minutes.
+
+        THE RACE. A single apply that ADDS a key to a bundle AND rolls the
+        services referencing it does both in one ``terraform apply``: the new
+        task definition registers and ``aws_ecs_service`` is updated to it, so
+        ECS begins placing tasks IMMEDIATELY — while the new secret value is
+        still on the operator's disk, because ``rc secrets push`` runs after
+        the apply returns. Placement fails with "Retrieved secret from Secrets
+        Manager did not contain json key X", retries exhaust, and the
+        deployment circuit breaker rolls back.
+
+        WHY THE ROLLBACK IS THE SEVERE PART. The rollback target is the
+        PREVIOUS task definition, and the same apply may already have deleted
+        the sibling services it was written against (a task_groups regroup does
+        exactly this). ECS then reaches steady state on a topology that can no
+        longer serve, and the stack sits there returning 502 until someone
+        forces it forward by hand.
+
+        WHY rc-1bk DOES NOT COVER THIS. ``rc up`` already defers rc's own
+        force-roll until after the secrets push, which looks like the same
+        problem. It is not: that deferral only suppresses rc's explicit
+        ``UpdateService --force-new-deployment``. Terraform updating
+        ``aws_ecs_service.task_definition`` inside the apply starts a rollout
+        on its own, several minutes earlier, and no amount of deferring rc's
+        call reaches it.
+
+        This check is a pure read and runs BEFORE apply, so it either passes
+        or fails deterministically — unlike the push-first path, it cannot
+        race. A secret that does not exist yet is SKIPPED, not failed:
+        terraform is about to create it, there are no running tasks to protect
+        and no previous revision to roll back onto. The dangerous case is
+        precisely the other one — an existing secret gaining a new key — which
+        is the shape of the outage.
+        """
+        if os.environ.get("RC_SKIP_SECRET_KEY_CHECK"):
+            return
+        required = self.required_secret_keys(ctx)
+        if not required:
+            return
+        try:
+            client = self.session_factory(ctx).client(
+                "secretsmanager", region_name=_ecs_cfg(ctx).get("region")
+            )
+        except Exception as exc:  # noqa: BLE001 — the checker is not the job
+            self._warn(
+                f"could not check Secrets Manager key readiness ({exc}); "
+                f"proceeding unchecked (rc-mbav)."
+            )
+            return
+
+        missing: dict[str, list[str]] = {}
+        for sm_name, keys in sorted(required.items()):
+            live = _live_secret_keys(client, sm_name)
+            if live is None:
+                # Absent (terraform will create it) or unreadable by this
+                # principal. Either way there is nothing to compare against.
+                continue
+            absent = [k for k in keys if k not in live]
+            if absent:
+                missing[sm_name] = absent
+        if not missing:
+            return
+
+        detail = "\n".join(
+            f"    {name}: {', '.join(keys)}" for name, keys in sorted(missing.items())
+        )
+        raise ProviderConfigError(
+            "refusing to apply: the task definitions this apply would register "
+            "reference Secrets Manager keys that are not in the live secret "
+            "yet, so ECS cannot place the new tasks (rc-mbav).\n\n"
+            "  Missing key(s):\n" + detail + "\n\n"
+            "  Left to run, ECS would fail placement with 'did not contain "
+            "json key ...', exhaust its retries, and the deployment circuit "
+            "breaker would roll back onto the PREVIOUS task definition — which "
+            "this same apply may already have destroyed the siblings for.\n\n"
+            "  Fix: push the values first, then deploy.\n"
+            "      rc secrets push\n\n"
+            "  `rc up` does this for you. Set RC_SKIP_SECRET_KEY_CHECK=1 to "
+            "override (you are accepting the rollback risk above)."
+        )
 
     def deploy_preflight(
         self,
