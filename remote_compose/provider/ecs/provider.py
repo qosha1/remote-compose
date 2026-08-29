@@ -4117,8 +4117,12 @@ class ECSProvider(Provider):
             "this same apply may already have destroyed the siblings for.\n\n"
             "  Fix: push the values first, then deploy.\n"
             "      rc secrets push\n\n"
-            "  `rc up` does this for you. Set RC_SKIP_SECRET_KEY_CHECK=1 to "
-            "override (you are accepting the rollback risk above)."
+            "  `rc up` does this for you before the apply. If that push ALSO "
+            "failed above, this principal likely has DescribeSecret but not "
+            "PutSecretValue — grant it rather than retrying, because the "
+            "remedy above needs the same permission.\n\n"
+            "  Set RC_SKIP_SECRET_KEY_CHECK=1 to override (you are accepting "
+            "the rollback risk above)."
         )
 
     def deploy_preflight(
