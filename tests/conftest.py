@@ -79,6 +79,13 @@ def _hermetic_aws_config_env() -> dict:
 def _isolate_os_environ():
     snapshot = dict(os.environ)
     os.environ.update(_hermetic_aws_config_env())
+    # rc-mbav: the secrets push reads its keys back before letting anything
+    # roll a task def that references them. Against a mocked Secrets Manager
+    # the read-back never satisfies, so the production default would spend its
+    # full window on every test that pushes a secret. Pin it low: the tests
+    # care that the wait HAPPENS in the right place, not how long it lasts.
+    # A test that needs the real budget can override it locally.
+    os.environ.setdefault("RC_SECRET_READBACK_TIMEOUT_S", "0.01")
     try:
         yield
     finally:
