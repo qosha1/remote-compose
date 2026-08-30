@@ -44,7 +44,14 @@ resource "aws_service_discovery_service" "{{ svc.tf_name }}" {
   dns_config {
     namespace_id = {{ service_discovery_namespace_ref }}
     dns_records {
+{%- if network_mode == "bridge" %}
+      # rc-u122: SRV, not A. A bridge task's port is assigned dynamically by
+      # ECS, and an A record carries no port -- a caller would resolve the
+      # host and still have no way to reach the container. SRV carries both.
+      type = "SRV"
+{%- else %}
       type = "A"
+{%- endif %}
       ttl  = 10
     }
     routing_policy = "MULTIVALUE"

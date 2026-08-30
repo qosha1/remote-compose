@@ -1603,6 +1603,76 @@ class ECSProvider(Provider):
                 f"'public' or 'private', got {default_subnet_placement!r}"
             )
 
+        # rc-u122: awsvpc is a CHOICE, not a law. Every awsvpc task takes a
+        # branch ENI, and an m6i.large tops out at 10 of them with trunking —
+        # so on a many-small-services stack the ENI dimension, not memory,
+        # decides the instance count. Measured on a 30-service estate: 4x
+        # m6i.large for 2,904 MiB of actually-used memory, and right-sizing
+        # every reservation moved ZERO boxes because ENI was binding. In
+        # bridge every task shares the host ENI, exactly as `rc dev up` has
+        # always done by running docker compose on the box.
+        #
+        # The default stays awsvpc forever. Bridge trades away per-task
+        # security groups (every task lands on the host ENI under the host
+        # SG), which is an isolation decision only the operator can make.
+        network_mode = ecs_cfg.get("network_mode", "awsvpc")
+        if network_mode not in {"awsvpc", "bridge"}:
+            raise ProviderConfigError(
+                "provider_config.ecs.network_mode must be 'awsvpc' or "
+                f"'bridge', got {network_mode!r}"
+            )
+        if network_mode == "bridge":
+            # Per-task network placement does not exist without a per-task
+            # ENI. Dropping these silently would remove an isolation boundary
+            # the author explicitly asked for, so refuse at plan time instead.
+            _sg = sorted(
+                n
+                for n, sp in ctx.services.items()
+                if getattr(sp, "security_groups", None)
+            )
+            if _sg:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' cannot be "
+                    f"combined with per-service security_groups ({', '.join(_sg)}). "
+                    "In bridge mode every task shares the container instance's "
+                    "ENI and its security group, so a per-task group has "
+                    "nothing to attach to. Either drop network_mode: bridge, "
+                    "or move that isolation to the instance SG."
+                )
+            _sn = sorted(
+                n for n, sp in ctx.services.items() if getattr(sp, "subnet_group", None)
+            )
+            if _sn:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' cannot be "
+                    f"combined with per-service subnets ({', '.join(_sn)}). "
+                    "A bridge task has no ENI of its own, so it is placed by "
+                    "whichever subnet its container instance sits in."
+                )
+            # Fargate supports awsvpc and nothing else. This is the easiest
+            # way to reach an invalid stack by accident, because the launch
+            # type DEFAULTS to FARGATE: adding one line (network_mode: bridge)
+            # to an otherwise untouched rc.yml renders terraform that AWS
+            # rejects. Catch it at plan time with the fix named, rather than
+            # at RegisterTaskDefinition with "network mode not supported".
+            _default_lt = ecs_cfg.get("default_launch_type", "FARGATE")
+            _fargate = sorted(
+                n
+                for n, sp in ctx.services.items()
+                if (getattr(sp, "launch_type", None) or _default_lt) == "FARGATE"
+            )
+            if _fargate:
+                raise ProviderConfigError(
+                    "provider_config.ecs.network_mode: 'bridge' requires the "
+                    f"EC2 launch type, but these services are FARGATE: "
+                    f"{', '.join(_fargate)}. Fargate has no container instance "
+                    "to share an ENI with, so it supports awsvpc only — the "
+                    "ENI-per-task cost bridge exists to avoid is not "
+                    "avoidable on Fargate at all. Either set "
+                    "provider_config.ecs.default_launch_type: EC2 (and give "
+                    "the stack ec2_capacity), or drop network_mode: bridge."
+                )
+
         # Existing-ALB adopt (rc-adopt, D4): reference a live ALB + its HTTPS
         # listener instead of creating one — for adopt-in-place of a stack
         # already fronted by an ALB (e.g. browser-mgr's Copilot ALB + the
@@ -2818,7 +2888,10 @@ class ECSProvider(Provider):
 
         ec2_capacity_cfg = (
             self._resolve_ec2_capacity(
-                ecs_cfg, ec2_demands, eni_trunking=getattr(ctx, "eni_trunking", None)
+                ecs_cfg,
+                ec2_demands,
+                eni_trunking=getattr(ctx, "eni_trunking", None),
+                network_mode=network_mode,
             )
             if has_ec2_service
             else None
@@ -2846,7 +2919,7 @@ class ECSProvider(Provider):
             ec2_capacity_cfg["subnets_ref"] = ec2_placement["subnets_ref"]
             ec2_capacity_cfg["assign_public_ip"] = ec2_placement["assign_public_ip"]
             self._warn_on_ec2_one_off_capacity(
-                ctx, ec2_capacity_cfg, ec2_demands, default_launch_type
+                ctx, ec2_capacity_cfg, ec2_demands, default_launch_type, network_mode
             )
 
         # Backup bucket: when rc.yml v2 declares backup.bucket and it is
@@ -2975,6 +3048,7 @@ class ECSProvider(Provider):
             "shared_capacity_provider": shared_capacity_provider,
             "service_name_prefix": service_name_prefix,
             "has_service_discovery": has_service_discovery,
+            "network_mode": network_mode,
             "ec2_capacity": ec2_capacity_cfg,
             "has_efs": has_efs,
             "has_created_efs": has_created_efs,
@@ -6428,6 +6502,7 @@ class ECSProvider(Provider):
         ecs_cfg: dict,
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
+        network_mode: str = "awsvpc",
     ) -> dict:
         """Merge user-supplied ec2_capacity with auto-sized defaults.
 
@@ -6498,7 +6573,9 @@ class ECSProvider(Provider):
             # modeled and skips this, same as a custom auto_size() ladder.
             known_shape = KNOWN_INSTANCE_SHAPES.get(instance_type)
             if known_shape is not None:
-                effective = self._effective_shape(known_shape, eni_trunking)
+                effective = self._effective_shape(
+                    known_shape, eni_trunking, network_mode
+                )
                 try:
                     check_fixed_shape_capacity(
                         effective,
@@ -6522,20 +6599,32 @@ class ECSProvider(Provider):
             **_resolve_root_volume_options(user_cfg),
             **_resolve_managed_scaling(user_cfg),
         }
-        self._warn_on_shared_root_volume(resolved, ec2_demands, eni_trunking)
+        self._warn_on_shared_root_volume(
+            resolved, ec2_demands, eni_trunking, network_mode
+        )
         self._warn_on_ec2_fleet_pressure(
-            resolved, ec2_demands, eni_trunking, ecs_cfg.get("region")
+            resolved, ec2_demands, eni_trunking, ecs_cfg.get("region"), network_mode
         )
         return resolved
 
     @staticmethod
-    def _effective_shape(shape, eni_trunking: Optional[bool]):
+    def _effective_shape(
+        shape, eni_trunking: Optional[bool], network_mode: str = "awsvpc"
+    ):
         """The shape as it behaves under the resolved trunking state.
 
         with_trunking() is a no-op for an ineligible type, so this is safe to
         apply unconditionally -- which is why the default t3 ladder needs no
         special-casing anywhere.
+
+        rc-u122: under ``network_mode: bridge`` there are no per-task ENIs to
+        run out of, so the dimension is dropped BEFORE trunking is considered
+        -- a trunked ceiling on a mode that allocates no branch interfaces
+        would be a ceiling on nothing, and would keep sizing the fleet from a
+        number that no longer describes it.
         """
+        if network_mode == "bridge":
+            return shape.without_task_enis()
         return shape.with_trunking() if eni_trunking else shape
 
     def _check_trunking_assertion(
@@ -6580,6 +6669,7 @@ class ECSProvider(Provider):
         resolved: dict,
         ec2_demands: list[EC2TaskDemand],
         default_launch_type: str,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag one-off tasks competing for EC2 capacity nothing sized for.
 
@@ -6608,13 +6698,13 @@ class ECSProvider(Provider):
         slots = ""
         if shape is not None:
             eni_slots = self._effective_shape(
-                shape, getattr(ctx, "eni_trunking", None)
+                shape, getattr(ctx, "eni_trunking", None), network_mode
             ).task_eni_slots
             if eni_slots is not None:
                 capacity = eni_slots * int(resolved.get("desired_size") or 1)
                 declared = sum(t.replicas for t in ec2_demands)
                 slots = (
-                    f" This fleet holds about {capacity} awsvpc task(s) against "
+                    f" This fleet holds about {capacity} {network_mode} task(s) against "
                     f"{declared} declared, leaving roughly "
                     f"{max(0, capacity - declared)} slot(s) for one-offs."
                 )
@@ -6636,6 +6726,7 @@ class ECSProvider(Provider):
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
         region: Optional[str] = None,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag EC2 fleets that are correct at rest and wrong during a deploy.
 
@@ -6668,7 +6759,7 @@ class ECSProvider(Provider):
         base_shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
         if base_shape is None:
             return
-        shape = self._effective_shape(base_shape, eni_trunking)
+        shape = self._effective_shape(base_shape, eni_trunking, network_mode)
         pressure = measure_fleet(shape, ec2_demands)
         self._warn_on_eni_bound_fleet(pressure, eni_trunking, region)
         instance_cpu = shape.vcpu * 1024
@@ -6726,6 +6817,7 @@ class ECSProvider(Provider):
         resolved: dict,
         ec2_demands: list[EC2TaskDemand],
         eni_trunking: Optional[bool] = None,
+        network_mode: str = "awsvpc",
     ) -> None:
         """Flag EC2 tasks sharing the AMI's default root volume (rc-hbjb).
 
@@ -6739,16 +6831,22 @@ class ECSProvider(Provider):
         the instance's own primary ENI) — for an awsvpc task that is a hard
         per-instance limit, so it is the honest upper bound on neighbours.
         Unmodeled instance types report nothing rather than guess.
+
+        rc-u122: under bridge there IS no ENI ceiling, so the bound falls back
+        to what the sized fleet packs. Going silent there would be exactly
+        backwards — removing the per-task ENI is what lets a box hold 30 tasks
+        instead of 10, so the shared-disk hazard is at its WORST precisely
+        where the old bound stopped existing.
         """
         if resolved.get("root_volume_size") is not None:
             return
         shape = KNOWN_INSTANCE_SHAPES.get(resolved["instance_type"])
         if shape is None:
             return
-        shape = self._effective_shape(shape, eni_trunking)
+        shape = self._effective_shape(shape, eni_trunking, network_mode)
         eni_ceiling = shape.task_eni_slots
-        if eni_ceiling is None:
-            return
+        if eni_ceiling is None and network_mode != "bridge":
+            return  # unmodeled instance type — report nothing rather than guess
         total_tasks = sum(t.replicas for t in ec2_demands)
         # With trunking the ENI ceiling stops being the real density (m5.xlarge
         # allows 20 tasks but CPU/memory bind long before that), so bound it by
@@ -6756,7 +6854,8 @@ class ECSProvider(Provider):
         # "30 GiB shared 20 ways" for a fleet that will never place 20 tasks on
         # one instance.
         desired = max(1, int(resolved.get("desired_size") or 1))
-        tasks_per_instance = min(eni_ceiling, math.ceil(total_tasks / desired))
+        packed = math.ceil(total_tasks / desired)
+        tasks_per_instance = packed if eni_ceiling is None else min(eni_ceiling, packed)
         neighbours = min(tasks_per_instance, total_tasks)
         if neighbours < 2:
             return
@@ -6767,7 +6866,7 @@ class ECSProvider(Provider):
             f"ECS-optimized AMI's default "
             f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB} GiB root volume — and that "
             f"one disk is SHARED by every task binpacked onto it. This shape "
-            f"holds up to {tasks_per_instance} awsvpc tasks, so a full "
+            f"holds up to {tasks_per_instance} {network_mode} tasks, so a full "
             f"instance leaves roughly {per_task} GiB of scratch per task, not "
             f"{ECS_AMI_DEFAULT_ROOT_VOLUME_GIB}. Unlike Fargate's per-task "
             f"ephemeral_storage this space is not private: one task filling "

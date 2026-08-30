@@ -51,7 +51,7 @@ resource "aws_ecr_repository" "{{ c.tf_name }}" {
 
 resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
   family                   = "${var.project}-{{ svc.name }}"
-  network_mode             = "awsvpc"
+  network_mode             = "{{ network_mode }}"
   requires_compatibilities = ["{{ svc.launch_type }}"]
 {%- if svc.launch_type != "EC2" %}
   cpu                      = "{{ svc.cpu }}"
@@ -355,6 +355,8 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
 {%- endif %}
 {%- endif %}
 
+{%- if network_mode == "awsvpc" %}
+
   network_configuration {
 {%- if svc.declared_subnet_group or svc.declared_security_groups %}
     # Declared-network placement from rc.yml. Both knobs REPLACE rc's
@@ -389,6 +391,13 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
     # outcome, different mechanism, no service-level knob needed.
 {%- endif %}
   }
+{%- else %}
+  # rc-u122: networkMode "bridge" -- no network_configuration block. The
+  # ECS API rejects one outright for any non-awsvpc mode ("Network
+  # Configuration is not valid for the given networkMode"). The task
+  # shares its container instance's ENI, so subnet, security group and
+  # public IP are all properties of the INSTANCE, not of the task.
+{%- endif %}
 
 {%- if has_service_discovery %}
   service_registries {
