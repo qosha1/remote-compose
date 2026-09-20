@@ -182,6 +182,23 @@ class ServiceV2:
     # for multiple hostnames. Each alias adds a cert SAN + R53 record but
     # NOT a listener rule — the ALB default action catches them.
     aliases: list[str] = field(default_factory=list)
+    # Target groups this service registers with IN ADDITION to the one rc
+    # creates on its own load balancer. Each entry is
+    # ``{arn: <target group arn>, container_port: <int>}``.
+    #
+    # Why this exists: rc emits exactly ONE ``load_balancer {}`` block per
+    # service and does not ignore changes to it, so a target group attached
+    # out-of-band — by hand, or by a terraform module alongside rc — is
+    # REMOVED again on the next apply, with the deploy reporting success. Any
+    # load balancer rc does not own (a second, internal one; another team's;
+    # an NLB in front of the same tasks) therefore has to be declared here to
+    # survive. ECS allows a service to register with several target groups.
+    #
+    # rc does not create or validate the target group: the arn names something
+    # owned elsewhere, and its port/protocol/VPC are that owner's business.
+    # container_port must be a port the task actually publishes, or ECS
+    # rejects the service update.
+    extra_target_groups: list[dict[str, Any]] = field(default_factory=list)
     # Override the Dockerfile path used during 'rc deploy' for this service.
     # Path is interpreted RELATIVE TO THE BUILD CONTEXT (matching compose's
     # ``build.dockerfile`` semantics — ImageBuilder joins this to
@@ -414,6 +431,49 @@ class ServiceV2:
                         f"service {self.name!r}: alias {alias!r} duplicates "
                         f"the service's own domain"
                     )
+        if self.extra_target_groups:
+            if not isinstance(self.extra_target_groups, list):
+                raise ConfigError(
+                    f"service {self.name!r}: extra_target_groups must be a list of "
+                    f"{{arn, container_port}} mappings, got "
+                    f"{type(self.extra_target_groups).__name__}"
+                )
+            declared_ports = set()
+            for i, entry in enumerate(self.extra_target_groups):
+                where = f"service {self.name!r}: extra_target_groups[{i}]"
+                if not isinstance(entry, dict):
+                    raise ConfigError(
+                        f"{where} must be a mapping with arn + container_port, got "
+                        f"{type(entry).__name__}"
+                    )
+                unknown = set(entry) - {"arn", "container_port"}
+                if unknown:
+                    raise ConfigError(
+                        f"{where}: unknown key(s) {sorted(unknown)} "
+                        f"(supported: arn, container_port)"
+                    )
+                arn = entry.get("arn")
+                if not isinstance(arn, str) or not arn.startswith("arn:"):
+                    raise ConfigError(
+                        f"{where}: arn must be a target group ARN, got {arn!r}"
+                    )
+                if ":targetgroup/" not in arn:
+                    raise ConfigError(
+                        f"{where}: {arn!r} is not a target group ARN (expected "
+                        f"arn:aws:elasticloadbalancing:...:targetgroup/...)"
+                    )
+                port = entry.get("container_port")
+                if not isinstance(port, int) or isinstance(port, bool) or not (
+                    0 < port < 65536
+                ):
+                    raise ConfigError(
+                        f"{where}: container_port must be a port number, got {port!r}"
+                    )
+                if arn in declared_ports:
+                    raise ConfigError(
+                        f"{where}: target group {arn} is declared more than once"
+                    )
+                declared_ports.add(arn)
         if self.env:
             if not isinstance(self.env, dict):
                 raise ConfigError(
