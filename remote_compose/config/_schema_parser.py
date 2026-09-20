@@ -146,6 +146,10 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             domain=raw.get("domain"),
             # Preserve raw shape so validate() can flag non-list values.
             aliases=raw["aliases"] if "aliases" in raw else [],
+            # Same — preserve raw shape; validate() owns the shape errors.
+            extra_target_groups=(
+                raw["extra_target_groups"] if "extra_target_groups" in raw else []
+            ),
             # rc-e5u.46.1: optional Dockerfile override.
             dockerfile=raw.get("dockerfile"),
             # rc-2r1r: pre-built image, for services compose doesn't define

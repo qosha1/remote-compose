@@ -1100,6 +1100,17 @@ def _task_group_views(
             view[key] = (ingress or {}).get(key)
         # container_name/container_port for the load_balancer block.
         view["ingress_container"] = (ingress or {}).get("name")
+        # extra_target_groups is declared PER SERVICE, but a group renders one
+        # aws_ecs_service, so the blocks of every member are merged and each
+        # entry carries the container that actually publishes the port. Taking
+        # the anchor's alone would silently drop a non-anchor member's
+        # attachment; using the group name as container_name would emit a
+        # container ECS cannot find.
+        view["extra_target_groups"] = [
+            {**entry, "container_name": c["name"]}
+            for c in containers
+            for entry in (c.get("extra_target_groups") or [])
+        ]
         # health_check is a CONTAINER field; a group has no single one. The
         # template reads it off each container instead.
         view["health_check"] = None
@@ -2486,6 +2497,20 @@ class ECSProvider(Provider):
                 # Extra container ports (compose ports[] beyond the primary).
                 # Reachable intra-VPC via the tasks SG; not wired to ALB.
                 "extra_ports": list(spec.extra_ports or []),
+                # Target groups owned outside rc that this service must also
+                # register with (rc-owned ALB aside). Rendered as additional
+                # load_balancer blocks, which is the only form that survives
+                # `terraform apply` — an attachment made out-of-band is removed
+                # again, because rc's aws_ecs_service ignores changes only to
+                # [task_definition]. Applies to private services too: the
+                # target group's own load balancer may be internal.
+                "extra_target_groups": [
+                    {
+                        "arn": entry["arn"],
+                        "container_port": int(entry["container_port"]),
+                    }
+                    for entry in (spec.extra_target_groups or [])
+                ],
                 # Multi-domain routing: when the service declares its own
                 # ALB hostname, it gets a dedicated target group + listener
                 # rule keyed on Host header.

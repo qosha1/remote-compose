@@ -906,6 +906,9 @@ def build_deploy_context(
                 domain=svc.domain,
                 default_target=bool(svc.default_target),
                 aliases=list(svc.aliases or []),
+                extra_target_groups=[
+                    dict(e) for e in (svc.extra_target_groups or [])
+                ],
                 env_file_secret_names=list(per_service_secret_names.get(name, [])),
                 env_from_secret=list(svc.env_from_secret or []),
                 auto_roll=getattr(svc, "auto_roll", True),

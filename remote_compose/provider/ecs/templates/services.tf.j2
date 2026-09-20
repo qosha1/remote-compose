@@ -422,6 +422,25 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
     container_name   = "{{ svc.ingress_container }}"
     container_port   = {{ svc.port }}
   }
+{%- endif %}
+{%- if svc.extra_target_groups is defined and svc.extra_target_groups %}
+{%- for tg in svc.extra_target_groups %}
+
+  # rc.yml services.{{ svc.name }}.extra_target_groups[{{ loop.index0 }}]: a target group
+  # owned OUTSIDE rc (another load balancer — commonly an internal one — or
+  # another stack's). Declared here rather than attached out-of-band because
+  # this resource ignores changes only to [task_definition]: an attachment
+  # terraform cannot see is removed on the next apply, and the deploy still
+  # reports success. rc does not create or validate the target group; its port,
+  # protocol and VPC belong to whoever owns it.
+  load_balancer {
+    target_group_arn = "{{ tg.arn }}"
+    container_name   = "{{ tg.container_name }}"
+    container_port   = {{ tg.container_port }}
+  }
+{%- endfor %}
+{%- endif %}
+{%- if svc.public %}
 
   depends_on = [{% if existing_alb %}aws_lb_listener_rule.{{ svc.tf_name }}{% else %}aws_lb_listener.http{% endif %}]
 {%- endif %}

@@ -78,6 +78,9 @@ class ServiceSpec:
     # compose ports[]. Intra-VPC reachable via the tasks SG without per-
     # port ALB wiring (use this for VNC, devtools, internal-only ports).
     extra_ports: list[int] = field(default_factory=list)
+    # Target groups owned elsewhere that this service must also register with
+    # ({arn, container_port}). See ServiceV2.extra_target_groups.
+    extra_target_groups: list[dict] = field(default_factory=list)
     # Plain environment variables (docker-compose environment:). Flows into
     # the ECS task definition containerDefinitions.environment[].
     env: dict[str, str] = field(default_factory=dict)
