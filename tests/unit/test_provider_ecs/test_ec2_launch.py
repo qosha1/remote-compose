@@ -1327,3 +1327,33 @@ class TestDesiredCapacityIsOwnedByManagedScaling:
         """ignore_changes governs UPDATES. The ASG still has to be born with a
         size, so desired_capacity must still render."""
         assert "desired_capacity    =" in self._capacity_tf(tmp_path)
+
+
+class TestImageCleanup:
+    """EC2 hosts must not keep every image they ever pulled.
+
+    2026-10-16: a startsimpli-prod host filled its 120 GB root volume with
+    old app images (83 GB reclaimable) and the next deploy died with
+    "no space left on device". The ECS agent's defaults delete 5 images
+    every 3 hours, far slower than a busy repo deploys.
+    """
+
+    def _user_data(self, tmp_path):
+        import base64, re
+        out = tmp_path / "tf"
+        ECSProvider().emit_terraform(_ctx(tmp_path, {"web": _svc("web", launch_type="EC2")}), out)
+        cap = (out / "capacity.tf").read_text()
+        return cap
+
+    def test_agent_cleans_images_fast_enough(self, tmp_path):
+        cap = self._user_data(tmp_path)
+        assert "ECS_IMAGE_CLEANUP_INTERVAL=" in cap
+        assert "ECS_IMAGE_MINIMUM_CLEANUP_AGE=" in cap
+        assert "ECS_NUM_IMAGES_DELETE_PER_CYCLE=50" in cap
+        assert "ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=" in cap
+        assert "ECS_DISABLE_IMAGE_CLEANUP=false" in cap
+
+    def test_daily_prune_is_installed_as_a_safety_net(self, tmp_path):
+        cap = self._user_data(tmp_path)
+        assert "docker image prune -af --filter until=24h" in cap
+        assert "/etc/cron.daily/" in cap
