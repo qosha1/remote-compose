@@ -1917,6 +1917,36 @@ class ECSProvider(Provider):
             default_placement_subnets_ref = public_subnet_ids_ref
             default_placement_assign_public_ip = True
 
+        # placement_azs: pin default task placement AND the EC2 ASG to a subset
+        # of AZs without touching the subnets themselves (which carry route
+        # tables, NAT and the ALB). Motivating case: a single stateful task
+        # (postgres) in one AZ with workers in another paid ~500 GB/day of
+        # InterZone transfer. Create-mode only: an adopted VPC's subnets are a
+        # plain id list with no AZ attribute to filter on.
+        placement_azs = ecs_cfg.get("placement_azs")
+        if placement_azs is not None:
+            if (
+                not isinstance(placement_azs, list)
+                or not placement_azs
+                or not all(isinstance(a, str) and a for a in placement_azs)
+            ):
+                raise ProviderConfigError(
+                    "provider_config.ecs.placement_azs must be a non-empty list "
+                    f"of AZ names, got {placement_azs!r}"
+                )
+            if existing_vpc:
+                raise ProviderConfigError(
+                    "provider_config.ecs.placement_azs is only supported when rc "
+                    "creates the VPC; with vpc_id, list the wanted subnets in "
+                    "private_subnet_ids instead"
+                )
+            tier = "private" if default_subnet_placement == "private" else "public"
+            azs = ", ".join(f'"{a}"' for a in placement_azs)
+            default_placement_subnets_ref = (
+                f"[for s in aws_subnet.{tier} : s.id "
+                f"if contains([{azs}], s.availability_zone)]"
+            )
+
         # --- Declared network (rc.yml `network:` / `repositories:`) ---------
         #
         # Standalone, nameable primitives that are NOT derived from a service:
