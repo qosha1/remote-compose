@@ -255,6 +255,34 @@ KNOWN_INSTANCE_SHAPES: dict[str, InstanceShape] = {
         InstanceShape(
             "m6i.metal", vcpu=128, memory_gib=512, max_enis=15, trunked_task_limit=120
         ),
+        # m6a (AMD, x86_64 -- same images and AMI as m6i, ~10% cheaper).
+        # max_enis from `ec2 describe-instance-types` (us-west-2) and
+        # trunked_task_limit from AWS's eni-trunking-supported-instance-types
+        # table, both 2026-10-21. Identical to m6i size for size.
+        InstanceShape(
+            "m6a.large", vcpu=2, memory_gib=8, max_enis=3, trunked_task_limit=10
+        ),
+        InstanceShape(
+            "m6a.xlarge", vcpu=4, memory_gib=16, max_enis=4, trunked_task_limit=20
+        ),
+        InstanceShape(
+            "m6a.2xlarge", vcpu=8, memory_gib=32, max_enis=4, trunked_task_limit=40
+        ),
+        InstanceShape(
+            "m6a.4xlarge", vcpu=16, memory_gib=64, max_enis=8, trunked_task_limit=60
+        ),
+        InstanceShape(
+            "m6a.8xlarge", vcpu=32, memory_gib=128, max_enis=8, trunked_task_limit=90
+        ),
+        InstanceShape(
+            "m6a.12xlarge", vcpu=48, memory_gib=192, max_enis=8, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m6a.16xlarge", vcpu=64, memory_gib=256, max_enis=15, trunked_task_limit=120
+        ),
+        InstanceShape(
+            "m6a.24xlarge", vcpu=96, memory_gib=384, max_enis=15, trunked_task_limit=120
+        ),
         # c5/c6i memory is HALF of the same-size m5/m6i/t3 shape -- e.g.
         # c5.xlarge is 8 GiB, not 16 (the t3.xlarge/m5.xlarge value). Do not
         # collapse these into a shared "xlarge row" across families.
