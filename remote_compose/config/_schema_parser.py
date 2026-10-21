@@ -146,6 +146,8 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             domain=raw.get("domain"),
             # Preserve raw shape so validate() can flag non-list values.
             aliases=raw["aliases"] if "aliases" in raw else [],
+            # Preserve raw shape; validate() owns the shape errors.
+            extra_hosts=raw["extra_hosts"] if "extra_hosts" in raw else [],
             # Same — preserve raw shape; validate() owns the shape errors.
             extra_target_groups=(
                 raw["extra_target_groups"] if "extra_target_groups" in raw else []

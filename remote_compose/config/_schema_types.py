@@ -182,6 +182,12 @@ class ServiceV2:
     # for multiple hostnames. Each alias adds a cert SAN + R53 record but
     # NOT a listener rule — the ALB default action catches them.
     aliases: list[str] = field(default_factory=list)
+    # Extra hostnames routed to this service by its listener rule ONLY: added
+    # to the rule's host_header condition, with no ACM SAN and no Route53
+    # record. For hosts whose DNS and certificate live outside rc (e.g. a
+    # Cloudflare wildcard CNAME'd at the ALB), which on a SHARED adopted
+    # listener cannot fall through to a default action (startsim-bwdx.3.2).
+    extra_hosts: list[str] = field(default_factory=list)
     # Target groups this service registers with IN ADDITION to the one rc
     # creates on its own load balancer. Each entry is
     # ``{arn: <target group arn>, container_port: <int>}``.
@@ -430,6 +436,35 @@ class ServiceV2:
                     raise ConfigError(
                         f"service {self.name!r}: alias {alias!r} duplicates "
                         f"the service's own domain"
+                    )
+        if self.extra_hosts:
+            if not isinstance(self.extra_hosts, list):
+                raise ConfigError(
+                    f"service {self.name!r}: extra_hosts must be a list of FQDNs, "
+                    f"got {type(self.extra_hosts).__name__}"
+                )
+            if not (self.public and self.domain):
+                raise ConfigError(
+                    f"service {self.name!r}: extra_hosts requires public=true and "
+                    f"a domain (they extend that domain's listener rule)"
+                )
+            # AWS allows 5 values per host-header condition; the domain is one.
+            if len(self.extra_hosts) > 4:
+                raise ConfigError(
+                    f"service {self.name!r}: extra_hosts allows at most 4 hosts "
+                    f"(an ALB rule condition takes 5 values, the domain is one), "
+                    f"got {len(self.extra_hosts)}"
+                )
+            for host in self.extra_hosts:
+                if not isinstance(host, str) or not _looks_like_fqdn(host):
+                    raise ConfigError(
+                        f"service {self.name!r}: extra_hosts entry {host!r} is not "
+                        f"a valid FQDN"
+                    )
+                if host == self.domain or host in (self.aliases or []):
+                    raise ConfigError(
+                        f"service {self.name!r}: extra_hosts entry {host!r} "
+                        f"duplicates the service's domain or an alias"
                     )
         if self.extra_target_groups:
             if not isinstance(self.extra_target_groups, list):

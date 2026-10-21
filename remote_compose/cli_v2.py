@@ -906,6 +906,7 @@ def build_deploy_context(
                 domain=svc.domain,
                 default_target=bool(svc.default_target),
                 aliases=list(svc.aliases or []),
+                extra_hosts=list(svc.extra_hosts or []),
                 extra_target_groups=[
                     dict(e) for e in (svc.extra_target_groups or [])
                 ],
