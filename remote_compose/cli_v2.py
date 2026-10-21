@@ -931,6 +931,7 @@ def build_deploy_context(
                 # structural guard that stops the next field from doing this.
                 essential=getattr(svc, "essential", True),
                 restart_policy=getattr(svc, "restart_policy", None),
+                cpu_shares=getattr(svc, "cpu_shares", None),
             )
         else:
             # Compose-only service: derive sensible defaults. type=worker

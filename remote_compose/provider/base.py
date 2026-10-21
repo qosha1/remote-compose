@@ -212,6 +212,9 @@ class ServiceSpec:
     # Opt-in and never auto-defaulted: rc emits offline, so it cannot
     # capability-check the agent version on the operator's behalf.
     restart_policy: Optional[dict[str, Any]] = None
+    # startsim-h2x8y.12: EC2-only container cpu shares (relative weight). See
+    # ServiceV2.cpu_shares.
+    cpu_shares: Optional[int] = None
     # Declared task role (rc.yml `iam_roles:`). A name here makes this
     # service's task definition carry that role instead of the shared
     # ${project}-task role — and therefore none of the grants

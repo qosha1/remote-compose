@@ -1044,6 +1044,41 @@ _GROUP_INGRESS_FIELDS = (
 )
 
 
+def _validate_cpu_shares(
+    services_view: list[dict[str, Any]], ec2_capacity_cfg: Optional[dict[str, Any]]
+) -> None:
+    """startsim-h2x8y.12: container cpu shares are EC2-only and must not block placement.
+
+    On EC2 a container-level cpu value is ALSO subtracted from the instance's
+    registered CPU when ECS places the task. Shares are meant as a relative
+    weight, not a reservation, so the whole stack's shares (x replicas) must fit
+    in HALF of one instance: the other half is the rolling-deploy surge, so a
+    roll never scales out because of cpu.
+    """
+    declared = [sv for sv in services_view if sv.get("cpu_shares")]
+    if not declared:
+        return
+    not_ec2 = [sv["name"] for sv in declared if sv.get("launch_type") != "EC2"]
+    if not_ec2:
+        raise ProviderConfigError(
+            f"cpu_shares is EC2-only (container cpu weight); set on {not_ec2}"
+        )
+    itype = (ec2_capacity_cfg or {}).get("instance_type")
+    shape = KNOWN_INSTANCE_SHAPES.get(itype) if itype else None
+    if shape is None:
+        raise ProviderConfigError(
+            f"cpu_shares needs a known ec2_capacity.instance_type to bound the "
+            f"total, got {itype!r}"
+        )
+    budget = shape.vcpu * 1024 // 2
+    total = sum(int(sv["cpu_shares"]) * int(sv.get("replicas") or 1) for sv in declared)
+    if total > budget:
+        raise ProviderConfigError(
+            f"cpu_shares total {total} exceeds {budget} (half of one {itype}'s "
+            f"{shape.vcpu * 1024} cpu units); shares are weights, scale them down"
+        )
+
+
 def _task_group_views(
     resolved: dict[str, Any],
     services_view: list[dict[str, Any]],
@@ -2494,6 +2529,8 @@ class ECSProvider(Provider):
                 # rc-ib01.4: opt-in per-container restart. None emits nothing,
                 # so no already-deployed task definition changes.
                 "restart_policy": getattr(spec, "restart_policy", None),
+                # startsim-h2x8y.12: container-level cpu shares, EC2 only.
+                "cpu_shares": getattr(spec, "cpu_shares", None),
                 "mounts": svc_mounts,
                 "stateful": stateful,
                 "deployment_min_healthy_percent": deployment.minimum_healthy,
@@ -2955,6 +2992,7 @@ class ECSProvider(Provider):
             if has_ec2_service
             else None
         )
+        _validate_cpu_shares(services_view, ec2_capacity_cfg)
         if ec2_capacity_cfg is not None:
             # rc-e5u.25.5 gave the ASG's instances the same placement a
             # Fargate task ENI gets when its service declares no explicit

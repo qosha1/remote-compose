@@ -197,6 +197,7 @@ def _parse_service(name: str, raw: dict[str, Any]) -> ServiceV2:
             # rc-ib01.4: opt-in per-container restart. None means the block is
             # absent, which emits nothing.
             restart_policy=_parse_restart_policy(name, raw.get("restart_policy")),
+            cpu_shares=_parse_cpu_shares(name, raw.get("cpu_shares")),
         )
     except KeyError as e:
         raise ConfigError(f"service {name!r}: missing required field {e.args[0]!r}")
@@ -447,6 +448,20 @@ VALID_RESTART_POLICY_KEYS = {"enabled", "ignored_exit_codes", "attempt_period"}
 # restartAttemptPeriod of 1800 seconds."
 RESTART_ATTEMPT_PERIOD_MIN = 60
 RESTART_ATTEMPT_PERIOD_MAX = 1800
+
+
+def _parse_cpu_shares(name: str, raw: Any) -> Optional[int]:
+    """Parse ``services.<name>.cpu_shares`` (startsim-h2x8y.12).
+
+    Docker's cpu-shares floor is 2; 10240 is ECS's container cpu ceiling.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 2 <= raw <= 10240:
+        raise ConfigError(
+            f"service {name!r}: cpu_shares must be an integer 2..10240, got {raw!r}"
+        )
+    return raw
 
 
 def _parse_restart_policy(name: str, raw: Any) -> Optional[dict[str, Any]]:
