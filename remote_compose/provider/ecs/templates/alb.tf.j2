@@ -179,7 +179,7 @@ resource "aws_lb_listener_rule" "{{ dsvc.tf_name }}" {
 
   condition {
     host_header {
-      values = ["{{ dsvc.domain }}"]
+      values = ["{{ dsvc.domain }}"{% for h in dsvc.extra_hosts or [] %}, "{{ h }}"{% endfor %}]
     }
   }
 }

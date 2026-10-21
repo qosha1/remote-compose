@@ -106,6 +106,9 @@ class ServiceSpec:
     # catches them. Used when a fronting service (nginx) handles internal
     # routing for multiple hostnames.
     aliases: list[str] = field(default_factory=list)
+    # Extra hostnames for this service's listener rule ONLY (host_header), with
+    # no cert SAN and no R53 record (startsim-bwdx.3.2).
+    extra_hosts: list[str] = field(default_factory=list)
     # Hot-reload source mounts (rc-e5u.45.7+). Each entry has name/source/
     # mount. Provider only materializes these when ctx.dev_mode is True
     # (see rc-e5u.45.8) — production deploys ignore the field entirely.

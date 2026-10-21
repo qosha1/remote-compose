@@ -1037,6 +1037,7 @@ _GROUP_INGRESS_FIELDS = (
     "port",
     "domain",
     "aliases",
+    "extra_hosts",
     "default_target",
     "health_check_path",
     "health_check_grace_period",
@@ -2519,6 +2520,9 @@ class ECSProvider(Provider):
                 # rules; only cert SANs + R53 records. Catch-all default
                 # action carries the traffic.
                 "aliases": list(spec.aliases or []) if spec.public else [],
+                # Host-header-only extra routes for this service's listener rule
+                # (startsim-bwdx.3.2): no SAN, no R53 record.
+                "extra_hosts": list(spec.extra_hosts or []) if spec.public else [],
                 # Explicit ALB catch-all selection (see ServiceSpec.default_target).
                 "default_target": bool(spec.default_target) if spec.public else False,
             }
