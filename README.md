@@ -283,6 +283,8 @@ provider_config:
     #                                             # `network.subnets` group sets
     #                                             # public: true — an adopted
     #                                             # VPC's IGW isn't rc's to name
+    #   nat_subnet_id: subnet-pub-b               # which public subnet gets the
+    #                                             # NAT (default: the first one)
     # In adopt mode, declared `network.subnets` groups must carry explicit
     # `cidrs: [...]`: rc won't carve a block out of a range it doesn't own.
     # rc pre-flights the VPC + subnets against AWS before deploying. In adopt
