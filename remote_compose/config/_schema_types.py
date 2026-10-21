@@ -333,6 +333,11 @@ class ServiceV2:
     # Opt-in and never auto-defaulted: rc emits offline, so it cannot
     # capability-check the agent version on the operator's behalf.
     restart_policy: Optional[dict[str, Any]] = None
+    # startsim-h2x8y.12: EC2-only container-level cpu SHARES (relative weight
+    # under contention, docker --cpu-shares). Task-level cpu stays omitted on
+    # EC2 (startsim-u88y); `cpu` above keeps meaning the Fargate reservation.
+    # None emits nothing, so no existing task definition changes.
+    cpu_shares: Optional[int] = None
     # A name from the top-level ``iam_roles:`` block. When set, this service's
     # task definition carries THAT role instead of the shared
     # ${project}-task role — so it inherits none of the grants

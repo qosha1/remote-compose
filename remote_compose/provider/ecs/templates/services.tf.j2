@@ -105,6 +105,11 @@ resource "aws_ecs_task_definition" "{{ svc.tf_name }}" {
     # you. `rc plan` warns about it.
     essential = false
 {%- endif %}
+{%- if svc.launch_type == "EC2" and c.cpu_shares %}
+    # startsim-h2x8y.12: relative weight under CPU contention (docker
+    # cpu-shares), not a cap. Task-level cpu stays omitted on EC2 (u88y).
+    cpu       = {{ c.cpu_shares }}
+{%- endif %}
 {%- if c.restart_policy %}
     # rc-ib01.4: restart THIS container in place instead of replacing the whole
     # task. Requires ECS container agent 1.86.0+ on EC2 (rc's AMI ships far
