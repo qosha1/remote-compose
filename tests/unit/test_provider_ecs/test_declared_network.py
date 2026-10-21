@@ -501,6 +501,22 @@ class TestExistingVpcAdoptMode:
         # aws_internet_gateway.main does not exist in adopt mode.
         assert "depends_on = [aws_internet_gateway.main]" not in tf
 
+    def test_nat_subnet_id_places_the_nat(self, tmp_path):
+        net = dict(
+            self.OPEN_SG,
+            subnets={"n": {"egress": "nat", "cidrs": ["10.9.2.0/24", "10.9.3.0/24"]}},
+        )
+        tf = self._emit_adopt(tmp_path, net, {"nat_subnet_id": "subnet-b"})["network_declared.tf"]
+        assert 'subnet_id     = "subnet-b"' in tf
+
+    def test_nat_subnet_id_must_be_a_public_subnet(self, tmp_path):
+        net = dict(
+            self.OPEN_SG,
+            subnets={"n": {"egress": "nat", "cidrs": ["10.9.2.0/24", "10.9.3.0/24"]}},
+        )
+        with pytest.raises(ProviderConfigError, match="nat_subnet_id"):
+            self._emit_adopt(tmp_path, net, {"nat_subnet_id": "subnet-nope"})
+
 
 class TestBlockIndependence:
     """The two blocks render into separate files and must not leak into

@@ -1921,7 +1921,20 @@ class ECSProvider(Provider):
             vpc_id_ref = "data.aws_vpc.main.id"
             public_subnet_ids_ref = "local.rc_public_subnet_ids"
             public_subnet_idx_ref = "local.rc_public_subnet_ids[count.index]"
-            public_subnet_first_ref = "local.rc_public_subnet_ids[0]"
+            # The NAT gateway lands in the first public subnet unless
+            # nat_subnet_id names one. Reordering public_subnet_ids to move the
+            # NAT also re-indexes everything else keyed by position (EFS mount
+            # targets), so the NAT gets its own knob.
+            nat_subnet_id = ecs_cfg.get("nat_subnet_id")
+            if nat_subnet_id:
+                if nat_subnet_id not in (ecs_cfg.get("public_subnet_ids") or []):
+                    raise ProviderConfigError(
+                        f"provider_config.ecs.nat_subnet_id {nat_subnet_id!r} must be "
+                        "one of provider_config.ecs.public_subnet_ids"
+                    )
+                public_subnet_first_ref = f'"{nat_subnet_id}"'
+            else:
+                public_subnet_first_ref = "local.rc_public_subnet_ids[0]"
             private_subnet_ids_ref = "local.rc_private_subnet_ids"
             # An adopted VPC's internet gateway is not rc's to name. A declared
             # public subnet group there would need a route to it, so require
