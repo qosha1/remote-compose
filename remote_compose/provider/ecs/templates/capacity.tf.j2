@@ -211,6 +211,13 @@ resource "aws_autoscaling_group" "ec2" {
   # is CREATED with; after that it belongs to ECS.
   wait_for_capacity_timeout = "0"
 
+  # Pair for managed_termination_protection = "ENABLED" on the capacity
+  # provider below: every instance launches protected; ECS unprotects the
+  # ones it empties. force_delete so `rc destroy` (which predrains tasks
+  # first) is not left waiting on instances scale-in can no longer remove.
+  protect_from_scale_in = true
+  force_delete          = true
+
 {%- if ec2_capacity.capacity_type == "ON_DEMAND" %}
   launch_template {
     id      = aws_launch_template.ec2.id
@@ -298,7 +305,12 @@ resource "aws_ecs_capacity_provider" "ec2" {
 
   auto_scaling_group_provider {
     auto_scaling_group_arn = aws_autoscaling_group.ec2.arn
-    managed_termination_protection = "DISABLED"
+    # ENABLED: ECS lifts scale-in protection only from an instance it has
+    # emptied, so managed scale-in can never take a box still running tasks.
+    # DISABLED let the ASG's own termination policy choose, which on a
+    # 2-box fleet can pick the one holding a desired-1 postgres. Requires
+    # protect_from_scale_in on the ASG (AWS rejects it otherwise).
+    managed_termination_protection = "ENABLED"
 
     managed_scaling {
       status                    = "ENABLED"
