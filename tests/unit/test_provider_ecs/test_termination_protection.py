@@ -29,15 +29,19 @@ def _ctx(tmp_path: Path) -> DeployContext:
         project="app",
         compose_path=tmp_path / "docker-compose.yml",
         rc_yml_v2={},
-        provider_config={"ecs": {
-            "region": "us-west-2",
-            "cluster": "c",
-            "vpc_cidr": "10.0.0.0/16",
-            "default_launch_type": "EC2",
-        }},
+        provider_config={
+            "ecs": {
+                "region": "us-west-2",
+                "cluster": "c",
+                "vpc_cidr": "10.0.0.0/16",
+                "default_launch_type": "EC2",
+            }
+        },
         tf_backend_config={"type": "local"},
         working_dir=tmp_path,
-        services={"django": ServiceSpec(name="django", cpu=512, memory=1024, replicas=1)},
+        services={
+            "django": ServiceSpec(name="django", cpu=512, memory=1024, replicas=1)
+        },
     )
 
 
@@ -53,7 +57,7 @@ def _block(tf: str, header: str) -> str:
     while True:
         depth += {"{": 1, "}": -1}.get(tf[i], 0)
         if depth == 0:
-            return tf[start:i + 1]
+            return tf[start : i + 1]
         i += 1
 
 
