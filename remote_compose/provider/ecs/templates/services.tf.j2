@@ -343,6 +343,24 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # <= 100 conflict); rendering it here too would be a duplicate argument.
   availability_zone_rebalancing = "DISABLED"
 {%- endif %}
+{%- elif svc.capacity_type == "SPOT" %}
+
+  # Per-service Fargate Spot. ECS rejects a launch type set together
+  # with a capacity_provider_strategy, so only the strategy is rendered.
+  # FARGATE_SPOT is registered on the cluster in cluster.tf. Spot reclaim
+  # stops the task; the service scheduler starts a replacement.
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight            = 1
+  }
+
+  # The AWS provider requires force_new_deployment = true whenever
+  # capacity_provider_strategy is updated (same reason as the EC2 branch).
+  force_new_deployment = true
+{%- if not svc.stateful and svc.deployment_max_percent <= 100 %}
+
+  availability_zone_rebalancing = "DISABLED"
+{%- endif %}
 {%- else %}
   launch_type     = "FARGATE"
 {%- if not svc.stateful and svc.deployment_max_percent <= 100 %}

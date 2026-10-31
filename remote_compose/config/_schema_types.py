@@ -23,6 +23,10 @@ from ._task_group_types import TaskGroupV2
 
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
 VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
+# Per-service capacity: ON_DEMAND is today's behaviour; SPOT runs the service
+# on FARGATE_SPOT and is valid only with an effective FARGATE launch type.
+# (Distinct from ec2_capacity.capacity_type, which shapes the EC2 ASG.)
+VALID_SERVICE_CAPACITY_TYPES = {"ON_DEMAND", "SPOT"}
 VALID_CAPACITY_TYPES = {"ON_DEMAND", "SPOT", "MIXED"}
 VALID_SECRET_SOURCES = {"file", "env_file_auto", "aws_sm", "k8s_secret", "gcp_sm"}
 VALID_TLS_MODES = {"acm", "cert-manager", "manual"}
@@ -157,6 +161,7 @@ class ServiceV2:
     replicas: int = 1
     type: str = "application"
     launch_type: Optional[str] = None
+    capacity_type: str = "ON_DEMAND"
     health_check_path: Optional[str] = None
     # Container-level readiness check (ECS healthCheck). For workers this is
     # what makes a rolling deploy zero-downtime: ECS keeps old tasks until
@@ -355,6 +360,17 @@ class ServiceV2:
             raise ConfigError(
                 f"service {self.name!r}: launch_type must be one of "
                 f"{sorted(VALID_LAUNCH_TYPES)}, got {self.launch_type!r}"
+            )
+        if self.capacity_type not in VALID_SERVICE_CAPACITY_TYPES:
+            raise ConfigError(
+                f"service {self.name!r}: capacity_type must be one of "
+                f"{sorted(VALID_SERVICE_CAPACITY_TYPES)}, got {self.capacity_type!r}"
+            )
+        if self.capacity_type == "SPOT" and self.launch_type == "EC2":
+            raise ConfigError(
+                f"service {self.name!r}: capacity_type: SPOT needs "
+                f"launch_type: FARGATE (it runs on FARGATE_SPOT), got "
+                f"launch_type: EC2"
             )
         if self.public and self.port is None:
             raise ConfigError(f"service {self.name!r}: public=true requires a port")

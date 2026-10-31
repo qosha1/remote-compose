@@ -831,6 +831,28 @@ provider_config:
   `on_demand_percentage_above_base_capacity = 100 // (spot_weight + 1)`;
   the default `3` works out to 25% on-demand / 75% spot above the
   one-instance floor.
+- **Per-service `capacity_type: SPOT`** — a different key, set on a
+  *service* (not under `ec2_capacity`). It runs that one service on
+  Fargate Spot, e.g. a 4 GB worker in an EC2-default stack that should not
+  force another instance:
+
+  ```yaml
+  services:
+    celery-worker-lathe:
+      launch_type: FARGATE      # required with SPOT, even when
+      capacity_type: SPOT       # default_launch_type is EC2
+      cpu: 1024
+      memory: 4096
+  ```
+
+  Values are `ON_DEMAND` (default, unchanged output) or `SPOT`. SPOT renders
+  `capacity_provider_strategy { capacity_provider = "FARGATE_SPOT" weight = 1 }`
+  and no `launch_type` (ECS rejects both together). It is a config error on
+  a service whose effective launch type is EC2, whether set explicitly or
+  inherited from `default_launch_type`. There is no per-service `MIXED`, no
+  base/weight knob and no on-demand fallback; a reclaimed task is replaced
+  by the service scheduler. The cluster's capacity provider list already
+  includes `FARGATE_SPOT`. Task-group members must agree on the value.
 - **`min` / `desired` / `max`** — ASG sizing. Any of the three you set
   explicitly is honored as-is. Whichever you omit is filled in by
   auto-sizing when `instance_type` is also omitted; otherwise the

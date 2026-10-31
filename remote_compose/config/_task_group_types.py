@@ -66,6 +66,7 @@ UNIFORM_MEMBER_FIELDS = {
     "iam_role": "iam_role",
     "subnet_group": "subnets",
     "ephemeral_storage": "ephemeral_storage",
+    "capacity_type": "capacity_type",
 }
 
 # DERIVED task/service fields are deliberately NOT in the map above, even

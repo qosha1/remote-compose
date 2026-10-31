@@ -48,6 +48,8 @@ class ServiceSpec:
     replicas: int = 1
     type: str = "application"
     launch_type: Optional[str] = None
+    # ON_DEMAND (default) | SPOT. SPOT = FARGATE_SPOT; FARGATE launch type only.
+    capacity_type: str = "ON_DEMAND"
     health_check_path: Optional[str] = None
     # Container-level ECS healthCheck (readiness), as a dict:
     # {command: list[str], interval, timeout, retries, start_period}. Drives

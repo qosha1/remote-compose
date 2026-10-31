@@ -256,6 +256,7 @@ class TestUniformityFieldsAreNotDriftingApart:
         "subnet_group",
         "ephemeral_storage",
         "security_groups",
+        "capacity_type",
     }
 
     def test_every_field_is_covered_somewhere(self):
