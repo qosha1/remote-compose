@@ -1013,6 +1013,7 @@ def _service_prefix(ctx: DeployContext) -> str:
 _GROUP_TASK_FIELDS = (
     "type",
     "launch_type",
+    "capacity_type",
     "replicas",
     "stateful",
     "deployment_min_healthy_percent",
@@ -2233,6 +2234,20 @@ class ECSProvider(Provider):
                     f"got {launch_type!r}"
                 )
 
+            capacity_type = getattr(spec, "capacity_type", None) or "ON_DEMAND"
+            if capacity_type not in {"ON_DEMAND", "SPOT"}:
+                raise ConfigError(
+                    f"service {name!r}: capacity_type must be ON_DEMAND or "
+                    f"SPOT, got {capacity_type!r}"
+                )
+            if capacity_type == "SPOT" and launch_type != "FARGATE":
+                raise ConfigError(
+                    f"service {name!r}: capacity_type: SPOT needs "
+                    f"launch_type: FARGATE (it runs on FARGATE_SPOT), but this "
+                    f"service resolves to launch_type {launch_type} (set "
+                    f"explicitly or inherited from default_launch_type)"
+                )
+
             if spec.ephemeral_storage is not None:
                 if launch_type != "FARGATE":
                     # rc-hbjb: name the EC2-side equivalent HERE. Without it
@@ -2532,6 +2547,7 @@ class ECSProvider(Provider):
                 "health_check": spec.health_check,
                 "health_check_grace_period": effective_grace,
                 "launch_type": launch_type,
+                "capacity_type": capacity_type,
                 # rc-m2sn: containerDefinitions.essential. Default True — ECS's
                 # own default and what the template hardcoded before groups,
                 # so no existing task definition changes. Only load-bearing

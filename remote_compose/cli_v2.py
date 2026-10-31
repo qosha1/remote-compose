@@ -872,6 +872,7 @@ def build_deploy_context(
                 replicas=svc.replicas,
                 type=svc.type,
                 launch_type=svc.launch_type,
+                capacity_type=svc.capacity_type,
                 health_check_path=svc.health_check_path,
                 health_check=(
                     {
