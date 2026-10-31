@@ -853,6 +853,25 @@ provider_config:
   base/weight knob and no on-demand fallback; a reclaimed task is replaced
   by the service scheduler. The cluster's capacity provider list already
   includes `FARGATE_SPOT`. Task-group members must agree on the value.
+- **Per-service `stop_timeout`** — seconds ECS waits between SIGTERM and
+  SIGKILL, rendered as `stopTimeout` on the service's container definition.
+  Use it for a worker that must finish a running job on deploy or Spot
+  reclaim:
+
+  ```yaml
+  services:
+    celery-worker-lathe:
+      stop_timeout: 120         # integer seconds, 2-120
+  ```
+
+  Unset renders nothing (ECS default: 30 s), so existing stacks are
+  unchanged. Anything outside 2-120, or a non-integer (string, bool), is a
+  config error naming the service. 120 is Fargate's documented maximum; EC2
+  documents no upper bound (the agent enforces it), but rc caps both at 120.
+  Task-group members must agree on the value. Changing it re-registers the
+  task definition, except on a stack with
+  `provider_config.ecs.ignore_task_definition_changes: true`, where Terraform
+  ignores `container_definitions` changes by design.
 - **`min` / `desired` / `max`** — ASG sizing. Any of the three you set
   explicitly is honored as-is. Whichever you omit is filled in by
   auto-sizing when `instance_type` is also omitted; otherwise the

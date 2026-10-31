@@ -50,6 +50,8 @@ class ServiceSpec:
     launch_type: Optional[str] = None
     # ON_DEMAND (default) | SPOT. SPOT = FARGATE_SPOT; FARGATE launch type only.
     capacity_type: str = "ON_DEMAND"
+    # ECS containerDefinitions.stopTimeout (seconds, 2-120). None = not rendered.
+    stop_timeout: Optional[int] = None
     health_check_path: Optional[str] = None
     # Container-level ECS healthCheck (readiness), as a dict:
     # {command: list[str], interval, timeout, retries, start_period}. Drives
