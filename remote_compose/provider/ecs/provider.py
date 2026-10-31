@@ -28,6 +28,7 @@ from ...config.v2_schema import (
     resolve_task_groups,
     validate_task_groups,
 )
+from ...config._schema_types import check_stop_timeout
 from ...defaults import VPC_CIDR_DEFAULT
 from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
@@ -2248,6 +2249,8 @@ class ECSProvider(Provider):
                     f"explicitly or inherited from default_launch_type)"
                 )
 
+            check_stop_timeout(name, getattr(spec, "stop_timeout", None))
+
             if spec.ephemeral_storage is not None:
                 if launch_type != "FARGATE":
                     # rc-hbjb: name the EC2-side equivalent HERE. Without it
@@ -2548,6 +2551,7 @@ class ECSProvider(Provider):
                 "health_check_grace_period": effective_grace,
                 "launch_type": launch_type,
                 "capacity_type": capacity_type,
+                "stop_timeout": getattr(spec, "stop_timeout", None),
                 # rc-m2sn: containerDefinitions.essential. Default True — ECS's
                 # own default and what the template hardcoded before groups,
                 # so no existing task definition changes. Only load-bearing

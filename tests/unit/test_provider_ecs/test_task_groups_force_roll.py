@@ -257,6 +257,7 @@ class TestUniformityFieldsAreNotDriftingApart:
         "ephemeral_storage",
         "security_groups",
         "capacity_type",
+        "stop_timeout",
     }
 
     def test_every_field_is_covered_somewhere(self):

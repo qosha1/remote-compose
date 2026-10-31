@@ -67,6 +67,7 @@ UNIFORM_MEMBER_FIELDS = {
     "subnet_group": "subnets",
     "ephemeral_storage": "ephemeral_storage",
     "capacity_type": "capacity_type",
+    "stop_timeout": "stop_timeout",
 }
 
 # DERIVED task/service fields are deliberately NOT in the map above, even

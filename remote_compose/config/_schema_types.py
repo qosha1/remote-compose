@@ -23,6 +23,27 @@ from ._task_group_types import TaskGroupV2
 
 VALID_SERVICE_TYPES = {"application", "worker", "infrastructure", "proxy"}
 VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
+# ECS container stopTimeout. AWS documents 2-120 s for Fargate and no upper
+# bound for EC2 (agent-enforced); rc caps both at the Fargate limit.
+STOP_TIMEOUT_MIN = 2
+STOP_TIMEOUT_MAX = 120
+
+
+def check_stop_timeout(name: str, value: Any) -> None:
+    """Reject anything but an int in 2-120 (a bool is not an int here)."""
+    if value is None:
+        return
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not STOP_TIMEOUT_MIN <= value <= STOP_TIMEOUT_MAX
+    ):
+        raise ConfigError(
+            f"service {name!r}: stop_timeout must be an integer number of "
+            f"seconds in {STOP_TIMEOUT_MIN}-{STOP_TIMEOUT_MAX}, got {value!r}. "
+            f"{STOP_TIMEOUT_MAX} is Fargate's limit; EC2 documents no upper "
+            f"bound, but rc caps both at {STOP_TIMEOUT_MAX}."
+        )
 # Per-service capacity: ON_DEMAND is today's behaviour; SPOT runs the service
 # on FARGATE_SPOT and is valid only with an effective FARGATE launch type.
 # (Distinct from ec2_capacity.capacity_type, which shapes the EC2 ASG.)
@@ -162,6 +183,9 @@ class ServiceV2:
     type: str = "application"
     launch_type: Optional[str] = None
     capacity_type: str = "ON_DEMAND"
+    # ECS containerDefinitions.stopTimeout, seconds between SIGTERM and SIGKILL.
+    # None renders nothing (ECS default 30s).
+    stop_timeout: Optional[int] = None
     health_check_path: Optional[str] = None
     # Container-level readiness check (ECS healthCheck). For workers this is
     # what makes a rolling deploy zero-downtime: ECS keeps old tasks until
@@ -372,6 +396,7 @@ class ServiceV2:
                 f"launch_type: FARGATE (it runs on FARGATE_SPOT), got "
                 f"launch_type: EC2"
             )
+        check_stop_timeout(self.name, self.stop_timeout)
         if self.public and self.port is None:
             raise ConfigError(f"service {self.name!r}: public=true requires a port")
         if self.security_groups is not None:

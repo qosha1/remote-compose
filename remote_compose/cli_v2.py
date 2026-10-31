@@ -873,6 +873,7 @@ def build_deploy_context(
                 type=svc.type,
                 launch_type=svc.launch_type,
                 capacity_type=svc.capacity_type,
+                stop_timeout=svc.stop_timeout,
                 health_check_path=svc.health_check_path,
                 health_check=(
                     {
