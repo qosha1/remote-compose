@@ -26,6 +26,8 @@ def _v2(project="myproj", services=_DEFAULT_SVC) -> SimpleNamespace:
     return SimpleNamespace(
         project=project,
         services=services,
+        provider_config={},
+        task_groups={},
     )
 
 

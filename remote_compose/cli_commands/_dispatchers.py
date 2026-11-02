@@ -346,7 +346,9 @@ def _secrets_push_v2(
         )
 
     if rollout and file_secrets:
-        services = sorted(v2.services.keys()) if v2.services else []
+        # startsim-aojfn: live service names, not compose names -- the same
+        # prefix + task-group rule terraform renders (provider._ecs_service_name).
+        services = _live_service_names(v2)
         if services:
             click.echo(f"\n  Forcing new deployment on {len(services)} service(s)...")
             for svc_name in services:
@@ -358,6 +360,18 @@ def _secrets_push_v2(
                 except Exception as exc:
                     click.echo(f"    {svc_name}: rollout failed — {exc}", err=True)
     return True
+
+
+def _live_service_names(v2) -> list[str]:
+    """Distinct ECS service names for ``v2.services``, as terraform names them.
+
+    A bare compose name is wrong under ``service_name_prefix`` (shared
+    cluster) and under ``task_groups`` (members have no service of their own;
+    the group does). Delegates to the provider's resolver so there is one rule.
+    """
+    from remote_compose.provider.ecs.provider import _ecs_service_names
+
+    return sorted(_ecs_service_names(v2, sorted(v2.services.keys()))) if v2.services else []
 
 
 def _detect_orphan_secret_keys_v2(
@@ -380,7 +394,7 @@ def _detect_orphan_secret_keys_v2(
 
     referenced_by_task_defs: dict[str, set[str]] = {}
     any_query_succeeded = False
-    for svc_name in sorted(v2.services.keys()):
+    for svc_name in _live_service_names(v2):
         try:
             desc = ecs_client.describe_services(
                 cluster=cluster,
