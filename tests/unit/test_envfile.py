@@ -75,3 +75,11 @@ class TestKeys:
     def test_empty_file(self, tmp_path):
         p = _write(tmp_path, "")
         assert keys(p) == []
+
+
+def test_quoted_multiline_value_is_kept_verbatim(tmp_path):
+    from remote_compose.envfile import parse
+    f = tmp_path / ".env"
+    pem = "-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----"
+    f.write_text(f'A=1\nAPNS_KEY_P8="{pem}"\nB=2\n')
+    assert parse(f) == {"A": "1", "APNS_KEY_P8": pem, "B": "2"}

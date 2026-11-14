@@ -30,6 +30,7 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
         export KEY=value
         # comment                (skipped)
         <blank>                  (skipped)
+        KEY="line1\nline2"     (quoted value may span lines)
 
     Raises EnvFileError on missing file, malformed line, or a key that
     isn't a valid POSIX env var name. Values are returned verbatim with
@@ -41,29 +42,48 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
 
     out: dict[str, str] = {}
     with p.open() as f:
-        for line_num, raw in enumerate(f, start=1):
-            line = raw.rstrip("\n").rstrip("\r").strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].lstrip()
-            if "=" not in line:
-                raise EnvFileError(
-                    f"{path}:{line_num}: expected KEY=value, got {raw.rstrip()!r}"
-                )
-            key, value = line.split("=", 1)
-            key = key.strip()
-            if not _KEY_RE.match(key):
-                raise EnvFileError(
-                    f"{path}:{line_num}: invalid env var name {key!r} "
-                    f"(must match [A-Za-z_][A-Za-z0-9_]*)"
-                )
-            if key in out:
-                raise EnvFileError(f"{path}:{line_num}: duplicate key {key!r}")
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            out[key] = value
+        lines = f.readlines()
+    i = 0
+    while i < len(lines):
+        line_num = i + 1
+        raw = lines[i]
+        i += 1
+        line = raw.rstrip("\n").rstrip("\r").strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            raise EnvFileError(
+                f"{path}:{line_num}: expected KEY=value, got {raw.rstrip()!r}"
+            )
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not _KEY_RE.match(key):
+            raise EnvFileError(
+                f"{path}:{line_num}: invalid env var name {key!r} "
+                f"(must match [A-Za-z_][A-Za-z0-9_]*)"
+            )
+        if key in out:
+            raise EnvFileError(f"{path}:{line_num}: duplicate key {key!r}")
+        value = value.strip()
+        # A quoted value that does not close on its own line continues onto the
+        # following lines (multi-line secrets such as PEM keys). Newlines inside
+        # are kept verbatim.
+        if value[:1] in {'"', "'"} and not (len(value) >= 2 and value[-1] == value[0]):
+            q = value[0]
+            end = next(
+                (j for j in range(i, len(lines)) if lines[j].rstrip().endswith(q)),
+                None,
+            )
+            # No closing line anywhere: keep the old behaviour (value verbatim).
+            if end is not None:
+                parts = [value] + [l.rstrip("\n").rstrip("\r") for l in lines[i : end + 1]]
+                i = end + 1
+                value = "\n".join(parts).rstrip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        out[key] = value
     return out
 
 
