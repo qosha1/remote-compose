@@ -9,10 +9,12 @@ Secrets Manager.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Union
 
+JSON_PREFIX = "json:"
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -31,6 +33,7 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
         # comment                (skipped)
         <blank>                  (skipped)
         KEY="line1\nline2"     (quoted value may span lines)
+        KEY=json:"a\nb\"c"    (lossless: any string, JSON-escaped)
 
     Raises EnvFileError on missing file, malformed line, or a key that
     isn't a valid POSIX env var name. Values are returned verbatim with
@@ -81,6 +84,17 @@ def parse(path: Union[str, Path]) -> dict[str, str]:
                 parts = [value] + [l.rstrip("\n").rstrip("\r") for l in lines[i : end + 1]]
                 i = end + 1
                 value = "\n".join(parts).rstrip()
+        if value.startswith(JSON_PREFIX):
+            # Lossless form written by tooling that must carry any value
+            # (newlines, quotes, $, =, unicode): json:<JSON string literal>.
+            try:
+                decoded = json.loads(value[len(JSON_PREFIX):])
+            except ValueError as exc:
+                raise EnvFileError(f"{path}:{line_num}: bad json: value for {key!r}") from exc
+            if not isinstance(decoded, str):
+                raise EnvFileError(f"{path}:{line_num}: json: value for {key!r} must be a string")
+            out[key] = decoded
+            continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
         out[key] = value
