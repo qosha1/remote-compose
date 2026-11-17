@@ -258,6 +258,7 @@ class TestUniformityFieldsAreNotDriftingApart:
         "security_groups",
         "capacity_type",
         "stop_timeout",
+        "placement",
     }
 
     def test_every_field_is_covered_somewhere(self):

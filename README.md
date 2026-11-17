@@ -872,6 +872,22 @@ provider_config:
   task definition, except on a stack with
   `provider_config.ecs.ignore_task_definition_changes: true`, where Terraform
   ignores `container_definitions` changes by design.
+- **Per-service `placement`** — ECS placement strategy for an EC2 service:
+  `binpack` (default, binpack by memory, unchanged) or `spread` (spread by
+  `instanceId`, so tasks land across hosts instead of piling onto the first):
+
+  ```yaml
+  services:
+    web:
+      launch_type: EC2
+      placement: spread
+  ```
+
+  Unset renders exactly what it did before. Any other value, or `spread` on a
+  FARGATE service, is a config error naming the service. Task-group members
+  must agree. Spread is by instanceId, not AZ, so like binpack it keeps ECS AZ
+  rebalancing ineligible; rc still pins `availability_zone_rebalancing =
+  DISABLED` on the service either way.
 - **`min` / `desired` / `max`** — ASG sizing. Any of the three you set
   explicitly is honored as-is. Whichever you omit is filled in by
   auto-sizing when `instance_type` is also omitted; otherwise the
