@@ -28,7 +28,7 @@ from ...config.v2_schema import (
     resolve_task_groups,
     validate_task_groups,
 )
-from ...config._schema_types import check_stop_timeout
+from ...config._schema_types import check_placement, check_stop_timeout
 from ...defaults import VPC_CIDR_DEFAULT
 from ...envfile import EnvFileError, keys as env_file_keys
 from ...terraform.backend import render_backend_block
@@ -1015,6 +1015,7 @@ _GROUP_TASK_FIELDS = (
     "type",
     "launch_type",
     "capacity_type",
+    "placement",
     "replicas",
     "stateful",
     "deployment_min_healthy_percent",
@@ -2250,6 +2251,16 @@ class ECSProvider(Provider):
                 )
 
             check_stop_timeout(name, getattr(spec, "stop_timeout", None))
+            placement = getattr(spec, "placement", None)
+            check_placement(name, placement)
+            if placement == "spread" and launch_type != "EC2":
+                raise ConfigError(
+                    f"service {name!r}: placement: spread needs "
+                    f"launch_type: EC2 (placement strategies do not apply to "
+                    f"FARGATE), but this service resolves to launch_type "
+                    f"{launch_type} (set explicitly or inherited from "
+                    f"default_launch_type)"
+                )
 
             if spec.ephemeral_storage is not None:
                 if launch_type != "FARGATE":
@@ -2552,6 +2563,7 @@ class ECSProvider(Provider):
                 "launch_type": launch_type,
                 "capacity_type": capacity_type,
                 "stop_timeout": getattr(spec, "stop_timeout", None),
+                "placement": placement or "binpack",
                 # rc-m2sn: containerDefinitions.essential. Default True — ECS's
                 # own default and what the template hardcoded before groups,
                 # so no existing task definition changes. Only load-bearing

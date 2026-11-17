@@ -52,6 +52,8 @@ class ServiceSpec:
     capacity_type: str = "ON_DEMAND"
     # ECS containerDefinitions.stopTimeout (seconds, 2-120). None = not rendered.
     stop_timeout: Optional[int] = None
+    # EC2 placement strategy: None/"binpack" (default) | "spread" (by instanceId).
+    placement: Optional[str] = None
     health_check_path: Optional[str] = None
     # Container-level ECS healthCheck (readiness), as a dict:
     # {command: list[str], interval, timeout, retries, start_period}. Drives

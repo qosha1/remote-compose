@@ -68,6 +68,7 @@ UNIFORM_MEMBER_FIELDS = {
     "ephemeral_storage": "ephemeral_storage",
     "capacity_type": "capacity_type",
     "stop_timeout": "stop_timeout",
+    "placement": "placement",
 }
 
 # DERIVED task/service fields are deliberately NOT in the map above, even

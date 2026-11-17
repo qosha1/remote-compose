@@ -318,10 +318,21 @@ resource "aws_ecs_service" "{{ svc.tf_name }}" {
   # service ineligible. Deliberate: bin-packing for density and spreading
   # for AZ resilience pull in opposite directions, and EC2 capacity here
   # optimizes for the former.
+{%- if svc.placement == "spread" %}
+  # placement: spread -- spread tasks across container instances (by
+  # instanceId, NOT AZ), so a second host takes load instead of sitting idle.
+  # Like binpack-first, this is not an AZ spread, so AZ rebalancing stays
+  # ineligible and availability_zone_rebalancing is still pinned DISABLED below.
+  ordered_placement_strategy {
+    type  = "spread"
+    field = "instanceId"
+  }
+{%- else %}
   ordered_placement_strategy {
     type  = "binpack"
     field = "memory"
   }
+{%- endif %}
 {%- if not svc.stateful %}
 
   # rc-5a4g: because rc asks for binpack above, it must also OWN this field.

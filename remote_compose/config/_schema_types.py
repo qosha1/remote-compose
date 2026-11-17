@@ -27,6 +27,9 @@ VALID_LAUNCH_TYPES = {"FARGATE", "EC2"}
 # bound for EC2 (agent-enforced); rc caps both at the Fargate limit.
 STOP_TIMEOUT_MIN = 2
 STOP_TIMEOUT_MAX = 120
+# Per-service ECS placement strategy (EC2 launch type only). binpack = today's
+# binpack by memory; spread = spread by instanceId.
+VALID_PLACEMENTS = ("binpack", "spread")
 
 
 def check_stop_timeout(name: str, value: Any) -> None:
@@ -44,6 +47,19 @@ def check_stop_timeout(name: str, value: Any) -> None:
             f"{STOP_TIMEOUT_MAX} is Fargate's limit; EC2 documents no upper "
             f"bound, but rc caps both at {STOP_TIMEOUT_MAX}."
         )
+
+
+def check_placement(name: str, value: Any) -> None:
+    """Reject anything but the strings 'binpack' / 'spread'."""
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in VALID_PLACEMENTS:
+        raise ConfigError(
+            f"service {name!r}: placement must be one of "
+            f"{', '.join(VALID_PLACEMENTS)}, got {value!r}"
+        )
+
+
 # Per-service capacity: ON_DEMAND is today's behaviour; SPOT runs the service
 # on FARGATE_SPOT and is valid only with an effective FARGATE launch type.
 # (Distinct from ec2_capacity.capacity_type, which shapes the EC2 ASG.)
@@ -186,6 +202,9 @@ class ServiceV2:
     # ECS containerDefinitions.stopTimeout, seconds between SIGTERM and SIGKILL.
     # None renders nothing (ECS default 30s).
     stop_timeout: Optional[int] = None
+    # ECS placement strategy for EC2 services: None/"binpack" (memory binpack,
+    # today's behaviour) or "spread" (spread by instanceId). EC2 only.
+    placement: Optional[str] = None
     health_check_path: Optional[str] = None
     # Container-level readiness check (ECS healthCheck). For workers this is
     # what makes a rolling deploy zero-downtime: ECS keeps old tasks until
@@ -397,6 +416,7 @@ class ServiceV2:
                 f"launch_type: EC2"
             )
         check_stop_timeout(self.name, self.stop_timeout)
+        check_placement(self.name, self.placement)
         if self.public and self.port is None:
             raise ConfigError(f"service {self.name!r}: public=true requires a port")
         if self.security_groups is not None:
